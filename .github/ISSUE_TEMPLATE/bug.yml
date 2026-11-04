@@ -1,0 +1,35 @@
+name: Problem report
+description: Something does not work on a canary build
+body:
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Model and SoC if you know it
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Build
+      description: For example 22.0-Piers_canary_20261103
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you did and what happened
+    validations:
+      required: true
+  - type: input
+    id: nightly
+    attributes:
+      label: Does it also happen on the matching nightly?
+      description: Yes, no, or not tried
+  - type: input
+    id: log
+    attributes:
+      label: Log
+      description: A debug log link, made as in https://wiki.coreelec.org/coreelec:debuglogs
+    validations:
+      required: true
