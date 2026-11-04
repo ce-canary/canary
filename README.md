@@ -4,7 +4,7 @@ Unofficial test builds of larger features and changes for CoreELEC that need wid
 
 Each build is a CoreELEC nightly with our changes on top, and everything here is meant to go upstream to Kodi or be merged into CoreELEC. Builds strictly follow the nightlies and any feature additions or changes leave the canary once landed in CoreELEC. Each release lists the nightly it is based on and what it adds.
 
-These builds are for testing and early feature previews. Despite extensive testing, there may be unexpected issues on devices that are outside my test coverage. Please report problems here or in the Canary builds forum post, since they may come from a change that is not in standard CoreELEC yet.
+These builds are for testing and early feature previews. Despite extensive testing, there may be unexpected issues on devices that are outside my test coverage. Please report problems here or in the [Canary builds forum post](https://discourse.coreelec.org/t/ce-canary-unofficial-test-builds-of-upcoming-features/60378), since they may come from a change that is not in standard CoreELEC yet.
 
 ## Current testflights
 
@@ -92,7 +92,9 @@ Copy a nightly `.tar` to `/storage/.update` and reboot. Your normal add-ons and 
 
 ## Reporting a problem
 
-Follow CoreELEC's [guide to reporting an issue](https://discourse.coreelec.org/t/how-to-report-an-issue-youre-having-with-coreelec/3022) and [debug log instructions](https://wiki.coreelec.org/coreelec:debuglogs). Then open an [issue](https://github.com/ce-canary/canary/issues/new/choose) with your device, the build name, the steps and the link to your log.
+First, [go back to a standard nightly](#going-back-to-a-nightly) and see if the problem is still there. If it is, it isn't from the canary, so report it to CoreELEC as usual. If it only happens on the canary, report it here. Features that only work on the canary can skip this step.
+
+Follow CoreELEC's [guide to reporting an issue](https://discourse.coreelec.org/t/how-to-report-an-issue-youre-having-with-coreelec/3022) and [debug log instructions](https://wiki.coreelec.org/coreelec:debuglogs). Then post in the [forum thread](https://discourse.coreelec.org/t/ce-canary-unofficial-test-builds-of-upcoming-features/60378) or open an [issue](https://github.com/ce-canary/canary/issues/new/choose) with your device, the build name, the steps and the link to your log.
 
 ## Changes by feature
 
