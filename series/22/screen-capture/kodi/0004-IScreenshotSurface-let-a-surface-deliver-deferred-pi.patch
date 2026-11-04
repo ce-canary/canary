@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 22 Oct 2026 18:38:40 -0500
+Subject: [PATCH] IScreenshotSurface: let a surface deliver deferred pixels
+
+---
+ xbmc/application/Application.cpp |  7 +------
+ xbmc/utils/IScreenshotSurface.h  | 20 ++++++++++++++++++++
+ 2 files changed, 21 insertions(+), 6 deletions(-)
+
+diff --git a/xbmc/application/Application.cpp b/xbmc/application/Application.cpp
+--- a/xbmc/application/Application.cpp
++++ b/xbmc/application/Application.cpp
+@@ -0,13 +0,8 @@
+   }
+ 
+   CaptureResult result;
+-  result.pixels =
+-      std::make_shared<CHeapCapturePixels>(std::unique_ptr<uint8_t[]>(surface->TakeBuffer()));
+-  result.width = static_cast<unsigned int>(surface->GetWidth());
+-  result.height = static_cast<unsigned int>(surface->GetHeight());
+-  result.stride = surface->GetStride();
+-  result.format = surface->GetFormat();
+   result.color = GetOutputColorMetadata(*winSystem);
++  surface->TakePixels(request->spec, result);
+   result.content = CaptureContent::COMPOSITE; // this tap is the composite half
+ 
+   captureService->Complete(request, result);
+diff --git a/xbmc/utils/IScreenshotSurface.h b/xbmc/utils/IScreenshotSurface.h
+--- a/xbmc/utils/IScreenshotSurface.h
++++ b/xbmc/utils/IScreenshotSurface.h
+@@ -0,6 +0,12 @@
+ 
+ #pragma once
+ 
++#include "rendering/capture/CapturePixels.h"
++#include "rendering/capture/CaptureTypes.h"
++
++#include <cstdint>
++#include <memory>
++
+ extern "C"
+ {
+ #include <libavutil/pixfmt.h>
+@@ -0,6 +0,20 @@
+     return buffer;
+   }
+ 
++  //! \brief Hand the pixels for spec to result with their size and format; a surface may defer
++  //! the read to Lock(). result arrives tagged as the output; a surface whose pixels are coded
++  //! otherwise retags it.
++  virtual void TakePixels(const KODI::RENDERING::CAPTURE::CaptureSpec& spec,
++                          KODI::RENDERING::CAPTURE::CaptureResult& result)
++  {
++    result.pixels = std::make_shared<KODI::RENDERING::CAPTURE::CHeapCapturePixels>(
++        std::unique_ptr<uint8_t[]>(TakeBuffer()));
++    result.width = static_cast<unsigned int>(m_width);
++    result.height = static_cast<unsigned int>(m_height);
++    result.stride = m_stride;
++    result.format = m_format;
++  }
++
+ protected:
+   int m_width{0};
+   int m_height{0};

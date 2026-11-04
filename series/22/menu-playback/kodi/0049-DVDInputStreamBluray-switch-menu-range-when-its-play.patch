@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 28 Oct 2026 01:34:25 -0500
+Subject: [PATCH] DVDInputStreamBluray: switch menu range when its play item
+ shows
+
+With BD-J notifications held, the disc program draws the pages of a
+play item once its picture is presented. The menu range still switched
+when the play item was read, so the page of the old item was converted
+early and its draws took the range of the new item.
+---
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 27 ++++++++++++++++++-
+ .../DVDInputStreams/DVDInputStreamBluray.h    |  4 +++
+ 2 files changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,6 +0,7 @@
+     m_menu = false;
+     m_isInMainMenu = false;
+     m_playlistLeft = true;
++    m_pendingMenuRange.reset();
+ 
+     if (m_event.param == BLURAY_TITLE_TOP_MENU)
+     {
+@@ -0,6 +0,7 @@
+     ProcessItem(m_playlist);
+     m_titleEndWait = false;
+     m_playlistLeft = true;
++    m_pendingMenuRange.reset();
+     break;
+ 
+   case BD_EVENT_PLAYITEM:
+@@ -0,7 +0,20 @@
+       m_clip = &m_titleInfo->clips[m_event.param];
+ #if (BLURAY_VERSION >= BLURAY_VERSION_CODE(1, 5, 0))
+       if (m_clip->video_stream_count > 0)
+-        UpdateMenuRange(is_hdr_range(m_clip->video_streams[0].dynamic_range_type));
++      {
++        const bool hdr = is_hdr_range(m_clip->video_streams[0].dynamic_range_type);
++        // with notifications held the disc program draws the pages of the item once it is shown
++        if (m_notificationsHeld && m_title && m_title->bdj)
++        {
++          m_pendingMenuRange = hdr;
++          m_pendingMenuRangeStart = static_cast<int64_t>(m_clip->start_time);
++        }
++        else
++        {
++          m_pendingMenuRange.reset();
++          UpdateMenuRange(hdr);
++        }
++      }
+ #endif
+       UpdateClipInfo(m_event.param);
+     }
+@@ -0,6 +0,14 @@
+ #endif
+ }
+ 
++void CDVDInputStreamBluray::UpdatePendingMenuRange(int64_t titleTime)
++{
++  if (!m_pendingMenuRange || titleTime < m_pendingMenuRangeStart)
++    return;
++  UpdateMenuRange(*m_pendingMenuRange);
++  m_pendingMenuRange.reset();
++}
++
+ void CDVDInputStreamBluray::OverlayCallback(const BD_OVERLAY * const ov)
+ {
+ #if(BD_OVERLAY_INTERFACE_VERSION >= 2)
+@@ -0,6 +0,8 @@
+   if (!m_bd || !m_navmode)
+     return;
+ 
++  UpdatePendingMenuRange(titleTime);
++
+   // with notifications held, libbluray is asked again when one is due, after a read or when the
+   // time becomes unknown; a pending start is released only after a read or once all data read
+   // is presented
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,7 @@
+ 
+   void OverlayFlush(int64_t pts);
+   void UpdateMenuRange(bool hdr);
++  void UpdatePendingMenuRange(int64_t titleTime);
+   void OverlayClose();
+   static void OverlayClear(SPlane& plane, int x, int y, int w, int h);
+   static void OverlayInit (SPlane& plane, int w, int h);
+@@ -0,6 +0,9 @@
+     bool m_itemAbandoned{false};
+     //! libbluray holds the BD-J notifications of the read until their picture is presented
+     bool m_notificationsHeld{false};
++    //! the menu range of the last play item read with notifications held, from its title time
++    std::optional<bool> m_pendingMenuRange;
++    int64_t m_pendingMenuRangeStart{0};
+     bool m_presentedLeft{false};
+     bool m_readSinceReport{false};
+     int64_t m_heldDue{-2};

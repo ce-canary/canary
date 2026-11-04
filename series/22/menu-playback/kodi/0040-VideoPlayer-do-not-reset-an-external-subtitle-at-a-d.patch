@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 27 Oct 2026 23:56:24 -0500
+Subject: [PATCH] VideoPlayer: do not reset an external subtitle at a
+ discontinuity
+
+A Blu-ray discontinuity resets the demuxer, and the reset also reached
+the demuxer of an external subtitle file. For a .sup file that reopens
+the file, its streams come back without their source and every later
+subtitle packet is dropped. The file did not change at the clip join.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,8 +0,6 @@
+       // we need to reset the demuxer, probably because the streams have changed
+       if(m_pDemuxer)
+         m_pDemuxer->Reset();
+-      if(m_pSubtitleDemuxer)
+-        m_pSubtitleDemuxer->Reset();
+     }
+     else if (pMsg->IsType(CDVDMsg::PLAYER_SET_AUDIOSTREAM))
+     {

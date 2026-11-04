@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 29 Oct 2026 18:05:47 -0500
+Subject: [PATCH] AMLCodec: skip the close teardown of a decoder that never
+ opened
+
+CloseDecoder resets the poll device, the Dolby Vision and HDR output
+and the video layer from the live driver state, whether or not this
+decoder set any of it up. A decoder dropped before its first packet,
+such as one of a stream change that never ran, then ends the state of
+the decoder that did open.
+---
+ xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp | 5 +++++
+ xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h   | 1 +
+ 2 files changed, 6 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,6 +0,7 @@
+   m_tp_last_frame = std::chrono::system_clock::now();
+   m_decoder_timeout = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_videoDecoderTimeout;
+   m_buffer_level_ready = false;
++  m_setUp = true;
+ 
+   if (!OpenAmlVideo(hints))
+   {
+@@ -0,6 +0,10 @@
+   bool dv_enabled(AmlDisplay->aml_get_drmProperty("dv_enable", DRM_MODE_OBJECT_CRTC));
+   CLog::Log(LOGDEBUG, "CAMLCodec::CloseDecoder");
+ 
++  // the device and the output belong to the last decoder that opened
++  if (!m_setUp)
++    return;
++
+   SetPollDevice(-1);
+ 
+   // never leave vcodec ff/rw or paused.
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+@@ -0,6 +0,7 @@
+   DllLibAmCodec   *m_dll;
+   std::atomic<bool> m_opened;
+   bool             m_drain = false;
++  bool             m_setUp{false};
+   am_private_t    *am_private;
+   CDVDStreamInfo   m_hints;
+   int              m_speed;

@@ -1,0 +1,1592 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 22 Oct 2026 18:39:27 -0500
+Subject: [PATCH] AMLCapture: capture video from the vdin1 v4l2 node
+
+Kodi has no reader for the vdin1 V4L2 node, which delivers the video
+layer after the VPP, DV and HDR cores. The decoder's pictures carry no
+HDR statics. Only the frame metadata store holds them.
+---
+ .../DVDCodecs/Video/AMLFrameMetadata.h        |  32 +
+ xbmc/utils/AMLCapture.cpp                     | 768 ++++++++++++++++++
+ xbmc/utils/AMLCapture.h                       | 110 +++
+ xbmc/utils/AMLCaptureConvert.cpp              | 521 ++++++++++++
+ xbmc/utils/AMLCaptureConvert.h                |  95 +++
+ xbmc/utils/CMakeLists.txt                     |   8 +-
+ 6 files changed, 1532 insertions(+), 2 deletions(-)
+ create mode 100644 xbmc/utils/AMLCapture.cpp
+ create mode 100644 xbmc/utils/AMLCapture.h
+ create mode 100644 xbmc/utils/AMLCaptureConvert.cpp
+ create mode 100644 xbmc/utils/AMLCaptureConvert.h
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLFrameMetadata.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLFrameMetadata.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLFrameMetadata.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLFrameMetadata.h
+@@ -0,3 +0,35 @@
+       static_cast<uint8_t>(light.MaxFALL >> 8), static_cast<uint8_t>(light.MaxFALL & 0xff)};
+   return Base64::Encode(reinterpret_cast<const char*>(out), sizeof(out));
+ }
++
++// the title peak in cd/m2 of the latched statics in ffmpeg's order (ff_determine_signal_peak):
++// MaxCLL, then the mastering display maximum where ff_h2645_sei_to_frame accepts it, else 0
++inline float AMLGetTitlePeak(const AMLFrameMetadata& meta)
++{
++  const std::string cll = Base64::Decode(meta.hdrCll);
++  if (cll.size() >= 4)
++  {
++    const auto* data = reinterpret_cast<const uint8_t*>(cll.data());
++    const int maxCll = (data[0] << 8) | data[1];
++    if (maxCll > 0)
++      return static_cast<float>(maxCll);
++  }
++
++  const std::string mdcv = Base64::Decode(meta.hdrMdcv);
++  if (mdcv.size() < 24)
++    return 0.0f;
++
++  const auto* data = reinterpret_cast<const uint8_t*>(mdcv.data());
++  const auto get32 = [data](size_t p)
++  {
++    return (static_cast<uint32_t>(data[p]) << 24) | (data[p + 1] << 16) | (data[p + 2] << 8) |
++           data[p + 3];
++  };
++  // in 0.0001 cd/m2
++  const uint32_t maxLuminance = get32(16);
++  const uint32_t minLuminance = get32(20);
++  if (maxLuminance < 50000 || maxLuminance > 100000000 || minLuminance > 50000 ||
++      minLuminance >= maxLuminance)
++    return 0.0f;
++  return static_cast<float>(maxLuminance / 10000);
++}
+diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
+new file mode 100644
+--- /dev/null
++++ b/xbmc/utils/AMLCapture.cpp
+@@ -0,0 +0,768 @@
++/*
++ *  Copyright (C) 2026 Team CoreELEC
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#include "utils/AMLCapture.h"
++
++#include "ServiceBroker.h"
++#include "application/ApplicationComponents.h"
++#include "application/ApplicationPlayer.h"
++#include "cores/VideoPlayer/DVDCodecs/Video/AMLFrameMetadata.h"
++#include "cores/VideoPlayer/Interface/StreamInfo.h"
++#include "jobs/JobManager.h"
++#include "settings/Settings.h"
++#include "settings/SettingsComponent.h"
++#include "utils/AMLUtils.h"
++#include "utils/log.h"
++#include "windowing/GraphicContext.h"
++#include "windowing/amlogic/WinSystemAmlogic.h"
++
++#include "platform/linux/SysfsPath.h"
++
++#include <algorithm>
++#include <chrono>
++#include <cmath>
++#include <cstring>
++#include <filesystem>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include <fcntl.h>
++#include <linux/videodev2.h>
++#include <poll.h>
++#include <sys/eventfd.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++namespace
++{
++
++// the first frame after STREAMON came 3.0 to 4.97 output periods later on every tested SoC
++constexpr int FRAME_WAIT_PERIODS = 10;
++// vdin1 has 8 canvas ids and an NV12 buffer takes two
++constexpr unsigned int CAPTURE_BUFFERS = 4;
++// the vdin1 line buffer is 1920 pixels wide; a 2160p output is downscaled 2:1
++constexpr int MAX_CAPTURE_WIDTH = 1920;
++constexpr int MAX_CAPTURE_HEIGHT = 1080;
++// vdin strides each line to 64 pixels but sizes the buffer from the width
++constexpr int CAPTURE_WIDTH_ALIGN = 64;
++// DV player-led, dv2hdr and sdr2hdr frames are already display-mapped
++constexpr float MAPPED_PEAK_NITS = 1000.0f;
++// the grade of a Dolby Vision TV-led signal when the stream carries no HDR statics
++constexpr float TVLED_PEAK_NITS = 4000.0f;
++// the nominal display of ITU-R BT.2100 HLG
++constexpr float HLG_PEAK_NITS = 1000.0f;
++// the range of ITU-R BT.2100 PQ, the peak of a stream that states none
++constexpr float PQ_PEAK_NITS = 10000.0f;
++constexpr uint32_t BUFFER_TYPE = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
++
++// amdv dv_mode and dv_ll_policy values (dolby_vision.h, amdv.h)
++enum class DvMode
++{
++  IPT = 0,
++  IPT_TUNNEL = 1,
++  HDR10 = 2,
++  SDR10 = 3,
++  SDR8 = 4,
++};
++constexpr int DV_LL_YUV422 = 1;
++
++// amvecm hdr_conversion_ctrl values (HDR_OUTPUT_MODE_* in amvecm.h)
++enum class HdrOutput
++{
++  HDR10 = 1,
++  HLG = 2,
++  HDR10PLUS = 3,
++  CUVA_HDR = 4,
++  CUVA_HLG = 5,
++};
++
++struct AMLCaptureDevice
++{
++  std::string path;
++  int input{-1};
++};
++
++AMLCaptureDevice Discover()
++{
++  AMLCaptureDevice device;
++
++  // only vdin nodes are opened: other V4L2 drivers allocate on open
++  std::error_code ec;
++  for (const auto& entry : std::filesystem::directory_iterator("/sys/class/video4linux", ec))
++  {
++    CSysfsPath name{entry.path().string() + "/name"};
++    if (name.Get<std::string>().value_or("") != "vdin_video")
++      continue;
++
++    const std::string path = "/dev/" + entry.path().filename().string();
++    const int fd = open(path.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
++    if (fd < 0)
++      continue;
++
++    v4l2_capability cap{};
++    if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
++        std::string(reinterpret_cast<const char*>(cap.bus_info)) == "vdin1 v4l2")
++    {
++      v4l2_input input{};
++      for (input.index = 0; ioctl(fd, VIDIOC_ENUMINPUT, &input) == 0; input.index++)
++      {
++        const std::string inputName(reinterpret_cast<const char*>(input.name));
++        if (inputName == "VIU1_WB0_VD1")
++        {
++          device.path = path;
++          device.input = static_cast<int>(input.index);
++        }
++      }
++    }
++    close(fd);
++    if (device.input >= 0)
++      break;
++  }
++
++  if (device.input >= 0)
++    CLog::Log(LOGINFO, "CAMLCapture::{}: video capture on {} input {}", __FUNCTION__, device.path,
++              device.input);
++  else
++    CLog::Log(LOGINFO, "CAMLCapture::{}: no vdin1 video capture node", __FUNCTION__);
++  return device;
++}
++
++const AMLCaptureDevice& FindDevice()
++{
++  static const AMLCaptureDevice device = Discover();
++  return device;
++}
++
++// the title peak, else fallback
++float GetPeak(const AMLCaptureSource& source, float fallback)
++{
++  return source.titlePeak > 0 ? source.titlePeak : fallback;
++}
++
++std::mutex s_sessionLock;
++std::weak_ptr<CAMLCapture> s_session;
++
++} // namespace
++
++class CAMLCapture::CStream
++{
++public:
++  enum class Wake
++  {
++    FRAME,
++    STOPPED,
++    TIMEOUT,
++  };
++
++  //! failures log at `logLevel`; `busy` tells whether another vdin1 user holds the node
++  static std::shared_ptr<CStream> Open(int width, int height, int logLevel, bool& busy);
++  ~CStream();
++
++  void Stop();
++  bool Matches(int width, int height) const { return width == m_width && height == m_height; }
++  //! Takes the newest frame vdin1 finished since the last dequeue, false when there is none or
++  //! when that dequeue is older than `maxAge`
++  bool TakeNewest(std::chrono::milliseconds maxAge, unsigned int& index);
++  Wake Wait(int timeoutMs, unsigned int& index);
++  bool Queue(unsigned int index);
++  AMLCaptureImage Image(unsigned int index) const;
++
++private:
++  bool Dequeue(unsigned int& index);
++  bool HasFrame(int timeoutMs, bool& stopped);
++
++  int m_fd{-1};
++  int m_eventFd{-1};
++  int m_width{0};
++  int m_height{0};
++  bool m_streaming{false};
++  std::atomic<bool> m_stopped{false};
++  std::vector<std::pair<void*, size_t>> m_maps;
++  std::chrono::steady_clock::time_point m_dequeued;
++};
++
++std::shared_ptr<CAMLCapture::CStream> CAMLCapture::CStream::Open(int width,
++                                                                 int height,
++                                                                 int logLevel,
++                                                                 bool& busy)
++{
++  const AMLCaptureDevice& device = FindDevice();
++  int index = device.input;
++  if (index < 0)
++    return {};
++
++  auto stream = std::make_shared<CStream>();
++  stream->m_width = width;
++  stream->m_height = height;
++  stream->m_fd = open(device.path.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
++  stream->m_eventFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
++  if (stream->m_fd < 0 || stream->m_eventFd < 0)
++  {
++    CLog::Log(logLevel, "CAMLCapture::{}: cannot open {}: {}", __FUNCTION__, device.path,
++              strerror(errno));
++    return {};
++  }
++
++  if (ioctl(stream->m_fd, VIDIOC_S_INPUT, &index) < 0)
++  {
++    busy = errno == EBUSY;
++    if (!busy)
++      CLog::Log(logLevel, "CAMLCapture::{}: input {} unavailable: {}", __FUNCTION__, index,
++                strerror(errno));
++    return {};
++  }
++
++  v4l2_format format{};
++  format.type = BUFFER_TYPE;
++  format.fmt.pix_mp.width = width;
++  format.fmt.pix_mp.height = height;
++  format.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
++  format.fmt.pix_mp.field = V4L2_FIELD_NONE;
++  format.fmt.pix_mp.num_planes = 1;
++  const size_t frameSize = static_cast<size_t>(width) * height * 3 / 2;
++  if (ioctl(stream->m_fd, VIDIOC_S_FMT, &format) < 0 ||
++      format.fmt.pix_mp.width != static_cast<uint32_t>(width) ||
++      format.fmt.pix_mp.height != static_cast<uint32_t>(height) ||
++      format.fmt.pix_mp.plane_fmt[0].sizeimage < frameSize)
++  {
++    CLog::Log(logLevel, "CAMLCapture::{}: NV12 {}x{} refused", __FUNCTION__, width, height);
++    return {};
++  }
++
++  v4l2_requestbuffers request{};
++  request.count = CAPTURE_BUFFERS;
++  request.type = BUFFER_TYPE;
++  request.memory = V4L2_MEMORY_MMAP;
++  if (ioctl(stream->m_fd, VIDIOC_REQBUFS, &request) < 0 || request.count == 0)
++  {
++    CLog::Log(logLevel, "CAMLCapture::{}: no capture buffers: {}", __FUNCTION__, strerror(errno));
++    return {};
++  }
++
++  for (unsigned int i = 0; i < request.count; i++)
++  {
++    v4l2_plane plane{};
++    v4l2_buffer buffer{};
++    buffer.index = i;
++    buffer.type = BUFFER_TYPE;
++    buffer.memory = V4L2_MEMORY_MMAP;
++    buffer.m.planes = &plane;
++    buffer.length = 1;
++    if (ioctl(stream->m_fd, VIDIOC_QUERYBUF, &buffer) < 0 || plane.length < frameSize)
++      return {};
++
++    void* map =
++        mmap(nullptr, plane.length, PROT_READ, MAP_SHARED, stream->m_fd, plane.m.mem_offset);
++    if (map == MAP_FAILED)
++      return {};
++    stream->m_maps.emplace_back(map, plane.length);
++  }
++
++  for (unsigned int i = 0; i < stream->m_maps.size(); i++)
++  {
++    if (!stream->Queue(i))
++      return {};
++  }
++
++  uint32_t type = BUFFER_TYPE;
++  if (ioctl(stream->m_fd, VIDIOC_STREAMON, &type) < 0)
++  {
++    CLog::Log(logLevel, "CAMLCapture::{}: stream start failed: {}", __FUNCTION__, strerror(errno));
++    return {};
++  }
++  stream->m_streaming = true;
++
++  CLog::Log(LOGINFO, "CAMLCapture::{}: started input {} {}x{}", __FUNCTION__, index, width, height);
++  return stream;
++}
++
++CAMLCapture::CStream::~CStream()
++{
++  Stop();
++  for (const auto& [map, length] : m_maps)
++    munmap(map, length);
++  if (m_fd >= 0)
++    close(m_fd);
++  if (m_eventFd >= 0)
++    close(m_eventFd);
++}
++
++void CAMLCapture::CStream::Stop()
++{
++  if (m_stopped.exchange(true))
++    return;
++
++  if (m_eventFd >= 0)
++  {
++    const uint64_t wake = 1;
++    if (write(m_eventFd, &wake, sizeof(wake)) < 0)
++      CLog::Log(LOGDEBUG, "CAMLCapture::{}: wake failed: {}", __FUNCTION__, strerror(errno));
++  }
++
++  if (m_streaming)
++  {
++    // vdin serializes ioctls on the device lock, so this is safe beside a waiting reader
++    uint32_t type = BUFFER_TYPE;
++    ioctl(m_fd, VIDIOC_STREAMOFF, &type);
++    CLog::Log(LOGINFO, "CAMLCapture::{}: stopped", __FUNCTION__);
++  }
++}
++
++bool CAMLCapture::CStream::Queue(unsigned int index)
++{
++  v4l2_plane plane{};
++  v4l2_buffer buffer{};
++  buffer.index = index;
++  buffer.type = BUFFER_TYPE;
++  buffer.memory = V4L2_MEMORY_MMAP;
++  buffer.m.planes = &plane;
++  buffer.length = 1;
++  return ioctl(m_fd, VIDIOC_QBUF, &buffer) == 0;
++}
++
++bool CAMLCapture::CStream::Dequeue(unsigned int& index)
++{
++  v4l2_plane plane{};
++  v4l2_buffer buffer{};
++  buffer.type = BUFFER_TYPE;
++  buffer.memory = V4L2_MEMORY_MMAP;
++  buffer.m.planes = &plane;
++  buffer.length = 1;
++  if (ioctl(m_fd, VIDIOC_DQBUF, &buffer) < 0)
++    return false;
++
++  m_dequeued = std::chrono::steady_clock::now();
++  index = buffer.index;
++  return true;
++}
++
++bool CAMLCapture::CStream::HasFrame(int timeoutMs, bool& stopped)
++{
++  pollfd fds[] = {{m_fd, POLLIN, 0}, {m_eventFd, POLLIN, 0}};
++  int ret = -1;
++  do
++    ret = poll(fds, 2, timeoutMs);
++  while (ret < 0 && errno == EINTR);
++
++  stopped = m_stopped || (fds[1].revents & POLLIN);
++  return ret > 0 && !stopped && (fds[0].revents & POLLIN) && !(fds[0].revents & POLLERR);
++}
++
++bool CAMLCapture::CStream::TakeNewest(std::chrono::milliseconds maxAge, unsigned int& index)
++{
++  const auto age = std::chrono::steady_clock::now() - m_dequeued;
++
++  // a DQBUF on an empty queue logs in the driver, so every one waits for poll
++  bool stopped = false;
++  size_t done = 0;
++  unsigned int next = 0;
++  while (HasFrame(0, stopped) && Dequeue(next))
++  {
++    if (done++ > 0)
++      Queue(index);
++    index = next;
++  }
++  if (done == 0)
++    return false;
++
++  // vdin1 hands each frame over a vsync late and drops frames once the buffers the reader does
++  // not hold are done, so after that many periods since the last dequeue the newest may be old
++  if (stopped || age >= maxAge)
++  {
++    Queue(index);
++    return false;
++  }
++  return true;
++}
++
++CAMLCapture::CStream::Wake CAMLCapture::CStream::Wait(int timeoutMs, unsigned int& index)
++{
++  const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
++  for (;;)
++  {
++    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
++                          end - std::chrono::steady_clock::now())
++                          .count();
++    bool stopped = false;
++    if (!HasFrame(static_cast<int>(std::max<int64_t>(left, 0)), stopped))
++      return stopped ? Wake::STOPPED : Wake::TIMEOUT;
++
++    if (Dequeue(index))
++      return Wake::FRAME;
++    if (left <= 0)
++      return Wake::TIMEOUT;
++  }
++}
++
++AMLCaptureImage CAMLCapture::CStream::Image(unsigned int index) const
++{
++  // single-plane NV12: the chroma plane follows the luma plane at the same stride
++  AMLCaptureImage image;
++  image.format = AV_PIX_FMT_NV12;
++  image.width = m_width;
++  image.height = m_height;
++  image.data[0] = static_cast<uint8_t*>(m_maps[index].first);
++  image.data[1] = image.data[0] + static_cast<size_t>(m_width) * m_height;
++  image.linesize[0] = m_width;
++  image.linesize[1] = m_width;
++  return image;
++}
++
++std::shared_ptr<CAMLCapture> CAMLCapture::Get()
++{
++  std::lock_guard lock(s_sessionLock);
++
++  auto session = s_session.lock();
++  if (!session)
++  {
++    session = std::make_shared<CAMLCapture>();
++    s_session = session;
++  }
++  return session;
++}
++
++std::shared_ptr<CAMLCapture> CAMLCapture::GetActive()
++{
++  std::lock_guard lock(s_sessionLock);
++
++  return s_session.lock();
++}
++
++void CAMLCapture::GetCaptureSize(int& width, int& height)
++{
++  const RESOLUTION_INFO screen = CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo();
++  const int screenWidth = std::max(screen.iScreenWidth, 1);
++  const int screenHeight = std::max(screen.iScreenHeight, 1);
++  const float scale = std::min({1.0f, static_cast<float>(MAX_CAPTURE_WIDTH) / screenWidth,
++                                static_cast<float>(MAX_CAPTURE_HEIGHT) / screenHeight});
++  width = static_cast<int>(screenWidth * scale) & ~(CAPTURE_WIDTH_ALIGN - 1);
++  height = static_cast<int>(screenHeight * scale) & ~1;
++}
++
++CAMLCapture::CAMLCapture()
++{
++  if (auto* winSystem = dynamic_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem()))
++    winSystem->Register(this);
++}
++
++CAMLCapture::~CAMLCapture()
++{
++  if (auto* winSystem = dynamic_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem()))
++    winSystem->Unregister(this);
++}
++
++void CAMLCapture::OnLostDisplay()
++{
++  std::shared_ptr<CStream> stream;
++  {
++    std::lock_guard lock(m_lock);
++    m_displayLost = true;
++    stream = TakeStream();
++  }
++  Close(std::move(stream));
++}
++
++void CAMLCapture::OnResetDisplay()
++{
++  std::lock_guard lock(m_lock);
++
++  m_displayLost = false;
++}
++
++void CAMLCapture::Configure(const AMLCaptureSource& source)
++{
++  std::lock_guard lock(m_lock);
++
++  m_source = source;
++  m_staticsMeta.reset();
++  m_presented = false;
++  m_busy = false;
++}
++
++void CAMLCapture::SetPresented()
++{
++  m_presented = true;
++}
++
++std::shared_ptr<CAMLCapture::CStream> CAMLCapture::TakeStream()
++{
++  if (m_stream)
++    m_closing++;
++  return std::move(m_stream);
++}
++
++void CAMLCapture::Close(std::shared_ptr<CStream> stream)
++{
++  if (!stream)
++    return;
++
++  stream->Stop();
++  stream.reset();
++
++  std::lock_guard lock(m_lock);
++  m_closing--;
++  m_closed.notify_all();
++}
++
++std::shared_ptr<void> CAMLCapture::Lease(int width, int height)
++{
++  std::lock_guard lock(m_lock);
++
++  m_leases++;
++  if (width > 0 && height > 0)
++    m_continuousSizes.emplace_back(width, height);
++  return std::shared_ptr<void>(nullptr,
++                               [weak = weak_from_this(), width, height](void*)
++                               {
++                                 if (const auto session = weak.lock())
++                                   session->ReleaseLease(width, height);
++                               });
++}
++
++void CAMLCapture::ReleaseLease(int width, int height)
++{
++  {
++    std::lock_guard lock(m_lock);
++    const auto it = std::find(m_continuousSizes.begin(), m_continuousSizes.end(),
++                              std::make_pair(width, height));
++    if (it != m_continuousSizes.end())
++      m_continuousSizes.erase(it);
++    if (--m_leases > 0 || !m_stream)
++      return;
++  }
++
++  // a lease can end on the render thread, which makes no stream ioctls; the job holds the
++  // session, so its destructor does not stop the stream there either
++  CServiceBroker::GetJobManager()->Submit(
++      [session = shared_from_this()]
++      {
++        std::shared_ptr<CStream> stream;
++        {
++          std::lock_guard lock(session->m_lock);
++          if (session->m_leases > 0)
++            return;
++          stream = session->TakeStream();
++        }
++        session->Close(std::move(stream));
++      });
++}
++
++bool CAMLCapture::CanRead() const
++{
++  if (m_displayLost)
++    return false;
++  return m_presented && !m_busy;
++}
++
++bool CAMLCapture::Read(int width, int height, const ReadFunc& use)
++{
++  std::lock_guard read(m_readLock);
++
++  const float fps = CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
++  const int waitMs =
++      static_cast<int>(std::ceil(FRAME_WAIT_PERIODS * 1000.0f / std::max(fps, 1.0f)));
++  const std::chrono::milliseconds maxAge(
++      static_cast<int>((CAPTURE_BUFFERS - 2) * 1000.0f / std::max(fps, 1.0f)));
++  bool restarted = false;
++  for (;;)
++  {
++    std::shared_ptr<CStream> stream;
++    std::shared_ptr<CStream> stale;
++    AMLCaptureSource source;
++    // the store lock is never taken under m_lock
++    AMLFrameMetadataPtr meta = CAMLFrameMetadataStore::GetInstance().Get();
++    {
++      std::lock_guard lock(m_lock);
++      if (!CanRead())
++        return false;
++      for (const auto& [continuousWidth, continuousHeight] : m_continuousSizes)
++      {
++        width = std::max(width, continuousWidth);
++        height = std::max(height, continuousHeight);
++      }
++      if (m_stream && !m_stream->Matches(width, height))
++        stale = TakeStream();
++      stream = m_stream;
++      UpdateStatics(std::move(meta));
++      source = m_source;
++    }
++    Close(std::move(stale));
++
++    if (!stream)
++    {
++      {
++        std::unique_lock lock(m_lock);
++        m_closed.wait(lock, [this] { return m_closing == 0; });
++        if (!CanRead())
++          return false;
++      }
++
++      bool busy = false;
++      const int logLevel = m_openFailed ? LOGDEBUG : LOGWARNING;
++      stream = CStream::Open(width, height, logLevel, busy);
++      if (!busy)
++        m_openFailed = !stream;
++
++      std::lock_guard lock(m_lock);
++      if (busy && !m_busy)
++        CLog::Log(LOGWARNING, "CAMLCapture::{}: another vdin1 user holds the node", __FUNCTION__);
++      m_busy = busy;
++      if (!stream)
++        return false;
++      if (!CanRead())
++        return false;
++      m_stream = stream;
++    }
++
++    unsigned int index = 0;
++    const CStream::Wake wake =
++        stream->TakeNewest(maxAge, index) ? CStream::Wake::FRAME : stream->Wait(waitMs, index);
++    if (wake == CStream::Wake::FRAME)
++    {
++      AMLCaptureFrame frame;
++      frame.color = GetSignal(source);
++      frame.image = stream->Image(index);
++      const bool ok = use(frame, m_convert);
++      stream->Queue(index);
++      return ok;
++    }
++    if (wake == CStream::Wake::STOPPED)
++      return false;
++
++    // another vdin user can stop the stream underneath us: restart it once, then drop it
++    {
++      std::lock_guard lock(m_lock);
++      if (m_stream != stream)
++        return false;
++      stale = TakeStream();
++    }
++    stream.reset();
++    Close(std::move(stale));
++    if (restarted)
++    {
++      CLog::Log(LOGWARNING, "CAMLCapture::{}: no frame in {} ms, stream dropped", __FUNCTION__,
++                waitMs);
++      return false;
++    }
++    restarted = true;
++    CLog::Log(LOGWARNING, "CAMLCapture::{}: no frame in {} ms, restarting the stream", __FUNCTION__,
++              waitMs);
++  }
++}
++
++void CAMLCapture::UpdateStatics(AMLFrameMetadataPtr meta)
++{
++  if (meta == m_staticsMeta)
++    return;
++
++  // the metadata object changes with the dynamic payloads, the statics rarely
++  if (!meta || !m_staticsMeta || meta->hdrMdcv != m_staticsMeta->hdrMdcv ||
++      meta->hdrCll != m_staticsMeta->hdrCll)
++    m_source.titlePeak = meta ? AMLGetTitlePeak(*meta) : 0.0f;
++  m_staticsMeta = std::move(meta);
++}
++
++AMLCaptureColor CAMLCapture::GetSignal(const AMLCaptureSource& source) const
++{
++  AMLCaptureColor color;
++
++  auto* winSystem = dynamic_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem());
++  CAMLDisplay* display = winSystem ? winSystem->GetAmlDisplay() : nullptr;
++  if (!display)
++    return color;
++
++  bool sourcePQ = source.transfer == AVCOL_TRC_SMPTE2084;
++  bool sourceHLG = source.transfer == AVCOL_TRC_ARIB_STD_B67;
++  // hdr2sdr and sdr2hdr rewrite the stream colour to the output colour; the demuxer keeps the type
++  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
++  if (!source.dolbyVision && (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_HDR2SDR) ||
++                              settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_SDR2HDR)))
++  {
++    const auto& components = CServiceBroker::GetAppComponents();
++    const auto appPlayer = components.GetComponent<CApplicationPlayer>();
++    VideoStreamInfo stream;
++    appPlayer->GetVideoStreamInfo(CURRENT_STREAM, stream);
++    if (stream.valid && (aml_convert_to_sdr(stream.hdrType) || aml_convert_to_hdr(stream.hdrType)))
++    {
++      sourceHLG = stream.hdrType == StreamHdrType::HDR_TYPE_HLG;
++      sourcePQ = stream.hdrType != StreamHdrType::HDR_TYPE_NONE && !sourceHLG;
++    }
++  }
++  bool mapped = !sourcePQ;
++
++  // hdr_conversion_ctrl does not follow the DV core, so it is read only without DV; under DV,
++  // vdin1 sees the core3 input in every mode
++  if (display->aml_get_drmProperty("dv_enable", DRM_MODE_OBJECT_CRTC) == 1 &&
++      display->aml_get_drmProperty("dv_video_on", DRM_MODE_OBJECT_CRTC) == 1)
++  {
++    switch (static_cast<DvMode>(display->aml_get_drmProperty("dv_mode", DRM_MODE_OBJECT_CRTC)))
++    {
++      case DvMode::IPT:
++      case DvMode::IPT_TUNNEL:
++        if (display->aml_get_drmProperty("dv_ll_policy", DRM_MODE_OBJECT_CRTC) >= DV_LL_YUV422)
++        {
++          color.signal = AMLCaptureSignal::DV_LL;
++          mapped = true;
++        }
++        else
++          color.signal = AMLCaptureSignal::DV_TV_LED;
++        break;
++      case DvMode::HDR10:
++        color.signal = AMLCaptureSignal::DV_HDR10;
++        mapped = true;
++        break;
++      case DvMode::SDR10:
++      case DvMode::SDR8:
++        color.signal = AMLCaptureSignal::DV_SDR;
++        break;
++      default:
++        if (sourcePQ)
++          color.signal = AMLCaptureSignal::PQ;
++        else if (sourceHLG)
++          color.signal = AMLCaptureSignal::HLG;
++        break;
++    }
++  }
++  else
++  {
++    switch (static_cast<HdrOutput>(
++        display->aml_get_drmProperty("hdr_conversion_ctrl", DRM_MODE_OBJECT_CRTC)))
++    {
++      case HdrOutput::HDR10:
++      case HdrOutput::HDR10PLUS:
++      case HdrOutput::CUVA_HDR:
++        color.signal = AMLCaptureSignal::PQ;
++        break;
++      case HdrOutput::HLG:
++      case HdrOutput::CUVA_HLG:
++        color.signal = AMLCaptureSignal::HLG;
++        break;
++      default:
++        break;
++    }
++  }
++
++  switch (color.signal)
++  {
++    case AMLCaptureSignal::PQ:
++    case AMLCaptureSignal::DV_LL:
++    case AMLCaptureSignal::DV_HDR10:
++      color.luminance = mapped ? MAPPED_PEAK_NITS : GetPeak(source, PQ_PEAK_NITS);
++      break;
++    case AMLCaptureSignal::HLG:
++      color.luminance = HLG_PEAK_NITS;
++      break;
++    case AMLCaptureSignal::DV_TV_LED:
++      color.luminance = GetPeak(source, source.dolbyVision ? TVLED_PEAK_NITS : MAPPED_PEAK_NITS);
++      break;
++    default:
++      break;
++  }
++  return color;
++}
+diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
+new file mode 100644
+--- /dev/null
++++ b/xbmc/utils/AMLCapture.h
+@@ -0,0 +0,110 @@
++/*
++ *  Copyright (C) 2026 Team CoreELEC
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#pragma once
++
++#include "guilib/DispResource.h"
++#include "utils/AMLCaptureConvert.h"
++
++#include <atomic>
++#include <condition_variable>
++#include <functional>
++#include <memory>
++#include <mutex>
++#include <utility>
++#include <vector>
++
++struct AMLFrameMetadata;
++
++//! What the renderer knows about the playing video, and the title peak of the frame on screen
++struct AMLCaptureSource
++{
++  bool dolbyVision{false};
++  AVColorTransferCharacteristic transfer{AVCOL_TRC_UNSPECIFIED};
++  //! in cd/m2 from the HDR statics, 0 without them
++  float titlePeak{0.0f};
++};
++
++//! A vdin1 frame, valid only inside CAMLCapture::Read
++struct AMLCaptureFrame
++{
++  AMLCaptureImage image;
++  AMLCaptureColor color;
++};
++
++//! \brief The process-wide capture session on the vdin1 V4L2 node: video after the VPP and the
++//! DV and HDR cores, without the GUI.
++//!
++//! The renderer owns the session. The stream starts on the first read and stops when the last
++//! lease ends, on OnLostDisplay and when the renderer drops the session. Only OnLostDisplay and
++//! the destructor make ioctls on the calling thread; everything else runs on the consumer thread.
++class CAMLCapture : public IDispResource, public std::enable_shared_from_this<CAMLCapture>
++{
++public:
++  using ReadFunc = std::function<bool(const AMLCaptureFrame& frame, CAMLCaptureConvert& convert)>;
++
++  //! the session, created when no renderer holds one
++  static std::shared_ptr<CAMLCapture> Get();
++  //! the session a renderer holds, if any
++  static std::shared_ptr<CAMLCapture> GetActive();
++  //! the largest capture size for the current output mode
++  static void GetCaptureSize(int& width, int& height);
++
++  CAMLCapture();
++  ~CAMLCapture() override;
++
++  void OnLostDisplay() override;
++  void OnResetDisplay() override;
++
++  void Configure(const AMLCaptureSource& source);
++  void SetPresented();
++  bool IsPresented() const { return m_presented; }
++
++  //! Keeps the stream running until the last lease is released. A continuous consumer passes
++  //! the stream size it reads at, which the stream keeps while the lease lasts.
++  std::shared_ptr<void> Lease(int width = 0, int height = 0);
++
++  //! Consumer thread: take the newest frame of a stream of at least width x height, or of the
++  //! continuous size when larger, else wait for the next one, and run `use` on it. A size change
++  //! restarts the stream. A wait ends after a bound of output frame periods.
++  bool Read(int width, int height, const ReadFunc& use);
++
++private:
++  class CStream;
++
++  void ReleaseLease(int width, int height);
++  //! m_lock must be held
++  bool CanRead() const;
++  //! takes m_stream for Close; m_lock must be held
++  std::shared_ptr<CStream> TakeStream();
++  void Close(std::shared_ptr<CStream> stream);
++  AMLCaptureColor GetSignal(const AMLCaptureSource& source) const;
++  //! m_lock must be held
++  void UpdateStatics(std::shared_ptr<const AMLFrameMetadata> meta);
++
++  std::mutex m_lock;
++  std::shared_ptr<CStream> m_stream;
++  //! taken streams not closed yet; the node refuses a new input while one is open
++  int m_closing{0};
++  std::condition_variable m_closed;
++  int m_leases{0};
++  std::vector<std::pair<int, int>> m_continuousSizes;
++  bool m_displayLost{false};
++  //! another vdin1 user holds the node: no reopen before the next Configure
++  bool m_busy{false};
++  AMLCaptureSource m_source;
++  //! the frame metadata the title peak in m_source was decoded from
++  std::shared_ptr<const AMLFrameMetadata> m_staticsMeta;
++  std::atomic<bool> m_presented{false};
++
++  //! serializes consumers; held across the frame wait, never taken by Stop
++  std::mutex m_readLock;
++  //! the last open failed on a node that was not busy: open failures log at debug until one
++  //! succeeds
++  bool m_openFailed{false};
++  CAMLCaptureConvert m_convert;
++};
+diff --git a/xbmc/utils/AMLCaptureConvert.cpp b/xbmc/utils/AMLCaptureConvert.cpp
+new file mode 100644
+--- /dev/null
++++ b/xbmc/utils/AMLCaptureConvert.cpp
+@@ -0,0 +0,521 @@
++/*
++ *  Copyright (C) 2026 Team CoreELEC
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#include "utils/AMLCaptureConvert.h"
++
++#include <algorithm>
++#include <array>
++#include <bit>
++#include <cmath>
++#include <cstddef>
++#include <cstring>
++
++extern "C"
++{
++#include <libswscale/swscale.h>
++}
++
++namespace
++{
++
++using Matrix = std::array<std::array<double, 3>, 3>;
++
++// clang-format off
++// ITU-R BT.2100 table 7
++constexpr Matrix BT2100_RGB_TO_LMS{{
++  {1688.0 / 4096, 2146.0 / 4096, 262.0 / 4096},
++  {683.0 / 4096, 2951.0 / 4096, 462.0 / 4096},
++  {99.0 / 4096, 309.0 / 4096, 3688.0 / 4096},
++}};
++constexpr Matrix BT2100_LMS_TO_ICTCP{{
++  {2048.0 / 4096, 2048.0 / 4096, 0.0},
++  {6610.0 / 4096, -13613.0 / 4096, 7003.0 / 4096},
++  {17933.0 / 4096, -17390.0 / 4096, -543.0 / 4096},
++}};
++
++// ITU-R BT.2087, linear light
++constexpr Matrix BT709_TO_BT2020{{
++  {0.6274039, 0.3292830, 0.0433131},
++  {0.0690973, 0.9195404, 0.0113623},
++  {0.0163914, 0.0880133, 0.8955953},
++}};
++// clang-format on
++
++// under Dolby Vision, vdin1 VD1 holds full-range ICtCp in every output mode, Ct at a quarter and
++// Cp at half the I scale; fitted from VD1, tunnel and wire grabs of two titles on three SoCs
++constexpr float VD1_I_SPAN = 256.0f;
++constexpr float VD1_CT_SPAN = 64.0f;
++constexpr float VD1_CP_SPAN = 128.0f;
++constexpr float VD1_CHROMA_ZERO = 128.0f;
++
++// the Dolby Vision SDR output codes BT.709 by the ITU-R BT.1886 EOTF, for the SDR target display
++// amdolby_vision sets (amdv_target_max, amdv_target_min)
++constexpr double BT1886_GAMMA = 2.4;
++constexpr double DV_SDR_WHITE_NITS = 100.0;
++constexpr double DV_SDR_BLACK_NITS = 0.005;
++
++// swscale widens 8-bit codes to YUV444P16 by a shift of 8
++constexpr float CODE_SCALE_8_TO_16 = 256.0f;
++
++constexpr float LIMITED_BLACK = 16.0f;
++constexpr float LIMITED_LUMA_SPAN = 219.0f;
++constexpr float LIMITED_CHROMA_ZERO = 128.0f;
++constexpr float LIMITED_CHROMA_SPAN = 224.0f;
++
++constexpr float BT709_KR = 0.2126f;
++constexpr float BT709_KB = 0.0722f;
++constexpr float BT2020_KR = 0.2627f;
++constexpr float BT2020_KB = 0.0593f;
++
++constexpr double PQ_M1 = 2610.0 / 16384;
++constexpr double PQ_M2 = 2523.0 / 4096 * 128;
++constexpr double PQ_C1 = 3424.0 / 4096;
++constexpr double PQ_C2 = 2413.0 / 4096 * 32;
++constexpr double PQ_C3 = 2392.0 / 4096 * 32;
++constexpr double PQ_PEAK_NITS = 10000.0;
++
++// ITU-R BT.2100 HLG at the nominal 1000 cd/m2 display, as the GUI composite codes it
++constexpr double HLG_A = 0.17883277;
++constexpr double HLG_B = 0.28466892;
++constexpr double HLG_C = 0.55991073;
++constexpr double HLG_GAMMA = 1.2;
++constexpr double HLG_PEAK_NITS = 1000.0;
++constexpr double HLG_SCENE_SCALE = 12.0;
++
++// Kodi's default video tonemap curve: Hable at parameter 1.0 (CMediaSettings), as the GLES video
++// shader applies it (YUV2RGBShaderGLES.cpp, gles_tonemap.frag, gles_yuv2rgb_basic.frag)
++constexpr std::array<double, 6> HABLE{0.15, 0.5, 0.1, 0.2, 0.02, 0.3};
++constexpr double TONEMAP_PARAM = 1.0;
++constexpr double HABLE_EXPOSURE = 2.0;
++constexpr double HABLE_WHITE_NITS = 100.0;
++// the shader scales linear light by (10000 / peak) * (2 / param), then by the white point
++// peak / 100, so the scale is fixed and the peak only sets where white sits
++constexpr double TONEMAP_SCALE = PQ_PEAK_NITS / HABLE_WHITE_NITS * HABLE_EXPOSURE / TONEMAP_PARAM;
++constexpr double SDR_OUTPUT_GAMMA = 2.2;
++
++// interpolated tables stay within 0.1 8-bit code of the exact transfer functions
++constexpr int PQ_EOTF_STEPS = 16384;
++constexpr int TABLE_STEPS = 4096;
++// a log table indexes linear light by the float's exponent and top mantissa bits, uniform in
++// linear within each of its octaves
++constexpr int LOG_TABLE_STEP_BITS = 8;
++constexpr int LOG_TABLE_OCTAVES = 48;
++constexpr int FLOAT_MANTISSA_BITS = 23;
++constexpr int LOG_TABLE_SHIFT = FLOAT_MANTISSA_BITS - LOG_TABLE_STEP_BITS;
++constexpr float LOG_TABLE_MIN = 1.0f / (1ULL << LOG_TABLE_OCTAVES);
++
++constexpr Matrix Invert(const Matrix& m)
++{
++  const double det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
++                     m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
++                     m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
++  Matrix out{};
++  for (int r = 0; r < 3; r++)
++    for (int c = 0; c < 3; c++)
++    {
++      const int r0 = (c + 1) % 3;
++      const int r1 = (c + 2) % 3;
++      const int c0 = (r + 1) % 3;
++      const int c1 = (r + 2) % 3;
++      out[r][c] = (m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0]) / det;
++    }
++  return out;
++}
++
++constexpr Matrix BT2100_ICTCP_TO_LMS = Invert(BT2100_LMS_TO_ICTCP);
++constexpr Matrix BT2100_LMS_TO_RGB = Invert(BT2100_RGB_TO_LMS);
++constexpr Matrix BT2020_TO_BT709 = Invert(BT709_TO_BT2020);
++
++void Apply(const Matrix& m, const float in[3], float out[3])
++{
++  for (int r = 0; r < 3; r++)
++    out[r] = static_cast<float>(m[r][0] * static_cast<double>(in[0]) +
++                                m[r][1] * static_cast<double>(in[1]) +
++                                m[r][2] * static_cast<double>(in[2]));
++}
++
++double PQToLinear(double e)
++{
++  const double p = std::pow(std::clamp(e, 0.0, 1.0), 1 / PQ_M2);
++  return std::pow(std::max(p - PQ_C1, 0.0) / (PQ_C2 - PQ_C3 * p), 1 / PQ_M1);
++}
++
++double HlgToScene(double e)
++{
++  return e <= 0.5 ? e * e / 3 : (std::exp((e - HLG_C) / HLG_A) + HLG_B) / HLG_SCENE_SCALE;
++}
++
++double LinearToSdr(double l)
++{
++  return std::pow(l, 1 / SDR_OUTPUT_GAMMA);
++}
++
++double LinearToBt1886(double l)
++{
++  const double white = std::pow(DV_SDR_WHITE_NITS, 1 / BT1886_GAMMA);
++  const double black = std::pow(DV_SDR_BLACK_NITS, 1 / BT1886_GAMMA);
++  const double v = std::pow(l * PQ_PEAK_NITS, 1 / BT1886_GAMMA);
++  return std::clamp((v - black) / (white - black), 0.0, 1.0);
++}
++
++double Hable(double x)
++{
++  const auto& [a, b, c, d, e, f] = HABLE;
++  return ((x * (a * x + c * b) + d * e) / (x * (a * x + b) + d * f)) - e / f;
++}
++
++// the HLG OOTF gain on scene light by its luma, to linear light at the PQ peak
++double HlgSystemGain(double luma)
++{
++  return std::pow(luma, HLG_GAMMA - 1) * HLG_PEAK_NITS / PQ_PEAK_NITS;
++}
++
++// one entry past the end, so a lookup at 1.0 interpolates without a bounds check
++template<typename F>
++std::vector<float> MakeTable(int steps, F f)
++{
++  std::vector<float> table;
++  table.reserve(steps + 2);
++  for (int i = 0; i <= steps + 1; i++)
++    table.push_back(static_cast<float>(f(std::min(static_cast<double>(i) / steps, 1.0))));
++  return table;
++}
++
++template<typename F>
++std::vector<float> MakeLogTable(F f)
++{
++  const int octaveSteps = 1 << LOG_TABLE_STEP_BITS;
++  const int steps = LOG_TABLE_OCTAVES * octaveSteps;
++  std::vector<float> table;
++  table.reserve(steps + 2);
++  for (int i = 0; i <= steps; i++)
++  {
++    const double linear = std::ldexp(1.0 + static_cast<double>(i % octaveSteps) / octaveSteps,
++                                     i / octaveSteps - LOG_TABLE_OCTAVES);
++    table.push_back(static_cast<float>(f(linear)));
++  }
++  table.push_back(table.back());
++  return table;
++}
++
++float LookupLog(const float* table, float linear)
++{
++  const uint32_t bits = std::bit_cast<uint32_t>(std::clamp(linear, LOG_TABLE_MIN, 1.0f)) -
++                        std::bit_cast<uint32_t>(LOG_TABLE_MIN);
++  const uint32_t i = bits >> LOG_TABLE_SHIFT;
++  const float fraction =
++      static_cast<float>(bits & ((1u << LOG_TABLE_SHIFT) - 1)) * (1.0f / (1u << LOG_TABLE_SHIFT));
++  return table[i] + (table[i + 1] - table[i]) * fraction;
++}
++
++struct Tables
++{
++  std::vector<float> pqToLinear = MakeTable(PQ_EOTF_STEPS, PQToLinear);
++  std::vector<float> hlgToScene = MakeTable(TABLE_STEPS, HlgToScene);
++  std::vector<float> hlgSystemGain = MakeLogTable(HlgSystemGain);
++  std::vector<float> linearToBt1886 = MakeLogTable(LinearToBt1886);
++  std::vector<float> linearToSdr = MakeLogTable(LinearToSdr);
++};
++
++const Tables& GetTables()
++{
++  static const Tables tables;
++  return tables;
++}
++
++bool IsSdr(AMLCaptureSignal signal)
++{
++  return signal == AMLCaptureSignal::SDR || signal == AMLCaptureSignal::DV_SDR;
++}
++
++void YccToRgb(const float ycc[3], float kr, float kb, float out[3])
++{
++  const float y = (ycc[0] - LIMITED_BLACK) / LIMITED_LUMA_SPAN;
++  const float cb = (ycc[1] - LIMITED_CHROMA_ZERO) / LIMITED_CHROMA_SPAN;
++  const float cr = (ycc[2] - LIMITED_CHROMA_ZERO) / LIMITED_CHROMA_SPAN;
++  out[0] = y + 2 * (1 - kr) * cr;
++  out[2] = y + 2 * (1 - kb) * cb;
++  out[1] = (y - kr * out[0] - kb * out[2]) / (1 - kr - kb);
++}
++
++// ICtCp codes to linear BT.2020; both matrices stay in double, as in saturated colours the terms
++// nearly cancel; inlined, as an out-of-line call per pixel keeps the row from vectorizing
++[[gnu::always_inline]] inline void IctcpToLinear(
++    uint16_t y, uint16_t cb, uint16_t cr, const float* eotf, float eotfSteps, float linear[3])
++{
++  const float ictcp[3] = {y / CODE_SCALE_8_TO_16 / VD1_I_SPAN,
++                          (cb / CODE_SCALE_8_TO_16 - VD1_CHROMA_ZERO) / VD1_CT_SPAN,
++                          (cr / CODE_SCALE_8_TO_16 - VD1_CHROMA_ZERO) / VD1_CP_SPAN};
++  float lms[3];
++  Apply(BT2100_ICTCP_TO_LMS, ictcp, lms);
++  for (int c = 0; c < 3; c++)
++  {
++    const float pos = std::clamp(lms[c], 0.0f, 1.0f) * eotfSteps;
++    const int i = static_cast<int>(pos);
++    lms[c] = eotf[i] + (eotf[i + 1] - eotf[i]) * (pos - i);
++  }
++  Apply(BT2100_LMS_TO_RGB, lms, linear);
++}
++
++// a row of pixels as three planes of floats, which each step converts in place
++using Planes = std::array<float*, 3>;
++
++void LookupRow(const std::vector<float>& table, float* v, int width)
++{
++  const float* t = table.data();
++  const float steps = static_cast<float>(table.size() - 2);
++  for (int x = 0; x < width; x++)
++  {
++    const float pos = std::clamp(v[x], 0.0f, 1.0f) * steps;
++    const int i = static_cast<int>(pos);
++    v[x] = t[i] + (t[i + 1] - t[i]) * (pos - i);
++  }
++}
++
++void LookupLogRow(const std::vector<float>& table, float* v, int width)
++{
++  const float* t = table.data();
++  for (int x = 0; x < width; x++)
++    v[x] = LookupLog(t, v[x]);
++}
++
++// scales a pixel by the curve at its brightest channel, which keeps its hue (libplacebo
++// PL_TONE_MAP_MAX, ffmpeg vf_tonemap without desaturation); a channel past the PQ range scales
++// to white with the others
++void ToneMapRow(const std::vector<float>& encode,
++                const std::vector<float>& gain,
++                const Planes& p,
++                int width)
++{
++  const float* e = encode.data();
++  const float* g = gain.data();
++  for (int x = 0; x < width; x++)
++  {
++    float brightest = p[0][x] > p[1][x] ? p[0][x] : p[1][x];
++    brightest = brightest > p[2][x] ? brightest : p[2][x];
++    const float k = LookupLog(g, brightest);
++    const float scale = brightest > 1.0f ? 1.0f / brightest : 1.0f;
++    for (float* v : p)
++      v[x] = LookupLog(e, v[x] * scale) * k;
++  }
++}
++
++// in float, which stays within a code of double for these gamut matrices; the Dolby Vision
++// decode keeps double
++void ApplyRow(const Matrix& m, const Planes& p, int width)
++{
++  float k[3][3];
++  for (int r = 0; r < 3; r++)
++    for (int c = 0; c < 3; c++)
++      k[r][c] = static_cast<float>(m[r][c]);
++  for (int x = 0; x < width; x++)
++  {
++    const float in[3] = {p[0][x], p[1][x], p[2][x]};
++    for (int r = 0; r < 3; r++)
++      p[r][x] = k[r][0] * in[0] + k[r][1] * in[1] + k[r][2] * in[2];
++  }
++}
++
++void YccRow(const uint16_t* y,
++            const uint16_t* cb,
++            const uint16_t* cr,
++            int width,
++            float kr,
++            float kb,
++            const Planes& p)
++{
++  for (int x = 0; x < width; x++)
++  {
++    const float ycc[3] = {y[x] / CODE_SCALE_8_TO_16, cb[x] / CODE_SCALE_8_TO_16,
++                          cr[x] / CODE_SCALE_8_TO_16};
++    float rgb[3];
++    YccToRgb(ycc, kr, kb, rgb);
++    for (int c = 0; c < 3; c++)
++      p[c][x] = rgb[c];
++  }
++}
++
++// restrict, as plane stores that may alias the table reads keep the row from vectorizing
++void IctcpRow(const uint16_t* y,
++              const uint16_t* cb,
++              const uint16_t* cr,
++              int width,
++              const Tables& tables,
++              float* __restrict r,
++              float* __restrict g,
++              float* __restrict b)
++{
++  const float* eotf = tables.pqToLinear.data();
++  const float eotfSteps = static_cast<float>(tables.pqToLinear.size() - 2);
++  for (int x = 0; x < width; x++)
++  {
++    float linear[3];
++    IctcpToLinear(y[x], cb[x], cr[x], eotf, eotfSteps, linear);
++    r[x] = linear[0];
++    g[x] = linear[1];
++    b[x] = linear[2];
++  }
++}
++
++void HlgRowToLinear(const Tables& tables, const Planes& p, int width)
++{
++  for (float* v : p)
++    LookupRow(tables.hlgToScene, v, width);
++  const float* gain = tables.hlgSystemGain.data();
++  for (int x = 0; x < width; x++)
++  {
++    const float luma =
++        BT2020_KR * p[0][x] + (1 - BT2020_KR - BT2020_KB) * p[1][x] + BT2020_KB * p[2][x];
++    const float g = LookupLog(gain, luma);
++    for (float* v : p)
++      v[x] *= g;
++  }
++}
++
++// R'G'B' of an SDR signal, else linear BT.2020; true for linear
++bool DecodeRow(AMLCaptureSignal signal,
++               const uint16_t* y,
++               const uint16_t* cb,
++               const uint16_t* cr,
++               int width,
++               const Tables& tables,
++               const Planes& p)
++{
++  switch (signal)
++  {
++    case AMLCaptureSignal::PQ:
++      YccRow(y, cb, cr, width, BT2020_KR, BT2020_KB, p);
++      for (float* v : p)
++        LookupRow(tables.pqToLinear, v, width);
++      return true;
++    case AMLCaptureSignal::HLG:
++      YccRow(y, cb, cr, width, BT2020_KR, BT2020_KB, p);
++      HlgRowToLinear(tables, p, width);
++      return true;
++    case AMLCaptureSignal::DV_TV_LED:
++    case AMLCaptureSignal::DV_LL:
++    case AMLCaptureSignal::DV_HDR10:
++      IctcpRow(y, cb, cr, width, tables, p[0], p[1], p[2]);
++      return true;
++    case AMLCaptureSignal::DV_SDR:
++      IctcpRow(y, cb, cr, width, tables, p[0], p[1], p[2]);
++      ApplyRow(BT2020_TO_BT709, p, width);
++      for (float* v : p)
++        LookupLogRow(tables.linearToBt1886, v, width);
++      return false;
++    case AMLCaptureSignal::SDR:
++    default:
++      YccRow(y, cb, cr, width, BT709_KR, BT709_KB, p);
++      return false;
++  }
++}
++
++uint8_t To8(float v)
++{
++  return static_cast<uint8_t>(v * 255 + 0.5f);
++}
++
++// a row of planes to opaque 8-bit pixels, red at R and blue at B
++template<int R, int B>
++[[gnu::always_inline]] inline void StoreRow8(const Planes& p, int width, uint8_t* __restrict out)
++{
++  const float* __restrict red = p[0];
++  const float* __restrict green = p[1];
++  const float* __restrict blue = p[2];
++  for (int x = 0; x < width; x++, out += 4)
++  {
++    out[R] = To8(std::clamp(red[x], 0.0f, 1.0f));
++    out[1] = To8(std::clamp(green[x], 0.0f, 1.0f));
++    out[B] = To8(std::clamp(blue[x], 0.0f, 1.0f));
++    out[3] = 255;
++  }
++}
++
++} // namespace
++
++CAMLCaptureConvert::~CAMLCaptureConvert()
++{
++  sws_freeContext(m_scaleContext);
++}
++
++const std::vector<float>& CAMLCaptureConvert::GetToneMap(float luminance)
++{
++  if (luminance == m_toneMapLuminance && !m_toneMap.empty())
++    return m_toneMap;
++
++  // the shader clips at half the peak; white at the peak rolls the highlights off instead
++  const double white = Hable(TONEMAP_SCALE * static_cast<double>(luminance) / PQ_PEAK_NITS);
++  m_toneMap = MakeLogTable(
++      [white](double linear)
++      {
++        const double sdr = std::clamp(Hable(linear * TONEMAP_SCALE) / white, 0.0, 1.0);
++        return LinearToSdr(sdr / linear);
++      });
++  m_toneMapLuminance = luminance;
++  return m_toneMap;
++}
++
++bool CAMLCaptureConvert::Stage(const AMLCaptureImage& src, int width, int height)
++{
++  const std::size_t plane = static_cast<std::size_t>(width) * height;
++  m_yuv.Resize(plane * 3);
++  uint8_t* yuv[] = {reinterpret_cast<uint8_t*>(m_yuv.Data()),
++                    reinterpret_cast<uint8_t*>(m_yuv.Data() + plane),
++                    reinterpret_cast<uint8_t*>(m_yuv.Data() + 2 * plane), nullptr};
++  const int yuvStride[] = {width * 2, width * 2, width * 2, 0};
++
++  // the capture mapping is uncached: one sequential read, and every pass after it on the copy
++  const std::size_t luma = static_cast<std::size_t>(src.width) * src.height;
++  m_source.Resize(luma + luma / 2);
++  for (int y = 0; y < src.height; y++)
++    std::memcpy(m_source.Data() + static_cast<std::size_t>(y) * src.width,
++                src.data[0] + static_cast<std::ptrdiff_t>(y) * src.linesize[0], src.width);
++  for (int y = 0; y < src.height / 2; y++)
++    std::memcpy(m_source.Data() + luma + static_cast<std::size_t>(y) * src.width,
++                src.data[1] + static_cast<std::ptrdiff_t>(y) * src.linesize[1], src.width);
++
++  m_scaleContext =
++      sws_getCachedContext(m_scaleContext, src.width, src.height, AV_PIX_FMT_NV12, width, height,
++                           AV_PIX_FMT_YUV444P16LE, SWS_BILINEAR, nullptr, nullptr, nullptr);
++  if (!m_scaleContext)
++    return false;
++
++  const uint8_t* srcData[] = {m_source.Data(), m_source.Data() + luma, nullptr, nullptr};
++  const int srcStride[] = {src.width, src.width, 0, 0};
++  sws_scale(m_scaleContext, srcData, srcStride, 0, src.height, yuv, yuvStride);
++  return true;
++}
++
++bool CAMLCaptureConvert::Convert(const AMLCaptureImage& src,
++                                 const AMLCaptureColor& color,
++                                 const AMLCaptureImage& dst)
++{
++  if (src.format != AV_PIX_FMT_NV12 || src.width <= 0 || src.height <= 0 || dst.width <= 0 ||
++      dst.height <= 0 || dst.format != AV_PIX_FMT_BGRA)
++    return false;
++
++  if (!Stage(src, dst.width, dst.height))
++    return false;
++
++  const std::size_t plane = static_cast<std::size_t>(dst.width) * dst.height;
++  const std::vector<float>* toneMap = IsSdr(color.signal) ? nullptr : &GetToneMap(color.luminance);
++  const Tables& tables = GetTables();
++  std::vector<float> rows(static_cast<std::size_t>(dst.width) * 3);
++  const Planes p = {rows.data(), rows.data() + dst.width, rows.data() + 2 * dst.width};
++  for (int y = 0; y < dst.height; y++)
++  {
++    const uint16_t* luma = m_yuv.Data() + static_cast<std::size_t>(y) * dst.width;
++    if (DecodeRow(color.signal, luma, luma + plane, luma + 2 * plane, dst.width, tables, p))
++    {
++      ApplyRow(BT2020_TO_BT709, p, dst.width);
++      ToneMapRow(tables.linearToSdr, *toneMap, p, dst.width);
++    }
++
++    StoreRow8<2, 0>(p, dst.width, dst.data[0] + static_cast<std::ptrdiff_t>(y) * dst.linesize[0]);
++  }
++  return true;
++}
+diff --git a/xbmc/utils/AMLCaptureConvert.h b/xbmc/utils/AMLCaptureConvert.h
+new file mode 100644
+--- /dev/null
++++ b/xbmc/utils/AMLCaptureConvert.h
+@@ -0,0 +0,95 @@
++/*
++ *  Copyright (C) 2026 Team CoreELEC
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <vector>
++
++extern "C"
++{
++#include <libavutil/pixfmt.h>
++}
++
++struct SwsContext;
++
++//! How vdin1 codes the video layer
++enum class AMLCaptureSignal
++{
++  SDR, //!< BT.709 limited Y'CbCr
++  PQ, //!< BT.2020 limited Y'CbCr, PQ
++  HLG, //!< BT.2020 limited Y'CbCr, HLG
++  DV_TV_LED, //!< the Dolby Vision core3 input of a TV-led signal
++  DV_LL, //!< the Dolby Vision core3 input in player-led output
++  DV_HDR10, //!< the Dolby Vision core3 input in HDR10 output
++  DV_SDR, //!< the Dolby Vision core3 input in SDR output
++};
++
++struct AMLCaptureColor
++{
++  AMLCaptureSignal signal{AMLCaptureSignal::SDR};
++  //! the source luminance of the SDR tonemap in cd/m2
++  float luminance{0.0f};
++};
++
++//! A view of pixels the caller owns; NV12 uses both planes, packed formats only the first.
++struct AMLCaptureImage
++{
++  AVPixelFormat format{AV_PIX_FMT_NONE};
++  int width{0};
++  int height{0};
++  uint8_t* data[2]{};
++  int linesize[2]{};
++};
++
++//! A buffer kept between calls whose growth leaves the new elements uninitialized
++template<typename T>
++class CAMLCaptureScratch
++{
++public:
++  void Resize(std::size_t count)
++  {
++    if (count <= m_size)
++      return;
++    m_data = std::make_unique_for_overwrite<T[]>(count);
++    m_size = count;
++  }
++  T* Data() const { return m_data.get(); }
++
++private:
++  std::unique_ptr<T[]> m_data;
++  std::size_t m_size{0};
++};
++
++//! \brief Converts vdin1 captures. Not thread safe; the buffers and contexts persist between
++//! calls, the transfer tables for the process.
++class CAMLCaptureConvert
++{
++public:
++  CAMLCaptureConvert() = default;
++  ~CAMLCaptureConvert();
++  CAMLCaptureConvert(const CAMLCaptureConvert&) = delete;
++  CAMLCaptureConvert& operator=(const CAMLCaptureConvert&) = delete;
++
++  //! Copy the NV12 image src out of its mapping, scale it to the size of dst and convert it to
++  //! SDR AV_PIX_FMT_BGRA, tonemapping HDR.
++  bool Convert(const AMLCaptureImage& src,
++               const AMLCaptureColor& color,
++               const AMLCaptureImage& dst);
++
++private:
++  bool Stage(const AMLCaptureImage& src, int width, int height);
++  const std::vector<float>& GetToneMap(float luminance);
++
++  SwsContext* m_scaleContext{nullptr};
++  CAMLCaptureScratch<uint8_t> m_source;
++  CAMLCaptureScratch<uint16_t> m_yuv;
++  std::vector<float> m_toneMap;
++  float m_toneMapLuminance{0.0f};
++};
+diff --git a/xbmc/utils/CMakeLists.txt b/xbmc/utils/CMakeLists.txt
+--- a/xbmc/utils/CMakeLists.txt
++++ b/xbmc/utils/CMakeLists.txt
+@@ -0,8 +0,12 @@
+ endif()
+ 
+ if(TARGET ${APP_NAME_LC}::AML)
+-  list(APPEND SOURCES AMLUtils.cpp)
+-  list(APPEND HEADERS AMLUtils.h)
++  list(APPEND SOURCES AMLCapture.cpp
++                      AMLCaptureConvert.cpp
++                      AMLUtils.cpp)
++  list(APPEND HEADERS AMLCapture.h
++                      AMLCaptureConvert.h
++                      AMLUtils.h)
+ endif()
+ 
+ core_add_library(utils)

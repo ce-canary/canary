@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 18 Oct 2026 09:48:40 -0500
+Subject: [PATCH] OverlayRenderer: rebuild cached overlays on HDR composite
+ change
+
+A cached overlay texture keeps the conversion chosen for the composite
+state it was built in. A menu page that stays on screen across an SDR
+and HDR play item change was then drawn with the wrong conversion.
+---
+ .../VideoRenderers/OverlayRenderer.cpp            | 15 +++++++++++++++
+ .../VideoPlayer/VideoRenderers/OverlayRenderer.h  |  2 ++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
+@@ -0,6 +0,17 @@
+   m_textureid++;
+ }
+ 
++// cached textures are built for the composite state they were first drawn in
++void CRenderer::CheckCompositeState()
++{
++  const bool hdrComposite = CServiceBroker::GetWinSystem()->IsHdrComposite();
++  if (hdrComposite == m_hdrComposite)
++    return;
++
++  m_hdrComposite = hdrComposite;
++  ReleaseCache();
++}
++
+ void CRenderer::ReleaseUnused()
+ {
+   for (auto it = m_textureCache.begin(); it != m_textureCache.end(); )
+@@ -0,6 +0,8 @@
+ {
+   std::unique_lock lock(m_section);
+ 
++  CheckCompositeState();
++
+   // during HDR composite the m_isHDROverlay overlays render via
+   // RenderHDROverlays instead
+   const bool hdrComposite = CServiceBroker::GetWinSystem()->IsHdrComposite();
+@@ -0,6 +0,8 @@
+ 
+   std::unique_lock lock(m_section);
+ 
++  CheckCompositeState();
++
+   const RenderStereoView stereoView =
+       CServiceBroker::GetWinSystem()->GetGfxContext().GetStereoView();
+ 
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
+@@ -0,6 +0,7 @@
+     void Release(std::vector<SElement>& list);
+     void ReleaseCache();
+     void ReleaseUnused();
++    void CheckCompositeState();
+ 
+     /*!
+      * \brief Load and store settings locally
+@@ -0,6 +0,7 @@
+     std::vector<SElement> m_buffers[NUM_BUFFERS];
+     std::map<unsigned int, std::shared_ptr<COverlay>> m_textureCache;
+     static unsigned int m_textureid;
++    bool m_hdrComposite{false};
+     CRect m_rv; // Frame size
+     CRect m_rs; // Source size
+     CRect m_rd; // Video size, may be influenced by video settings (e.g. zoom)

@@ -1,0 +1,234 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 23:58:54 -0500
+Subject: [PATCH] ActiveAE: hand a late start over to the clock in whole vsyncs
+
+A late start plays and is left to the player's clock, which bands the
+move to one content frame under a vsync adjust and skips it below
+100 ms under a speed adjust. Part of a vsync also shifts the clock sync
+phase. A late start measured while muted can be skipped unheard; one
+already heard keeps the phase only when moved in whole vsyncs.
+---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 60 ++++++++++++++++---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.h   |  1 +
+ .../Engines/ActiveAE/ActiveAEStream.h         |  4 ++
+ xbmc/cores/VideoPlayer/DVDClock.cpp           | 10 +++-
+ xbmc/cores/VideoPlayer/DVDClock.h             |  5 +-
+ xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp   |  4 +-
+ 6 files changed, 69 insertions(+), 15 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,6 +0,7 @@
+   stream.m_resampleRatio = 1.0;
+   stream.m_syncError = 0;
+   stream.m_syncState = CAESyncInfo::AESyncState::SYNC_OFF;
++  stream.m_exactStart = false;
+   m_streamStats.push_back(stream);
+ }
+ 
+@@ -0,6 +0,7 @@
+     {
+       float delay = 0;
+       str.m_syncState = stream->m_syncState;
++      str.m_exactStart = stream->m_exactStart;
+       str.m_syncError = stream->m_syncError.GetLastError(str.m_errorTime);
+       if (stream->m_processingBuffers)
+       {
+@@ -0,6 +0,7 @@
+       info.error = str.m_syncError;
+       info.errortime = str.m_errorTime;
+       info.state = str.m_syncState;
++      info.exactStart = str.m_exactStart;
+       info.rr = str.m_resampleRatio;
+       return;
+     }
+@@ -0,6 +0,8 @@
+     stream->m_pauseBurstCarry = 0.0;
+     stream->m_silentSinceSyncStart = true;
+     stream->m_startCut = stream->m_pClock->TakeStartCut();
++    stream->m_startPad = 0.0;
++    stream->m_exactStart = false;
+     stream->m_syncSinkReports = m_stats.GetSinkReports();
+     CLog::Log(LOGDEBUG,"ActiveAE - start sync of audio stream");
+   }
+@@ -0,13 +0,19 @@
+   }
+ 
+   // Without resampling, the player moves its clock to the audio once the error exceeds its own
+-  // limit. Audio starting late is therefore left to the player, as skipping it would lose the
+-  // start of the audio.
++  // limit. Audio starting late is therefore left to the player once it was heard, as skipping it
++  // would cut audio already playing.
+   const bool clockFollowsAudio{!stream->m_resampleMode};
++  double phasePeriod{0.0};
++  if (clockFollowsAudio && stream->m_syncState == CAESyncInfo::AESyncState::SYNC_MUTE)
++    phasePeriod = stream->m_pClock->GetPhasePeriod();
+   const auto keepAudible = [&](double syncError)
+   {
+-    return fabs(syncError) <= threshold ||
+-           (clockFollowsAudio && syncError < 0 && -syncError <= MAX_LATE_START_MS);
++    const bool lateStart{clockFollowsAudio && syncError < 0 && -syncError <= MAX_LATE_START_MS};
++    // a late start is skipped before it is heard, which keeps the clock sync phase
++    if (lateStart && phasePeriod > 0)
++      return false;
++    return fabs(syncError) <= threshold || lateStart;
+   };
+ 
+   if (newerror && fabs(error) > threshold && stream->m_syncState == CAESyncInfo::AESyncState::SYNC_INSYNC)
+@@ -0,23 +0,34 @@
+     stream->m_resampleIntegral = 0;
+     // a long average can span a step, so the error to correct is measured anew
+     stream->m_syncErrorBooked = false;
++    stream->m_startPad = 0.0;
++    stream->m_exactStart = false;
+     stream->m_syncError.SetErrorInterval(100ms);
+     CLog::Log(LOGDEBUG, "ActiveAE::SyncStream - average error {:f} above threshold of {:f}", error,
+               threshold);
+   }
+   else if (newerror && stream->m_syncState == CAESyncInfo::AESyncState::SYNC_MUTE)
+   {
+-    if (clockFollowsAudio && error < 0 && -error <= MAX_LATE_START_MS)
++    if (clockFollowsAudio && error < 0 && -error <= MAX_LATE_START_MS &&
++        !stream->m_silentSinceSyncStart)
+     {
++      // a clock move by whole phase periods keeps the clock sync phase; the rest is padded
++      double handover = error;
++      if (phasePeriod > 0)
++      {
++        handover = -std::ceil(-error / phasePeriod) * phasePeriod;
++        stream->m_startPad = error - handover;
++        stream->m_exactStart = true;
++      }
+       stream->m_syncState = CAESyncInfo::AESyncState::SYNC_INSYNC;
+       stream->m_syncError.Flush(1000ms);
+       // Reports the error to the player right away
+-      stream->m_syncError.Correction(error);
++      stream->m_syncError.Correction(handover);
+       stream->m_resampleIntegral = 0;
+       stream->m_lateStartHandedOver = true;
+-      stream->m_silentSinceSyncStart = false;
+       CLog::Log(LOGDEBUG,
+-                "ActiveAE::SyncStream - average error of {:f}, left to the player's clock", error);
++                "ActiveAE::SyncStream - average error of {:f}, {:f} left to the player's clock",
++                error, handover);
+     }
+     else
+     {
+@@ -0,6 +0,28 @@
+     return ret;
+   }
+ 
++  if (stream->m_syncState == CAESyncInfo::AESyncState::SYNC_INSYNC && stream->m_startPad > 0)
++  {
++    ret = m_silenceBuffers->GetFreeBuffer();
++    if (ret)
++    {
++      const double delayed = FillSyncPad(stream, ret, stream->m_startPad);
++      CLog::Log(LOGDEBUG, LOGAUDIO, "ActiveAE::SyncStream - start pad {:.3f}ms of {:.3f}ms",
++                delayed, stream->m_startPad);
++      if (delayed > 0)
++        stream->m_startPad -= delayed;
++      else
++      {
++        stream->m_startPad = 0.0;
++        stream->m_silentSinceSyncStart = false;
++        ret->Return();
++        ret = nullptr;
++      }
++    }
++    else
++      stream->m_silentSinceSyncStart = false;
++  }
++
+   if (!newerror || stream->m_syncState != CAESyncInfo::AESyncState::SYNC_INSYNC)
+     return ret;
+ 
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
+@@ -0,6 +0,7 @@
+     double m_syncError;
+     unsigned int m_errorTime;
+     CAESyncInfo::AESyncState m_syncState;
++    bool m_exactStart;
+   };
+   std::vector<StreamStats> m_streamStats;
+ };
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+@@ -0,6 +0,10 @@
+   bool m_syncErrorBooked{false};
+   // ms of audio the clock start left out on purpose, skipped before the start sync measures
+   double m_startCut{0.0};
++  // ms of silence a late start handed over in whole phase periods still owes
++  double m_startPad{0.0};
++  // whether the start error handed over is in whole phase periods
++  bool m_exactStart{false};
+   // the sink reports counted when the start sync began
+   unsigned int m_syncSinkReports{0};
+ };
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.cpp b/xbmc/cores/VideoPlayer/DVDClock.cpp
+--- a/xbmc/cores/VideoPlayer/DVDClock.cpp
++++ b/xbmc/cores/VideoPlayer/DVDClock.cpp
+@@ -0,7 +0,10 @@
+   return m_speedAdjust;
+ }
+ 
+-double CDVDClock::ErrorAdjust(double error, const char* log, bool exact /* = false */)
++double CDVDClock::ErrorAdjust(double error,
++                              const char* log,
++                              bool exact /* = false */,
++                              bool start /* = false */)
+ {
+   std::unique_lock lock(m_critSection);
+ 
+@@ -0,14 +0,15 @@
+ 
+   // skip minor updates while speed adjust is active
+   // -> adjusting buffer levels
+-  if (!exact && m_speedAdjust != 0 && error < DVD_MSEC_TO_TIME(100))
++  if (!exact && !start && m_speedAdjust != 0 && error < DVD_MSEC_TO_TIME(100))
+   {
+     return 0;
+   }
+ 
+   adjustment = error;
+ 
+-  if (!exact && m_vSyncAdjust != 0)
++  // a start under speed adjust has no clock sync phase to keep
++  if (!exact && m_vSyncAdjust != 0 && (!start || m_speedAdjust == 0))
+   {
+     // Audio ahead is more noticeable then audio behind video.
+     // Correct if aufio is more than 20ms ahead or more then
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.h b/xbmc/cores/VideoPlayer/DVDClock.h
+--- a/xbmc/cores/VideoPlayer/DVDClock.h
++++ b/xbmc/cores/VideoPlayer/DVDClock.h
+@@ -0,8 +0,9 @@
+   //! The clock plus the vsync adjust, read together
+   double GetClockWithVsyncAdjust();
+ 
+-  //! An `exact` error is moved by in full, as the audio engine already quantised it
+-  double ErrorAdjust(double error, const char* log, bool exact = false);
++  //! An `exact` error is moved by in full, as the audio engine already quantised it. A `start`
++  //! handover is never skipped as a minor update.
++  double ErrorAdjust(double error, const char* log, bool exact = false, bool start = false);
+   void Discontinuity(double clock, double absolute);
+   void Discontinuity(double clock = 0LL)
+   {
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp b/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
+@@ -0,8 +0,8 @@
+ 
+     if (startSyncError || std::abs(syncerror) > DVD_MSEC_TO_TIME(m_disconAdjustTimeMs))
+     {
+-      double correction =
+-          m_pClock->ErrorAdjust(syncerror, "CVideoPlayerAudio::OutputPacket", exactStart);
++      double correction = m_pClock->ErrorAdjust(syncerror, "CVideoPlayerAudio::OutputPacket",
++                                                exactStart, startSyncError);
+       if (correction != 0)
+       {
+         m_audioSink.SetSyncErrorCorrection(-correction);

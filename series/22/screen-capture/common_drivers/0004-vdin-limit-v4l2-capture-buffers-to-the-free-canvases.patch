@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 15 Oct 2026 17:13:30 -0500
+Subject: [PATCH] vdin: limit v4l2 capture buffers to the free canvases
+
+REQBUFS allowed 12 buffers on every vdin, but vdin1 has 8 canvas ids
+and NV12 takes two per buffer. On g12 and sc2, buffers past the fourth
+were written through foreign canvas ids and came back corrupt. On s4
+and s5 they rewrote canvas 0 and 1, which vdin does not own.
+---
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,6 +0,7 @@
+ #include <linux/amlogic/meson_uvm_core.h>
+ #include <linux/amlogic/media/vout/vinfo.h>
+ #include <linux/amlogic/media/vout/vout_notify.h>
++#include <linux/amlogic/media/canvas/canvas_mgr.h>
+ 
+ /* Local Headers */
+ /*#include "../tvin_global.h"*/
+@@ -0,6 +0,17 @@
+ {
+ 	struct vdin_dev_s *devp = vb2_get_drv_priv(vq);
+ 	unsigned int i = 0;
++	unsigned int canvas_num;
++	u32 pixelformat = devp->v4l2_fmt.fmt.pix_mp.pixelformat;
++
++	if (hw_canvas_support) {
++		canvas_num = devp->index ? VDIN1_CANVAS_MAX_CNT : VDIN0_CANVAS_MAX_CNT;
++		/* nv12/nv21 take two canvas ids per buffer */
++		if (pixelformat == V4L2_PIX_FMT_NV12 || pixelformat == V4L2_PIX_FMT_NV21 ||
++		    pixelformat == V4L2_PIX_FMT_NV12M || pixelformat == V4L2_PIX_FMT_NV21M)
++			canvas_num /= 2;
++		*num_buffers = min(*num_buffers, canvas_num);
++	}
+ 
+ 	/*
+ 	 * NV12 every frame need two buffer

@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 10:33:03 -0600
+Subject: [PATCH] libbluray: raise the end of a playlist again after a seek
+
+The library notes a reached playlist end and never clears it on a
+seek. A seek back after the end was read raises the BD-J end at once,
+ahead of the new pass. A seek back after the end was delivered never
+raises it again, and an application waiting for it hangs.
+---
+ ...end-of-a-playlist-again-after-a-seek.patch | 40 +++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+ create mode 100644 packages/multimedia/libbluray/patches/libbluray-12-bluray-raise-the-end-of-a-playlist-again-after-a-seek.patch
+
+diff --git a/packages/multimedia/libbluray/patches/libbluray-12-bluray-raise-the-end-of-a-playlist-again-after-a-seek.patch b/packages/multimedia/libbluray/patches/libbluray-12-bluray-raise-the-end-of-a-playlist-again-after-a-seek.patch
+new file mode 100644
+--- /dev/null
++++ b/packages/multimedia/libbluray/patches/libbluray-12-bluray-raise-the-end-of-a-playlist-again-after-a-seek.patch
+@@ -0,0 +0,40 @@
++From 9d04ab7bdb9de500fc96bec39fcc511b25462ef1 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Tue, 3 Nov 2026 09:31:35 -0600
++Subject: [PATCH] bluray: raise the end of a playlist again after a seek
++
++The library notes a reached playlist end and never clears it on a
++seek. A seek back after the end was read raises the BD-J end at once,
++ahead of the new pass. A seek back after the end was delivered never
++raises it again, and an application waiting for it hangs.
++---
++ src/libbluray/bluray.c | 1 +
++ src/libbluray/bluray.h | 3 +++
++ 2 files changed, 4 insertions(+)
++
++diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
++index aaf7bd4752..376b399917 100644
++--- a/src/libbluray/bluray.c
+++++ b/src/libbluray/bluray.c
++@@ -1741,6 +1741,7 @@ static int64_t _seek_internal(BLURAY *bd,
++ 
++         /* update title position */
++         bd->s_pos = (uint64_t)title_pkt * 192;
+++        bd->end_of_playlist = 0;
++ 
++         /* Update PSR_TIME */
++         media_time = _update_time_psr_from_stream(bd);
++diff --git a/src/libbluray/bluray.h b/src/libbluray/bluray.h
++index 7ed4711ab3..a57092984f 100644
++--- a/src/libbluray/bluray.h
+++++ b/src/libbluray/bluray.h
++@@ -1128,6 +1128,9 @@ BD_PUBLIC int bd_get_sound_effect(BLURAY *bd, unsigned sound_id, struct bd_sound
++  */
++ BD_PUBLIC void bd_set_scr(BLURAY *bd, int64_t pts);
++ 
+++/* a seek raises the end of the playlist again */
+++#define BD_SEEK_REARMS_PLAYLIST_END 1
+++
++ /**
++  *
++  *  Set current playback rate.

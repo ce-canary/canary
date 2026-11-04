@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 28 Oct 2026 21:39:55 -0500
+Subject: [PATCH] VideoPlayer: show the presented title time for Blu-ray
+ playback
+
+Blu-ray Player time comes from the libbluray read position. In menu mode
+it is the read time, seconds ahead of the picture. In playlist mode the
+time offset is built from it and drifts by up to 0.75 s, which external
+subtitles and relative seeks also use. The packets already carry title
+time.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 25 ++++++++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,23 @@
+     CDVDInputStream::ITimes::Times times;
+     const bool haveTimes = pTimes && pTimes->GetTimes(times);
+ 
++    // the read position runs ahead of the picture, and packets carry the title time
++    const bool bluray = pDisplayTime && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY);
++    const auto blurayTime = [this, pDisplayTime]() -> double
++    {
++      double presented = GetBlurayPresentedTime();
++      if (presented == DVD_NOPTS_VALUE)
++      {
++        if (m_CurrentVideo.startpts != DVD_NOPTS_VALUE)
++          presented = m_CurrentVideo.startpts + m_offset_pts;
++        else if (m_CurrentAudio.startpts != DVD_NOPTS_VALUE)
++          presented = m_CurrentAudio.startpts + m_offset_pts;
++        else
++          return pDisplayTime->GetTime();
++      }
++      return DVD_TIME_TO_MSEC(presented);
++    };
++
+     // Raw (pre-EDL) upper bound of the stream, needed below to tell whether the last
+     // chapter is fully contained within a trailing EDL cut.
+     std::chrono::milliseconds rawStreamEnd{std::chrono::milliseconds::max()};
+@@ -0,6 +0,12 @@
+       state.timeMin = (times.ptsBegin - times.ptsStart) * 1000 / DVD_TIME_BASE;
+       state.time_offset = -times.ptsStart;
+     }
++    else if (bluray && pDisplayTime->GetTotalTime() > 0)
++    {
++      state.time_offset = m_offset_pts;
++      state.time = blurayTime();
++      state.timeMax = pDisplayTime->GetTotalTime();
++    }
+     else if (pDisplayTime && pDisplayTime->GetTotalTime() > 0)
+     {
+       if (state.dts != DVD_NOPTS_VALUE)
+@@ -0,7 +0,7 @@
+       }
+       else if (IsInMenuInternal())
+       {
+-        state.time = pDisplayTime->GetTime();
++        state.time = bluray ? blurayTime() : pDisplayTime->GetTime();
+         state.isInMenu = true;
+         if (!pMenu->CanSeek())
+           state.time_offset = 0;

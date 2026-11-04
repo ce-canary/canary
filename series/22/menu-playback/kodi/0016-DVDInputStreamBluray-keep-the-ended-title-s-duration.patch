@@ -1,0 +1,137 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 17 Oct 2026 12:02:14 -0500
+Subject: [PATCH] DVDInputStreamBluray: keep the ended title's duration
+
+In navigation mode END_OF_TITLE frees the title info as soon as the
+read reaches the end of the title. The player still has the end of the
+title queued and plays it with no duration, so pause is refused. A
+seek in that queue would act on the next title.
+---
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 10 +++++++-
+ .../DVDInputStreams/DVDInputStreamBluray.h    |  2 ++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 23 +++++++++++++++++++
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  3 +++
+ 4 files changed, 37 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,6 +0,7 @@
+ 
+   m_titleInfo = nullptr;
+   m_clip = nullptr;
++  m_endedTitleTime = 0;
+   FreeClipInfo();
+ }
+ 
+@@ -0,7 +0,12 @@
+     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - BD_EVENT_END_OF_TITLE {}", m_event.param);
+     /* when a title ends, playlist WILL eventually change */
+     if (m_navmode)
++    {
++      // the player still plays the title out of its queues until the next stream
++      const int totalTime = GetTotalTime();
+       FreeTitleInfo();
++      m_endedTitleTime = totalTime;
++    }
+     break;
+ 
+   case BD_EVENT_TITLE:
+@@ -0,7 +0,7 @@
+   if(m_titleInfo)
+     return static_cast<int>(m_titleInfo->duration / 90);
+   else
+-    return 0;
++    return m_endedTitleTime;
+ }
+ 
+ int CDVDInputStreamBluray::GetTime()
+@@ -0,6 +0,8 @@
+   if(!m_navmode || m_hold == HOLD_EXIT || m_hold == HOLD_ERROR)
+     return NEXTSTREAM_NONE;
+ 
++  m_endedTitleTime = 0;
++
+   // m_clip names the next item after a play item event, or after a seek within it
+   bool clipKnown = false;
+   bool clipLeft = false;
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,7 @@
+   //! hand the clip start held at a join to the demuxer opened after it
+   void ReleaseClipStart() { m_clipStartHeld = false; }
+   bool IsClipStartHeld() const { return !m_navmode && m_clipStartHeld && !m_clipStart.empty(); }
++  bool IsTitleEnded() const { return m_endedTitleTime > 0; }
+ 
+   //! the clip the item opened by the last NextStream starts with, when its events named it
+   const BLURAY_CLIP_INFO* GetNextItemClip() const;
+@@ -0,6 +0,7 @@
+     uint64_t m_readPos{0};
+     std::vector<ClipSpan> m_clipSpans;
+     bool m_hasMVCExtension{false};
++    int m_endedTitleTime{0};
+     bool m_nextClipKnown{false};
+     std::vector<uint8_t> m_clipStart;
+     size_t m_clipStartOffset{0};
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,25 @@
+   return true;
+ }
+ 
++#if defined(HAVE_LIBBLURAY)
++std::shared_ptr<CDVDInputStreamBluray> CVideoPlayer::GetBlurayInputStream() const
++{
++  if (m_pInputStream && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY))
++    return std::static_pointer_cast<CDVDInputStreamBluray>(m_pInputStream);
++  return nullptr;
++}
++#endif
++
++bool CVideoPlayer::IsBlurayTitleEnded() const
++{
++#if defined(HAVE_LIBBLURAY)
++  const auto bluray = GetBlurayInputStream();
++  return bluray && bluray->IsTitleEnded();
++#else
++  return false;
++#endif
++}
++
+ void CVideoPlayer::HandlePlaySpeed()
+ {
+   const bool isInMenu = IsInMenuInternal();
+@@ -0,6 +0,10 @@
+     state.canpause = true;
+   }
+ 
++  // the ended title keeps its duration for pause, a seek would act on the next title
++  if (IsBlurayTitleEnded())
++    state.canseek = false;
++
+   m_processInfo->SetPlayTimes(state.startTime, state.time, state.timeMin, state.timeMax);
+ 
+   std::unique_lock lock(m_StateSection);
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+ };
+ 
+ class CDVDInputStream;
++class CDVDInputStreamBluray;
+ 
+ class CDVDDemux;
+ class CDemuxStreamVideo;
+@@ -0,6 +0,8 @@
+   void Prepare();
+   bool ShouldDeferSync(bool ready, std::chrono::steady_clock::time_point now);
+   bool ShouldWaitForSync(std::chrono::steady_clock::time_point now);
++  std::shared_ptr<CDVDInputStreamBluray> GetBlurayInputStream() const;
++  bool IsBlurayTitleEnded() const;
+   bool OpenStream(CCurrentStream& current, int64_t demuxerId, int iStream, int source, bool reset = true);
+   bool OpenAudioStream(CDVDStreamInfo& hint, bool reset = true);
+   bool OpenVideoStream(CDVDStreamInfo& hint, bool reset = true);

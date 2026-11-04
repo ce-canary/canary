@@ -1,0 +1,1390 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 22 Oct 2026 18:41:40 -0500
+Subject: [PATCH] AMLCapture: take native screenshots
+
+Every screenshot is tonemapped to SDR at 1080p at most, so none keeps
+the output's size, 10-bit precision or HDR coding for picture analysis.
+vdin1 can give the video at the output size up to 2160p in 10 bits.
+---
+ .../resources/strings.po                      |  20 ++
+ system/settings/settings.xml                  |  12 +
+ xbmc/interfaces/builtins/GUIBuiltins.cpp      |  17 +-
+ xbmc/rendering/capture/CapturePixels.h        |   5 +
+ xbmc/rendering/capture/CaptureTypes.h         |   4 +
+ xbmc/settings/Settings.h                      |   1 +
+ xbmc/utils/AMLCapture.cpp                     | 169 +++++++++--
+ xbmc/utils/AMLCapture.h                       |  31 +-
+ xbmc/utils/AMLCaptureConvert.cpp              | 274 +++++++++++++++++-
+ xbmc/utils/AMLCaptureConvert.h                |  17 ++
+ xbmc/utils/Screenshot.cpp                     |  67 +++--
+ xbmc/utils/Screenshot.h                       |   9 +-
+ .../amlogic/ScreenshotSurfaceAML.cpp          | 172 ++++++++++-
+ 13 files changed, 727 insertions(+), 71 deletions(-)
+
+diff --git a/addons/resource.language.en_gb/resources/strings.po b/addons/resource.language.en_gb/resources/strings.po
+--- a/addons/resource.language.en_gb/resources/strings.po
++++ b/addons/resource.language.en_gb/resources/strings.po
+@@ -0,6 +0,26 @@
+ msgid "Player-Led"
+ msgstr ""
+ 
++#: system/settings/settings.xml
++msgctxt "#14428"
++msgid "Screenshot type"
++msgstr ""
++
++#: system/settings/settings.xml
++msgctxt "#14429"
++msgid "Select the type of screenshot to take. Standard saves an SDR image up to 1080p. Native keeps the output resolution up to 4K, with 10-bit precision and HDR when the picture is HDR."
++msgstr ""
++
++#: system/settings/settings.xml
++msgctxt "#14430"
++msgid "Standard"
++msgstr ""
++
++#: system/settings/settings.xml
++msgctxt "#14431"
++msgid "Native"
++msgstr ""
++
+ #: xbmc/music/MusicDatabase.cpp
+ #: xbmc/video/VideoDatabase.cpp
+ msgctxt "#15011"
+diff --git a/system/settings/settings.xml b/system/settings/settings.xml
+--- a/system/settings/settings.xml
++++ b/system/settings/settings.xml
+@@ -0,6 +0,18 @@
+             <heading>657</heading>
+           </control>
+         </setting>
++        <setting id="coreelec.amlogic.screenshottype" type="integer" label="14428" help="14429">
++          <requirement>HAVE_AMCODEC</requirement>
++          <level>1</level>
++          <default>0</default>
++          <constraints>
++            <options>
++              <option label="14430">0</option>
++              <option label="14431">1</option>
++            </options>
++          </constraints>
++          <control type="spinner" format="string" />
++        </setting>
+       </group>
+       <group id="2" label="14111">
+         <setting id="eventlog.enabled" type="boolean" label="14112" help="36460">
+diff --git a/xbmc/interfaces/builtins/GUIBuiltins.cpp b/xbmc/interfaces/builtins/GUIBuiltins.cpp
+--- a/xbmc/interfaces/builtins/GUIBuiltins.cpp
++++ b/xbmc/interfaces/builtins/GUIBuiltins.cpp
+@@ -0,12 +0,13 @@
+ /*! \brief Take a screenshot.
+  *  \param params The parameters.
+  *  \details params[0] = URL to save file to. Blank to use default.
+- *           Any parameter may be "video" for a video-only screenshot.
++ *           Any parameter may be "video" for a video-only screenshot, or "native".
+  */
+ static int Screenshot(const std::vector<std::string>& params)
+ {
+   std::string strSaveToPath;
+   bool video = false;
++  bool native = false;
+   for (const std::string& param : params)
+   {
+     if (StringUtils::EqualsNoCase(param, "sync"))
+@@ -0,12 +0,16 @@
+                           "the screenshot is written asynchronously");
+     else if (StringUtils::EqualsNoCase(param, "video"))
+       video = true;
++    else if (StringUtils::EqualsNoCase(param, "native"))
++      native = true;
+     else if (strSaveToPath.empty())
+       strSaveToPath = param;
+   }
+ 
+   const auto content = video ? KODI::RENDERING::CAPTURE::CaptureContent::VIDEO
+                              : KODI::RENDERING::CAPTURE::CaptureContent::COMPOSITE;
++  const auto type = native ? KODI::RENDERING::CAPTURE::CaptureScreenshot::NATIVE
++                           : KODI::RENDERING::CAPTURE::CaptureScreenshot::STANDARD;
+ 
+   if (video)
+   {
+@@ -0,7 +0,7 @@
+ 
+       if (!file.empty())
+       {
+-        CScreenShot::TakeScreenshot(file, content);
++        CScreenShot::TakeScreenshot(file, content, type);
+       }
+       else
+       {
+@@ -0,10 +0,10 @@
+       }
+     }
+     else
+-      CScreenShot::TakeScreenshot(strSaveToPath, content);
++      CScreenShot::TakeScreenshot(strSaveToPath, content, type);
+   }
+   else
+-    CScreenShot::TakeScreenshot(content);
++    CScreenShot::TakeScreenshot(content, type);
+ 
+   return 0;
+ }
+@@ -0,12 +0,14 @@
+ ///     @param[in] ident                 Stereo mode identifier.
+ ///   }
+ ///   \table_row2_l{
+-///     <b>`TakeScreenshot(url[\,video])`</b>
++///     <b>`TakeScreenshot(url[\,video][\,native])`</b>
+ ///     ,
+ ///     Takes a Screenshot
+ ///     @param[in] url                   URL to save file to. Blank to use default.
+ ///     @param[in] video                 Add "video" to capture the video frame only\,
+ ///     without GUI\, OSD or subtitles (optional).
++///     @param[in] native                Add "native" to keep the output's own size\, bit depth
++///     and HDR coding\, on platforms that can (optional).
+ ///   }
+ ///   \table_row2_l{
+ ///     <b>`ToggleDirtyRegionVisualization`</b>
+diff --git a/xbmc/rendering/capture/CapturePixels.h b/xbmc/rendering/capture/CapturePixels.h
+--- a/xbmc/rendering/capture/CapturePixels.h
++++ b/xbmc/rendering/capture/CapturePixels.h
+@@ -0,6 +0,8 @@
+ namespace CAPTURE
+ {
+ 
++struct CaptureResult;
++
+ //! \brief Consumer-thread access to a capture's pixels regardless of producer:
+ //! a GL readback backs it with a heap buffer, a direct-to-plane capture with a
+ //! mapped dma-buf. Lock/Unlock bound the read so producer resources stay alive.
+@@ -0,6 +0,9 @@
+   //! consumer thread: first row in memory; valid until the matching Unlock
+   virtual const uint8_t* Lock() = 0;
+   virtual void Unlock() {}
++  //! consumer thread, after Lock: describe the pixels in result where only their read could
++  //! tell; true when they hold a native screenshot
++  virtual bool Describe(CaptureResult& result) const { return false; }
+ };
+ 
+ //! RAII Lock/Unlock around ICapturePixels for one consumer read.
+diff --git a/xbmc/rendering/capture/CaptureTypes.h b/xbmc/rendering/capture/CaptureTypes.h
+--- a/xbmc/rendering/capture/CaptureTypes.h
++++ b/xbmc/rendering/capture/CaptureTypes.h
+@@ -0,6 +0,8 @@
+ {
+   NONE,
+   STANDARD, //!< what the user sees
++  NATIVE, //!< the output at its own size and coding, where the platform can tell them apart
++  CONFIGURED, //!< the type the user set for the platform, standard where it has no setting
+ };
+ 
+ struct CaptureSpec
+@@ -0,6 +0,8 @@
+   //! the pixels read the newest frame on every Lock, so a consumer may copy them again without
+   //! waiting for a delivery; a delivery comes only with a drawn frame
+   bool live{false};
++  //! the pixels went through a display mapping, not only the output coding
++  bool displayMapped{false};
+   //! HDR mastering/light metadata of the captured content, carried verbatim so
+   //! an SDR tonemap has the same source peak the thumbnail extractor uses
+   bool hasDisplayMetadata{false};
+diff --git a/xbmc/settings/Settings.h b/xbmc/settings/Settings.h
+--- a/xbmc/settings/Settings.h
++++ b/xbmc/settings/Settings.h
+@@ -0,6 +0,7 @@
+   static constexpr auto SETTING_COREELEC_AMLOGIC_DISABLEGUISCALING = "coreelec.amlogic.disableguiscaling";
+   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_DISABLE = "coreelec.amlogic.disabledolbyvision";
+   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_LED = "coreelec.amlogic.dolbyvisionled";
++  static constexpr auto SETTING_COREELEC_AMLOGIC_SCREENSHOTTYPE = "coreelec.amlogic.screenshottype";
+   static constexpr auto SETTING_CACHE_HARDDISK = "cache.harddisk";
+   static constexpr auto SETTING_CACHEVIDEO_DVDROM = "cachevideo.dvdrom";
+   static constexpr auto SETTING_CACHEVIDEO_LAN = "cachevideo.lan";
+diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
+--- a/xbmc/utils/AMLCapture.cpp
++++ b/xbmc/utils/AMLCapture.cpp
+@@ -0,6 +0,8 @@
+ constexpr uint32_t PIX_FMT_YUV422_10P = v4l2_fourcc('A', 'Y', '2', 'P');
+ // vdin1 refuses a single buffer
+ constexpr unsigned int SHOT_BUFFERS = 3;
++constexpr int MAX_SHOT_WIDTH = 3840;
++constexpr int MAX_SHOT_HEIGHT = 2160;
+ // the vdin1 line buffer is 1920 pixels wide; a 2160p output is downscaled 2:1
+ constexpr int MAX_CAPTURE_WIDTH = 1920;
+ constexpr int MAX_CAPTURE_HEIGHT = 1080;
+@@ -0,6 +0,17 @@
+   int guiInput{-1};
+ };
+ 
++void FitOutput(int maxWidth, int maxHeight, int& width, int& height)
++{
++  const RESOLUTION_INFO screen = CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo();
++  const int screenWidth = std::max(screen.iScreenWidth, 1);
++  const int screenHeight = std::max(screen.iScreenHeight, 1);
++  const float scale = std::min({1.0f, static_cast<float>(maxWidth) / screenWidth,
++                                static_cast<float>(maxHeight) / screenHeight});
++  width = static_cast<int>(screenWidth * scale) & ~(CAPTURE_WIDTH_ALIGN - 1);
++  height = static_cast<int>(screenHeight * scale) & ~1;
++}
++
+ // G12A, G12B and SM1 vdin keeps the even chroma sample of a full pack pair
+ bool HasCositedChroma()
+ {
+@@ -0,6 +0,28 @@
+   result.color.range = AVCOL_RANGE_JPEG;
+ }
+ 
++ImageColorMetadata GetNativeColor(AMLCaptureSignal signal)
++{
++  ImageColorMetadata color;
++  switch (CAMLCaptureConvert::GetNativeTransfer(signal))
++  {
++    case AMLCaptureCoding::Transfer::PQ:
++      color.primaries = AVCOL_PRI_BT2020;
++      color.transfer = AVCOL_TRC_SMPTE2084;
++      break;
++    case AMLCaptureCoding::Transfer::HLG:
++      color.primaries = AVCOL_PRI_BT2020;
++      color.transfer = AVCOL_TRC_ARIB_STD_B67;
++      break;
++    default:
++      color.primaries = AVCOL_PRI_BT709;
++      color.transfer = AVCOL_TRC_BT709;
++      break;
++  }
++  color.range = AVCOL_RANGE_JPEG;
++  return color;
++}
++
+ class CAMLVideoPixels : public ICapturePixels
+ {
+ public:
+@@ -0,7 +0,19 @@
+ 
+     const auto session = m_session.lock();
+     if (!session)
++    {
++      if (m_spec.shot == CaptureScreenshot::NATIVE)
++        CLog::Log(LOGWARNING, "CAMLCapture::{}: no native screenshot, the video stopped",
++                  __FUNCTION__);
+       return nullptr;
++    }
++
++    if (m_spec.shot == CaptureScreenshot::NATIVE)
++    {
++      m_buffer = ReadNative(*session);
++      m_lease.reset();
++      return m_buffer.get();
++    }
+ 
+     // a standard screenshot is the rows of an 8-bit PNG
+     const bool rgb = m_spec.shot == CaptureScreenshot::STANDARD;
+@@ -0,7 +0,28 @@
+     return m_buffer.get();
+   }
+ 
++  bool Describe(CaptureResult& result) const override { return m_native.Describe(result); }
++
+ private:
++  // the visible video of a native shot at the shot's size, which only the read knows
++  std::unique_ptr<uint8_t[]> ReadNative(CAMLCapture& session)
++  {
++    AMLCaptureShotFrame shot;
++    if (!session.ReadShot(m_spec.shot, shot))
++      return {};
++
++    const AMLCaptureImage video = CAMLCapture::Crop(shot.frame.image, m_spec.rect);
++    auto buffer = std::make_unique_for_overwrite<uint8_t[]>(static_cast<size_t>(video.width) *
++                                                            video.height * 6);
++    const AMLCaptureImage dst = AMLCaptureImage::Packed(
++        AV_PIX_FMT_RGB48BE, video.width, video.height, buffer.get(), video.width * 6);
++    const bool ok = CAMLCaptureConvert::ConvertNative(video, shot.frame.color, dst);
++    m_native = {ok, shot.frame.color, video.width, video.height};
++    if (!ok)
++      return {};
++    return buffer;
++  }
++
+   std::weak_ptr<CAMLCapture> m_session;
+   std::shared_ptr<void> m_lease;
+   AMLCaptureVideoSpec m_spec;
+@@ -0,6 +0,7 @@
+   std::mutex m_lock;
+   bool m_read{false};
+   std::unique_ptr<uint8_t[]> m_buffer;
++  AMLCaptureNative m_native;
+ };
+ 
+ class CAMLGuiPixels : public ICapturePixels
+@@ -0,13 +0,21 @@
+ 
+ void CAMLCapture::GetCaptureSize(int& width, int& height)
+ {
+-  const RESOLUTION_INFO screen = CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo();
+-  const int screenWidth = std::max(screen.iScreenWidth, 1);
+-  const int screenHeight = std::max(screen.iScreenHeight, 1);
+-  const float scale = std::min({1.0f, static_cast<float>(MAX_CAPTURE_WIDTH) / screenWidth,
+-                                static_cast<float>(MAX_CAPTURE_HEIGHT) / screenHeight});
+-  width = static_cast<int>(screenWidth * scale) & ~(CAPTURE_WIDTH_ALIGN - 1);
+-  height = static_cast<int>(screenHeight * scale) & ~1;
++  FitOutput(MAX_CAPTURE_WIDTH, MAX_CAPTURE_HEIGHT, width, height);
++}
++
++bool AMLCaptureNative::Describe(CaptureResult& result) const
++{
++  if (!resolved)
++    return false;
++
++  result.width = static_cast<unsigned int>(width);
++  result.height = static_cast<unsigned int>(height);
++  result.stride = width * 6;
++  result.format = AV_PIX_FMT_RGB48BE;
++  result.color = GetNativeColor(color.signal);
++  result.displayMapped = color.displayMapped;
++  return true;
+ }
+ 
+ CAMLCapture::CAMLCapture()
+@@ -0,6 +0,16 @@
+   return m_presented && !m_busy;
+ }
+ 
++bool CAMLCapture::Unreadable(bool log) const
++{
++  if (log)
++    CLog::Log(LOGWARNING, "CAMLCapture::{}: no video frame: {}", __FUNCTION__,
++              m_displayLost  ? "display lost"
++              : !m_presented ? "no video presented"
++                             : "another vdin1 user holds the node");
++  return false;
++}
++
+ bool CAMLCapture::Read(AMLCaptureInput input, int width, int height, const ReadFunc& use)
+ {
+   if (input == AMLCaptureInput::GUI && IsGuiRefused())
+@@ -0,9 +0,11 @@
+ 
+   std::lock_guard read(m_readLock);
+ 
+-  return ReadStream(input, V4L2_PIX_FMT_NV12, CAPTURE_BUFFERS, width, height,
+-                    [this, &use](CStream&, unsigned int, const AMLCaptureFrame& frame)
+-                    { return use(frame, m_convert); });
++  bool refused = false;
++  return ReadStream(
++      input, V4L2_PIX_FMT_NV12, CAPTURE_BUFFERS, width, height,
++      [this, &use](CStream&, unsigned int, const AMLCaptureFrame& frame)
++      { return use(frame, m_convert); }, refused);
+ }
+ 
+ bool CAMLCapture::ReadVideo(CaptureScreenshot shot, int width, int height, const ReadFunc& use)
+@@ -0,13 +0,13 @@
+   {
+     AMLCaptureShotFrame frame;
+     CAMLCaptureConvert convert;
+-    if (ReadShot(frame) && use(frame.frame, convert))
++    if (ReadShot(shot, frame) && use(frame.frame, convert))
+       return true;
+   }
+   return Read(AMLCaptureInput::VIDEO, width, height, use);
+ }
+ 
+-bool CAMLCapture::ReadShot(AMLCaptureShotFrame& frame)
++bool CAMLCapture::ReadShot(CaptureScreenshot shot, AMLCaptureShotFrame& frame)
+ {
+   std::unique_lock read(m_readLock);
+ 
+@@ -0,9 +0,25 @@
+ 
+   int width = 0;
+   int height = 0;
+-  GetCaptureSize(width, height);
+-  const bool ok =
+-      ReadStream(AMLCaptureInput::VIDEO, PIX_FMT_YUV422_10P, SHOT_BUFFERS, width, height, copy);
++  if (shot == CaptureScreenshot::NATIVE)
++    FitOutput(MAX_SHOT_WIDTH, MAX_SHOT_HEIGHT, width, height);
++  else
++    GetCaptureSize(width, height);
++  bool refused = false;
++  const bool native = shot == CaptureScreenshot::NATIVE;
++  bool ok = ReadStream(AMLCaptureInput::VIDEO, PIX_FMT_YUV422_10P, SHOT_BUFFERS, width, height,
++                       copy, refused, native);
++  if (!ok && refused && native)
++  {
++    const int refusedWidth = width;
++    const int refusedHeight = height;
++    GetCaptureSize(width, height);
++    CLog::Log(LOGINFO, "CAMLCapture::{}: no 10-bit {}x{}, reading {}x{}", __FUNCTION__,
++              refusedWidth, refusedHeight, width, height);
++    refused = false;
++    ok = ReadStream(AMLCaptureInput::VIDEO, PIX_FMT_YUV422_10P, SHOT_BUFFERS, width, height, copy,
++                    refused, native);
++  }
+ 
+   // close the shot stream whatever leases remain
+   std::shared_ptr<CStream> stream;
+@@ -0,7 +0,9 @@
+                              unsigned int buffers,
+                              int width,
+                              int height,
+-                             const StreamFunc& use)
++                             const StreamFunc& use,
++                             bool& refused,
++                             bool logCause)
+ {
+   const float fps = CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
+   const int waitMs =
+@@ -0,7 +0,7 @@
+     {
+       std::lock_guard lock(m_lock);
+       if (!CanRead(input))
+-        return false;
++        return Unreadable(logCause);
+       for (const auto& [continuousInput, continuousWidth, continuousHeight] : m_continuousSizes)
+       {
+         if (continuousInput != input || pixelFormat != V4L2_PIX_FMT_NV12)
+@@ -0,11 +0,10 @@
+         std::unique_lock lock(m_lock);
+         m_closed.wait(lock, [this] { return m_closing == 0; });
+         if (!CanRead(input))
+-          return false;
++          return Unreadable(logCause);
+       }
+ 
+       bool busy = false;
+-      bool refused = false;
+       const int logLevel = m_openFailed ? LOGDEBUG : LOGWARNING;
+       stream = CStream::Open(input, pixelFormat, buffers, width, height, logLevel, busy, refused);
+       if (refused && input == AMLCaptureInput::GUI)
+@@ -0,7 +0,7 @@
+       if (!stream)
+         return false;
+       if (!CanRead(input))
+-        return false;
++        return Unreadable(logCause);
+       m_stream = stream;
+     }
+ 
+@@ -0,15 +0,20 @@
+       stream->Queue(index);
+       return ok;
+     }
+-    if (wake == CStream::Wake::STOPPED)
+-      return false;
+-
+     // another vdin user can stop the stream underneath us: restart it once, then drop it
++    bool stopped = wake == CStream::Wake::STOPPED;
++    if (!stopped)
+     {
+       std::lock_guard lock(m_lock);
+-      if (m_stream != stream)
+-        return false;
+-      stale = TakeStream();
++      stopped = m_stream != stream;
++      if (!stopped)
++        stale = TakeStream();
++    }
++    if (stopped)
++    {
++      if (logCause)
++        CLog::Log(LOGWARNING, "CAMLCapture::{}: stream stopped", __FUNCTION__);
++      return false;
+     }
+     stream.reset();
+     Close(std::move(stale));
+@@ -0,6 +0,7 @@
+         if (display->aml_get_drmProperty("dv_ll_policy", DRM_MODE_OBJECT_CRTC) >= DV_LL_YUV422)
+         {
+           color.signal = AMLCaptureSignal::DV_LL;
++          color.displayMapped = true;
+           mapped = true;
+         }
+         else
+@@ -0,11 +0,13 @@
+         break;
+       case DvMode::HDR10:
+         color.signal = AMLCaptureSignal::DV_HDR10;
++        color.displayMapped = true;
+         mapped = true;
+         break;
+       case DvMode::SDR10:
+       case DvMode::SDR8:
+         color.signal = AMLCaptureSignal::DV_SDR;
++        color.displayMapped = true;
+         break;
+       default:
+         if (sourcePQ)
+@@ -0,12 +0,15 @@
+       case HdrOutput::HDR10PLUS:
+       case HdrOutput::CUVA_HDR:
+         color.signal = AMLCaptureSignal::PQ;
++        color.displayMapped = !sourcePQ;
+         break;
+       case HdrOutput::HLG:
+       case HdrOutput::CUVA_HLG:
+         color.signal = AMLCaptureSignal::HLG;
++        color.displayMapped = sourcePQ;
+         break;
+       default:
++        color.displayMapped = sourcePQ || sourceHLG;
+         break;
+     }
+   }
+diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
+--- a/xbmc/utils/AMLCapture.h
++++ b/xbmc/utils/AMLCapture.h
+@@ -0,6 +0,18 @@
+   AMLCaptureFrame frame;
+ };
+ 
++//! What only the read of a native screenshot knows about its pixels
++struct AMLCaptureNative
++{
++  bool resolved{false};
++  AMLCaptureColor color;
++  int width{0};
++  int height{0};
++
++  //! once resolved, width x height RGB48BE pixels in the signal's own coding
++  bool Describe(KODI::RENDERING::CAPTURE::CaptureResult& result) const;
++};
++
+ struct AMLCaptureVideoSpec
+ {
+   int width{0};
+@@ -0,9 +0,11 @@
+   //! the input's continuous size when larger, else wait for the next one, and run `use` on it. An
+   //! input or size change restarts the stream. A wait ends after a bound of output frame periods.
+   bool Read(AMLCaptureInput input, int width, int height, const ReadFunc& use);
+-  //! Consumer thread: copy out a frame of a one-shot 10-bit video stream at the largest capture
+-  //! size. The stream closes before this returns; a continuous reader reopens its own.
+-  bool ReadShot(AMLCaptureShotFrame& frame);
++  //! Consumer thread: copy out a frame of a one-shot 10-bit video stream. NATIVE reads the
++  //! output size up to 2160p, else the largest capture size when vdin1 refuses that; STANDARD
++  //! reads the largest capture size. The stream closes before this returns; a continuous reader
++  //! reopens its own.
++  bool ReadShot(KODI::RENDERING::CAPTURE::CaptureScreenshot shot, AMLCaptureShotFrame& frame);
+   //! Consumer thread: run `use` on the frame of a shot, else, or when that fails, on a Read of
+   //! the video at width x height.
+   bool ReadVideo(KODI::RENDERING::CAPTURE::CaptureScreenshot shot,
+@@ -0,7 +0,8 @@
+   //! The crop of an NV12 or full pack image to a normalized rect, on even pixels for the chroma
+   static AMLCaptureImage Crop(const AMLCaptureImage& image, const CRect& rect);
+ 
+-  //! Deferred sRGB pixels of the visible video in result: BGRA, RGB24 for a STANDARD shot.
++  //! Deferred sRGB pixels of the visible video in result: BGRA, RGB24 for a STANDARD shot; a
++  //! NATIVE shot describes its own.
+   void CreateVideoPixels(const AMLCaptureVideoSpec& spec,
+                          KODI::RENDERING::CAPTURE::CaptureResult& result);
+ 
+@@ -0,14 +0,20 @@
+ 
+   void ReleaseLease(AMLCaptureInput input, int width, int height);
+   //! m_readLock must be held; `use` runs on buffer `index`, which is queued again after it.
++  //! `refused` tells that vdin1 cannot give this input at this size. With `logCause`, it logs why
++  //! it gets no frame; a native shot does not fall back
+   bool ReadStream(AMLCaptureInput input,
+                   uint32_t pixelFormat,
+                   unsigned int buffers,
+                   int width,
+                   int height,
+-                  const StreamFunc& use);
++                  const StreamFunc& use,
++                  bool& refused,
++                  bool logCause = false);
+   //! m_lock must be held
+   bool CanRead(AMLCaptureInput input) const;
++  //! m_lock must be held; false, after logging why the video cannot be read when `log`
++  bool Unreadable(bool log) const;
+   //! takes m_stream for Close; m_lock must be held
+   std::shared_ptr<CStream> TakeStream();
+   void Close(std::shared_ptr<CStream> stream);
+diff --git a/xbmc/utils/AMLCaptureConvert.cpp b/xbmc/utils/AMLCaptureConvert.cpp
+--- a/xbmc/utils/AMLCaptureConvert.cpp
++++ b/xbmc/utils/AMLCaptureConvert.cpp
+@@ -0,11 +0,12 @@
+ constexpr double TONEMAP_SCALE = PQ_PEAK_NITS / HABLE_WHITE_NITS * HABLE_EXPOSURE / TONEMAP_PARAM;
+ constexpr double SDR_OUTPUT_GAMMA = 2.2;
+ 
+-// interpolated tables stay within 0.1 8-bit code of the exact transfer functions
++// interpolated tables stay within 0.1 8-bit code of the exact transfer functions; tables of
++// linear light are indexed by its fourth root, which spaces the steps much like PQ does
+ constexpr int PQ_EOTF_STEPS = 16384;
+ constexpr int TABLE_STEPS = 4096;
+ // a log table indexes linear light by the float's exponent and top mantissa bits, uniform in
+-// linear within each of its octaves
++// linear within each of its octaves; it needs no root
+ constexpr int LOG_TABLE_STEP_BITS = 8;
+ constexpr int LOG_TABLE_OCTAVES = 48;
+ constexpr int FLOAT_MANTISSA_BITS = 23;
+@@ -0,6 +0,11 @@
+   return table;
+ }
+ 
++std::vector<float> MakeRootTable(int steps, double (*f)(double))
++{
++  return MakeTable(steps, [f](double root) { return f(root * root * root * root); });
++}
++
+ template<typename F>
+ std::vector<float> MakeLogTable(F f)
+ {
+@@ -0,6 +0,19 @@
+   return table;
+ }
+ 
++float Lookup(const std::vector<float>& table, float v)
++{
++  const int steps = static_cast<int>(table.size()) - 2;
++  const float pos = std::clamp(v, 0.0f, 1.0f) * steps;
++  const int i = static_cast<int>(pos);
++  return table[i] + (table[i + 1] - table[i]) * (pos - i);
++}
++
++float LookupRoot(const std::vector<float>& table, float linear)
++{
++  return Lookup(table, std::sqrt(std::sqrt(std::max(linear, 0.0f))));
++}
++
+ float LookupLog(const float* table, float linear)
+ {
+   const uint32_t bits = std::bit_cast<uint32_t>(std::clamp(linear, LOG_TABLE_MIN, 1.0f)) -
+@@ -0,8 +0,10 @@
+ struct Tables
+ {
+   std::vector<float> pqToLinear = MakeTable(PQ_EOTF_STEPS, PQToLinear);
++  std::vector<float> linearToPQ = MakeRootTable(TABLE_STEPS, LinearToPQ);
+   std::vector<float> linearToPQLog = MakeLogTable(LinearToPQ);
+   std::vector<float> srgbToLinear = MakeTable(TABLE_STEPS, SrgbToLinear);
++  std::vector<float> linearToSrgb = MakeRootTable(TABLE_STEPS, LinearToSrgb);
+   std::vector<float> linearToSrgbLog = MakeLogTable(LinearToSrgb);
+   std::vector<float> hlgToScene = MakeTable(TABLE_STEPS, HlgToScene);
+   std::vector<float> hlgSystemGain = MakeLogTable(HlgSystemGain);
+@@ -0,6 +0,116 @@
+   Apply(BT2100_LMS_TO_RGB, lms, linear);
+ }
+ 
++void HlgToLinear(const float hlg[3], const Tables& tables, float out[3])
++{
++  float scene[3];
++  for (int c = 0; c < 3; c++)
++    scene[c] = Lookup(tables.hlgToScene, hlg[c]);
++  const float luma =
++      BT2020_KR * scene[0] + (1 - BT2020_KR - BT2020_KB) * scene[1] + BT2020_KB * scene[2];
++  const double gain = luma > 0 ? HlgSystemGain(luma) : 0.0;
++  for (int c = 0; c < 3; c++)
++    out[c] = static_cast<float>(static_cast<double>(scene[c]) * gain);
++}
++
++void LinearToHlg(const float linear[3], float out[3])
++{
++  double v[3];
++  for (int c = 0; c < 3; c++)
++    v[c] = static_cast<double>(std::max(linear[c], 0.0f));
++  const double gain = HlgInverseGain(static_cast<double>(BT2020_KR) * v[0] +
++                                     static_cast<double>(1 - BT2020_KR - BT2020_KB) * v[1] +
++                                     static_cast<double>(BT2020_KB) * v[2]);
++  for (int c = 0; c < 3; c++)
++    out[c] = static_cast<float>(SceneToHlg(v[c] * gain));
++}
++
++void SdrToLinear(float whiteNits, const Tables& tables, float v[3])
++{
++  float linear[3];
++  for (int c = 0; c < 3; c++)
++    linear[c] = static_cast<float>(static_cast<double>(Lookup(tables.srgbToLinear, v[c])) *
++                                   static_cast<double>(whiteNits) / PQ_PEAK_NITS);
++  Apply(BT709_TO_BT2020, linear, v);
++}
++
++void HdrToLinear(AMLCaptureCoding::Transfer transfer, const Tables& tables, float v[3])
++{
++  switch (transfer)
++  {
++    case AMLCaptureCoding::Transfer::PQ:
++      for (int c = 0; c < 3; c++)
++        v[c] = Lookup(tables.pqToLinear, v[c]);
++      break;
++    case AMLCaptureCoding::Transfer::HLG:
++    {
++      const float hlg[3] = {v[0], v[1], v[2]};
++      HlgToLinear(hlg, tables, v);
++      break;
++    }
++    default:
++      break;
++  }
++}
++
++// Y'CbCr to R'G'B' in 16-bit codes, the spans folded into the coefficients
++struct YccCoefficients
++{
++  float y{0.0f};
++  float rCr{0.0f};
++  float gCb{0.0f};
++  float gCr{0.0f};
++  float bCb{0.0f};
++};
++
++YccCoefficients MakeYccCoefficients(float kr, float kb)
++{
++  const double luma = 65535 / static_cast<double>(LIMITED_LUMA_SPAN * CODE_SCALE_8_TO_16);
++  const double chroma = 65535 / static_cast<double>(LIMITED_CHROMA_SPAN * CODE_SCALE_8_TO_16);
++  const double r = static_cast<double>(kr);
++  const double b = static_cast<double>(kb);
++  const double g = 1 - r - b;
++  YccCoefficients out;
++  out.y = static_cast<float>(luma);
++  out.rCr = static_cast<float>(chroma * 2 * (1 - r));
++  out.gCb = static_cast<float>(-chroma * 2 * b * (1 - b) / g);
++  out.gCr = static_cast<float>(-chroma * 2 * r * (1 - r) / g);
++  out.bCb = static_cast<float>(chroma * 2 * (1 - b));
++  return out;
++}
++
++uint16_t ClampTo16(float code)
++{
++  return static_cast<uint16_t>(std::clamp(code, 0.0f, 65535.0f) + 0.5f);
++}
++
++uint16_t ToBigEndian(uint16_t code)
++{
++  if constexpr (std::endian::native == std::endian::little)
++    return static_cast<uint16_t>(code << 8 | code >> 8);
++  return code;
++}
++
++void YccRowToRgb(const uint16_t* y,
++                 const uint16_t* cb,
++                 const uint16_t* cr,
++                 int width,
++                 const YccCoefficients& k,
++                 uint16_t* __restrict out)
++{
++  const float black = LIMITED_BLACK * CODE_SCALE_8_TO_16;
++  const float zero = LIMITED_CHROMA_ZERO * CODE_SCALE_8_TO_16;
++  for (int x = 0; x < width; x++, out += 3)
++  {
++    const float luma = k.y * (y[x] - black);
++    const float b = cb[x] - zero;
++    const float r = cr[x] - zero;
++    out[0] = ToBigEndian(ClampTo16(luma + k.rCr * r));
++    out[1] = ToBigEndian(ClampTo16(luma + k.gCb * b + k.gCr * r));
++    out[2] = ToBigEndian(ClampTo16(luma + k.bCb * b));
++  }
++}
++
+ // a row of pixels as three planes of floats, which each step converts in place
+ using Planes = std::array<float*, 3>;
+ 
+@@ -0,6 +0,26 @@
+   }
+ }
+ 
++// Dolby Vision decoded to PQ BT.2020
++void IctcpRowToPQ(const uint16_t* y,
++                  const uint16_t* cb,
++                  const uint16_t* cr,
++                  int width,
++                  const Tables& tables,
++                  uint16_t* __restrict out)
++{
++  const float* eotf = tables.pqToLinear.data();
++  const float eotfSteps = static_cast<float>(tables.pqToLinear.size() - 2);
++  const float* oetf = tables.linearToPQLog.data();
++  for (int x = 0; x < width; x++, out += 3)
++  {
++    float linear[3];
++    IctcpToLinear(y[x], cb[x], cr[x], eotf, eotfSteps, linear);
++    for (int c = 0; c < 3; c++)
++      out[c] = ToBigEndian(ClampTo16(LookupLog(oetf, linear[c]) * 65535));
++  }
++}
++
+ void HlgRowToLinear(const Tables& tables, const Planes& p, int width)
+ {
+   for (float* v : p)
+@@ -0,6 +0,125 @@
+   return true;
+ }
+ 
++bool CAMLCaptureConvert::ConvertNative(const AMLCaptureImage& src,
++                                       const AMLCaptureColor& color,
++                                       const AMLCaptureImage& dst)
++{
++  if (!src.fullPack || src.width <= 0 || src.height <= 0 || src.width != dst.width ||
++      src.height != dst.height || dst.format != AV_PIX_FMT_RGB48BE)
++    return false;
++
++  // the signal's own R'G'B'; Dolby Vision has none, so it is coded PQ
++  bool ictcp = false;
++  YccCoefficients coefficients;
++  switch (color.signal)
++  {
++    case AMLCaptureSignal::PQ:
++    case AMLCaptureSignal::HLG:
++      coefficients = MakeYccCoefficients(BT2020_KR, BT2020_KB);
++      break;
++    case AMLCaptureSignal::DV_TV_LED:
++    case AMLCaptureSignal::DV_LL:
++    case AMLCaptureSignal::DV_HDR10:
++    case AMLCaptureSignal::DV_SDR:
++      ictcp = true;
++      break;
++    case AMLCaptureSignal::SDR:
++    default:
++      coefficients = MakeYccCoefficients(BT709_KR, BT709_KB);
++      break;
++  }
++
++  const int width = dst.width;
++  const auto yuv = std::make_unique_for_overwrite<uint16_t[]>(static_cast<std::size_t>(width) * 3);
++  uint16_t* luma = yuv.get();
++  const Tables& tables = GetTables();
++  for (int y = 0; y < dst.height; y++)
++  {
++    UnpackFullPackRow(src, y, luma, luma + width, luma + 2 * width);
++    uint16_t* out =
++        reinterpret_cast<uint16_t*>(dst.data[0] + static_cast<std::ptrdiff_t>(y) * dst.linesize[0]);
++    if (ictcp)
++      IctcpRowToPQ(luma, luma + width, luma + 2 * width, width, tables, out);
++    else
++      YccRowToRgb(luma, luma + width, luma + 2 * width, width, coefficients, out);
++  }
++  return true;
++}
++
++AMLCaptureCoding::Transfer CAMLCaptureConvert::GetNativeTransfer(AMLCaptureSignal signal)
++{
++  switch (signal)
++  {
++    case AMLCaptureSignal::PQ:
++    case AMLCaptureSignal::DV_TV_LED:
++    case AMLCaptureSignal::DV_LL:
++    case AMLCaptureSignal::DV_HDR10:
++    case AMLCaptureSignal::DV_SDR:
++      return AMLCaptureCoding::Transfer::PQ;
++    case AMLCaptureSignal::HLG:
++      return AMLCaptureCoding::Transfer::HLG;
++    case AMLCaptureSignal::SDR:
++    default:
++      return AMLCaptureCoding::Transfer::SDR;
++  }
++}
++
++void CAMLCaptureConvert::Recode(const float in[3],
++                                const AMLCaptureCoding& from,
++                                const AMLCaptureCoding& to,
++                                float out[3])
++{
++  const Tables& tables = GetTables();
++  float v[3] = {in[0], in[1], in[2]};
++  if (from.transfer == AMLCaptureCoding::Transfer::SDR)
++    SdrToLinear(from.whiteNits, tables, v);
++  else
++    HdrToLinear(from.transfer, tables, v);
++
++  switch (to.transfer)
++  {
++    case AMLCaptureCoding::Transfer::PQ:
++      for (int c = 0; c < 3; c++)
++        out[c] = LookupRoot(tables.linearToPQ, v[c]);
++      break;
++    case AMLCaptureCoding::Transfer::HLG:
++      LinearToHlg(v, out);
++      break;
++    case AMLCaptureCoding::Transfer::SDR:
++    default:
++    {
++      for (int c = 0; c < 3; c++)
++        v[c] = static_cast<float>(static_cast<double>(v[c]) * PQ_PEAK_NITS /
++                                  static_cast<double>(to.whiteNits));
++      Apply(BT2020_TO_BT709, v, out);
++      for (int c = 0; c < 3; c++)
++        out[c] = LookupRoot(tables.linearToSrgb, out[c]);
++      break;
++    }
++  }
++
++  for (int c = 0; c < 3; c++)
++    out[c] = std::clamp(out[c], 0.0f, 1.0f);
++}
++
++bool CAMLCaptureConvert::Scale(const AMLCaptureImage& src, const AMLCaptureImage& dst)
++{
++  SwsContext* context = sws_getContext(
++      src.width, src.height, AV_PIX_FMT_RGBA, dst.width, dst.height, AV_PIX_FMT_RGBA,
++      SWS_BILINEAR | SWS_FULL_CHR_H_INP | SWS_ACCURATE_RND, nullptr, nullptr, nullptr);
++  if (!context)
++    return false;
++
++  const uint8_t* srcData[] = {src.data[0], nullptr, nullptr, nullptr};
++  const int srcStride[] = {src.linesize[0], 0, 0, 0};
++  uint8_t* dstData[] = {dst.data[0], nullptr, nullptr, nullptr};
++  const int dstStride[] = {dst.linesize[0], 0, 0, 0};
++  sws_scale(context, srcData, srcStride, 0, src.height, dstData, dstStride);
++  sws_freeContext(context);
++  return true;
++}
++
+ void CAMLCaptureConvert::MapToSdr(const AMLCaptureImage& src,
+                                   const AMLCaptureCoding& coding,
+                                   const AMLCaptureImage& dst,
+diff --git a/xbmc/utils/AMLCaptureConvert.h b/xbmc/utils/AMLCaptureConvert.h
+--- a/xbmc/utils/AMLCaptureConvert.h
++++ b/xbmc/utils/AMLCaptureConvert.h
+@@ -0,6 +0,8 @@
+   AMLCaptureSignal signal{AMLCaptureSignal::SDR};
+   //! the source luminance of the SDR tonemap in cd/m2
+   float luminance{0.0f};
++  //! an output mode display-mapped the signal, so it is not the content
++  bool displayMapped{false};
+ };
+ 
+ //! The coding of an R'G'B' image: SDR BT.709, or BT.2020 with SDR white at whiteNits
+@@ -0,6 +0,21 @@
+                const AMLCaptureImage* gui = nullptr,
+                const AMLCaptureImage* sdr = nullptr);
+ 
++  //! Unpack the full pack src to dst, an AV_PIX_FMT_RGB48BE image of the same size, in the
++  //! signal's own coding without the tonemap: SDR, PQ and HLG as vdin1 holds them, Dolby Vision
++  //! decoded to PQ BT.2020.
++  static bool ConvertNative(const AMLCaptureImage& src,
++                            const AMLCaptureColor& color,
++                            const AMLCaptureImage& dst);
++  static AMLCaptureCoding::Transfer GetNativeTransfer(AMLCaptureSignal signal);
++  //! Recode a full-range R'G'B' pixel between two codings through linear light
++  static void Recode(const float in[3],
++                     const AMLCaptureCoding& from,
++                     const AMLCaptureCoding& to,
++                     float out[3]);
++  //! Scale src, a four-channel 8-bit image whose rows may run bottom-up, to the size of dst.
++  static bool Scale(const AMLCaptureImage& src, const AMLCaptureImage& dst);
++
+   //! Map src, an AV_PIX_FMT_RGBA64LE image in an HDR coding, to SDR AV_PIX_FMT_RGBA of the same
+   //! size by the inverse of the coding, as the GUI places SDR. Pixels where gui is clear are left.
+   void MapToSdr(const AMLCaptureImage& src,
+diff --git a/xbmc/utils/Screenshot.cpp b/xbmc/utils/Screenshot.cpp
+--- a/xbmc/utils/Screenshot.cpp
++++ b/xbmc/utils/Screenshot.cpp
+@@ -0,10 +0,12 @@
+ #include "settings/Settings.h"
+ #include "settings/SettingsComponent.h"
+ #include "settings/windows/GUIControlSettings.h"
++#include "utils/StringUtils.h"
+ #include "utils/URIUtils.h"
+ #include "utils/log.h"
+ 
+ #include <memory>
++#include <string_view>
+ 
+ std::vector<std::function<std::unique_ptr<IScreenshotSurface>()>> CScreenShot::m_screenShotSurfaces;
+ 
+@@ -0,6 +0,8 @@
+       return XB_FMT_RGB8;
+     case AV_PIX_FMT_RGBA64LE:
+       return XB_FMT_RGBA16;
++    case AV_PIX_FMT_RGB48BE:
++      return XB_FMT_RGB16BE;
+     case AV_PIX_FMT_X2BGR10LE:
+       return XB_FMT_X2BGR10;
+     default:
+@@ -0,15 +0,31 @@
+   }
+ }
+ 
++// the next free auto name in dir; the suffix is part of the numbering pattern, so each suffix
++// numbers on its own and no name is reused
++std::string NextScreenshotName(const std::string& dir, std::string_view suffix)
++{
++  const std::string file = CUtil::GetNextFilename(
++      URIUtils::AddFileToFolder(dir, StringUtils::Format("screenshot{{:05}}{}.png", suffix)),
++      65535);
++  if (file.empty())
++    CLog::Log(LOGWARNING, "Too many screen shots or invalid folder");
++  else
++    CLog::Log(LOGDEBUG, "Saving screenshot {}", CURL::GetRedacted(file));
++  return file;
++}
++
+ // Encode a delivered capture to the destination file; runs on the capture
+-// service's callback worker.
+-void WriteCapture(const KODI::RENDERING::CAPTURE::CaptureResult& result,
+-                  const std::string& filename)
++// service's callback worker. With autoName, path is the folder, and the file in it is named once
++// the pixels of a native screenshot tell whether they are display-mapped.
++void WriteCapture(KODI::RENDERING::CAPTURE::CaptureResult result,
++                  const std::string& path,
++                  bool autoName = false)
+ {
+   using namespace KODI::RENDERING::CAPTURE;
+   if (!result.pixels)
+   {
+-    CLog::Log(LOGERROR, "Unable to write screenshot {}: no pixels", CURL::GetRedacted(filename));
++    CLog::Log(LOGERROR, "Unable to write screenshot {}: no pixels", CURL::GetRedacted(path));
+     return;
+   }
+ 
+@@ -0,23 +0,31 @@
+   if (!lock.data())
+   {
+     CLog::Log(LOGERROR, "Unable to write screenshot {}: pixel lock failed",
+-              CURL::GetRedacted(filename));
++              CURL::GetRedacted(path));
+     return;
+   }
+ 
++  std::string_view suffix;
++  if (result.pixels->Describe(result))
++    suffix = result.displayMapped ? "-native-mapped" : "-native-raw";
++  const std::string file = autoName ? NextScreenshotName(path, suffix) : path;
++  if (file.empty())
++    return;
++
+   // OPAQUE: the encoder drops the framebuffer alpha through an X-variant source
+   const unsigned int format = CaptureXbFormat(result.format) | XB_FMT_OPAQUE;
+   const uint8_t* src0 = CaptureSrcRow0(lock.data(), result.stride, result.height);
+ 
+   if (!CPicture::CreateThumbnailFromSurface(src0, result.width, result.height,
+-                                            static_cast<unsigned int>(result.stride), filename,
+-                                            format, result.color))
+-    CLog::Log(LOGERROR, "Unable to write screenshot {}", CURL::GetRedacted(filename));
++                                            static_cast<unsigned int>(result.stride), file, format,
++                                            result.color))
++    CLog::Log(LOGERROR, "Unable to write screenshot {}", CURL::GetRedacted(file));
+ }
+ } // namespace
+ 
+ void CScreenShot::TakeScreenshot(const std::string& filename,
+-                                 KODI::RENDERING::CAPTURE::CaptureContent content)
++                                 KODI::RENDERING::CAPTURE::CaptureContent content,
++                                 KODI::RENDERING::CAPTURE::CaptureScreenshot type)
+ {
+   using namespace KODI::RENDERING::CAPTURE;
+ 
+@@ -0,7 +0,7 @@
+   CaptureSpec spec;
+   spec.content = content;
+   spec.format = CaptureFormat::NATIVE;
+-  spec.screenshot = CaptureScreenshot::STANDARD;
++  spec.screenshot = type;
+ 
+   // failure dispatches an empty result because some consumers must act on
+   // it (a bookmark still writes its DB row); here WriteCapture declines it
+@@ -0,10 +0,13 @@
+ 
+ void CScreenShot::TakeScreenshot()
+ {
+-  TakeScreenshot(KODI::RENDERING::CAPTURE::CaptureContent::COMPOSITE);
++  using namespace KODI::RENDERING::CAPTURE;
++
++  TakeScreenshot(CaptureContent::COMPOSITE, CaptureScreenshot::CONFIGURED);
+ }
+ 
+-void CScreenShot::TakeScreenshot(KODI::RENDERING::CAPTURE::CaptureContent content)
++void CScreenShot::TakeScreenshot(KODI::RENDERING::CAPTURE::CaptureContent content,
++                                 KODI::RENDERING::CAPTURE::CaptureScreenshot type)
+ {
+   using namespace KODI::RENDERING::CAPTURE;
+ 
+@@ -0,7 +0,7 @@
+   CaptureSpec spec;
+   spec.content = content;
+   spec.format = CaptureFormat::NATIVE;
+-  spec.screenshot = CaptureScreenshot::STANDARD;
++  spec.screenshot = type;
+ 
+   // Submitted before any filesystem work so the readback grabs the current frame;
+   // the folder dialog (when the path is unset), naming, and write all run in the
+@@ -0,15 +0,7 @@
+                                  CLog::Log(LOGWARNING, "No screenshot path configured");
+                                  return;
+                                }
+-                               const std::string file = CUtil::GetNextFilename(
+-                                   URIUtils::AddFileToFolder(dir, "screenshot{:05}.png"), 65535);
+-                               if (file.empty())
+-                               {
+-                                 CLog::Log(LOGWARNING, "Too many screen shots or invalid folder");
+-                                 return;
+-                               }
+-                               CLog::Log(LOGDEBUG, "Saving screenshot {}", CURL::GetRedacted(file));
+-                               WriteCapture(result, file);
++                               WriteCapture(result, dir, true);
+                              });
+   handle->Detach();
+ }
+diff --git a/xbmc/utils/Screenshot.h b/xbmc/utils/Screenshot.h
+--- a/xbmc/utils/Screenshot.h
++++ b/xbmc/utils/Screenshot.h
+@@ -0,12 +0,17 @@
+   //! \brief Create the platform's capture readback surface, null when none registered.
+   static std::unique_ptr<IScreenshotSurface> CreateSurface();
+ 
++  //! \brief Screenshot of the configured type into the configured folder.
+   static void TakeScreenshot();
+   //! \brief Screenshot of the given content into the configured folder.
+-  static void TakeScreenshot(KODI::RENDERING::CAPTURE::CaptureContent content);
++  static void TakeScreenshot(KODI::RENDERING::CAPTURE::CaptureContent content,
++                             KODI::RENDERING::CAPTURE::CaptureScreenshot type =
++                                 KODI::RENDERING::CAPTURE::CaptureScreenshot::STANDARD);
+   static void TakeScreenshot(const std::string& filename,
+                              KODI::RENDERING::CAPTURE::CaptureContent content =
+-                                 KODI::RENDERING::CAPTURE::CaptureContent::COMPOSITE);
++                                 KODI::RENDERING::CAPTURE::CaptureContent::COMPOSITE,
++                             KODI::RENDERING::CAPTURE::CaptureScreenshot type =
++                                 KODI::RENDERING::CAPTURE::CaptureScreenshot::STANDARD);
+ 
+   //! \brief Capture the video-only image and the full composite from the same
+   //! rendered frame into two files in the configured folder
+diff --git a/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
+--- a/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
++++ b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
+@@ -0,8 +0,11 @@
+ #include "ServiceBroker.h"
+ #include "rendering/capture/CapturePixels.h"
+ #include "rendering/capture/CaptureTypes.h"
++#include "settings/Settings.h"
++#include "settings/SettingsComponent.h"
+ #include "utils/AMLCapture.h"
+ #include "utils/Screenshot.h"
++#include "utils/log.h"
+ #include "windowing/amlogic/WinSystemAmlogicGLESContext.h"
+ 
+ #include <algorithm>
+@@ -0,6 +0,8 @@
+ 
+ namespace
+ {
++constexpr int SCREENSHOT_TYPE_NATIVE = 1;
++
+ 
+ constexpr int FULL_SPAN_8 = 255;
+ constexpr int CODE_SPAN_8_TO_16 = 257;
+@@ -0,6 +0,24 @@
+   }
+ }
+ 
++// a premultiplied 8-bit GUI pixel recoded, as premultiplied 16-bit codes
++void RecodeGui(const int channel[3],
++               int alpha,
++               const AMLCaptureCoding& from,
++               const AMLCaptureCoding& to,
++               int out[3])
++{
++  float in[3];
++  for (int c = 0; c < 3; c++)
++    in[c] =
++        std::clamp(static_cast<float>(channel[c]) * FULL_SPAN_8 / alpha / FULL_SPAN_8, 0.0f, 1.0f);
++  float coded[3];
++  CAMLCaptureConvert::Recode(in, from, to, coded);
++  for (int c = 0; c < 3; c++)
++    out[c] = static_cast<int>(
++        std::lround(coded[c] * FULL_SPAN_8 * alpha / FULL_SPAN_8 * CODE_SPAN_8_TO_16));
++}
++
+ // a normalized coordinate in pixels
+ int Edge(float v, int pixels)
+ {
+@@ -0,24 +0,45 @@
+       return m_buffer.get();
+     m_read = true;
+ 
+-    m_buffer = std::make_unique_for_overwrite<uint8_t[]>(static_cast<size_t>(m_gui.width) *
+-                                                         m_gui.height * 4);
++    const bool native = m_gui.shot == CaptureScreenshot::NATIVE;
++    if (!native)
++      m_buffer = std::make_unique_for_overwrite<uint8_t[]>(static_cast<size_t>(m_gui.width) *
++                                                           m_gui.height * 4);
+     const auto session = m_session.lock();
+     bool ok = false;
+-    if (session)
++    if (native)
++    {
++      AMLCaptureShotFrame shot;
++      if (!session)
++        CLog::Log(LOGWARNING, "CScreenshotSurfaceAML::{}: no native screenshot, the video stopped",
++                  __FUNCTION__);
++      ok = session && session->ReadShot(m_gui.shot, shot) && BlendNative(shot);
++      m_native.resolved = ok;
++    }
++    else if (session)
+       ok = session->ReadVideo(m_gui.shot, m_gui.streamWidth, m_gui.streamHeight,
+                               [this](const AMLCaptureFrame& frame, CAMLCaptureConvert& convert)
+                               { return Blend(frame, convert); });
+     if (m_gui.shot != CaptureScreenshot::NONE)
+       m_lease.reset();
+-    // a GUI in an HDR coding would pass for SDR
+-    if (!ok && m_gui.coding.transfer != AMLCaptureCoding::Transfer::SDR)
++    // a native screenshot that is only the GUI would pass for a capture of the screen, and a GUI
++    // in an HDR coding for SDR
++    if (!ok && (native || m_gui.coding.transfer != AMLCaptureCoding::Transfer::SDR))
++    {
++      if (m_gui.shot == CaptureScreenshot::STANDARD)
++        CLog::Log(LOGWARNING, "CScreenshotSurfaceAML::{}: no HDR GUI screenshot without the video",
++                  __FUNCTION__);
+       m_buffer.reset();
++    }
+     else if (!ok)
+       CopyGui();
++    // read once; the encode that follows is the peak
++    m_gui.pixels.reset();
+     return m_buffer.get();
+   }
+ 
++  bool Describe(CaptureResult& result) const override { return m_native.Describe(result); }
++
+ private:
+   // place the visible video, mapped to SDR, in the GUI's coding at its place on black, blend the
+   // premultiplied GUI over it as the OSD blender does, then invert the coding to SDR, so the GUI
+@@ -0,6 +0,90 @@
+     return true;
+   }
+ 
++  // place the visible video in its own coding at its place in the shot's size, scale the GUI to
++  // that size, recode it where its coding differs and blend it over as the OSD blender does
++  bool BlendNative(AMLCaptureShotFrame& shot)
++  {
++    const AMLCaptureFrame& frame = shot.frame;
++    const int width = frame.image.width;
++    const int height = frame.image.height;
++    const size_t size = static_cast<size_t>(width) * height * 4;
++
++    const AMLCaptureCoding& guiCoding = m_gui.coding;
++    AMLCaptureCoding videoCoding;
++    videoCoding.transfer = CAMLCaptureConvert::GetNativeTransfer(frame.color.signal);
++    videoCoding.whiteNits = guiCoding.whiteNits;
++    const bool recode = guiCoding.transfer != videoCoding.transfer;
++
++    m_buffer = std::make_unique_for_overwrite<uint8_t[]>(static_cast<size_t>(width) * height * 6);
++    const AMLCaptureImage image =
++        AMLCaptureImage::Packed(AV_PIX_FMT_RGB48BE, width, height, m_buffer.get(), width * 6);
++
++    const CRect& video = m_gui.video;
++    const int x1 = Edge(video.x1, width);
++    const int y1 = Edge(video.y1, height);
++    AMLCaptureImage place = Offset(image, x1, y1, 6);
++    // vdin1 holds the video at its size in the shot, so it is placed 1:1 and never resampled
++    AMLCaptureImage crop =
++        CAMLCapture::Crop(frame.image, CRect(0.0f, 0.0f, video.Width(), video.Height()));
++    crop.width = std::min(crop.width, (width - x1) & ~1);
++    crop.height = std::min(crop.height, height - y1);
++    place.width = crop.width;
++    place.height = crop.height;
++    // the place is converted whole; around it the video is black
++    FillAround(width, height, x1, y1, place.width, place.height,
++               [&](int y, int from, int to)
++               {
++                 uint8_t* row = m_buffer.get() + static_cast<size_t>(y) * width * 6;
++                 std::fill(row + from * 6, row + to * 6, 0);
++               });
++    if (place.width > 0 && place.height > 0 &&
++        !CAMLCaptureConvert::ConvertNative(crop, frame.color, place))
++      return false;
++
++    m_native.color = frame.color;
++    m_native.width = width;
++    m_native.height = height;
++    shot = {};
++
++    std::unique_ptr<uint8_t[]> scaled;
++    if (m_gui.width != width || m_gui.height != height)
++    {
++      scaled = std::make_unique_for_overwrite<uint8_t[]>(size);
++      const AMLCaptureImage dst =
++          AMLCaptureImage::Packed(AV_PIX_FMT_RGBA, width, height, scaled.get(), width * 4);
++      if (!CAMLCaptureConvert::Scale(m_gui.Image(), dst))
++        return false;
++    }
++
++    const int r = m_gui.bgra ? 2 : 0;
++    const int b = m_gui.bgra ? 0 : 2;
++    for (int y = 0; y < height; y++)
++    {
++      const uint8_t* gui =
++          scaled ? scaled.get() + static_cast<size_t>(y) * width * 4 : m_gui.Row(y);
++      uint8_t* out = m_buffer.get() + static_cast<size_t>(y) * width * 6;
++      for (int x = 0; x < width; x++, gui += 4)
++      {
++        const int alpha = gui[3];
++        const int channel[3] = {gui[r], gui[1], gui[b]};
++        int over[3] = {channel[0] * CODE_SPAN_8_TO_16, channel[1] * CODE_SPAN_8_TO_16,
++                       channel[2] * CODE_SPAN_8_TO_16};
++        if (recode && alpha > 0)
++          RecodeGui(channel, alpha, guiCoding, videoCoding, over);
++        for (int c = 0; c < 3; c++, out += 2)
++        {
++          const int under = out[0] << 8 | out[1];
++          const int value = over[c] + (FULL_SPAN_8 - alpha) * under / FULL_SPAN_8;
++          const uint16_t blended = static_cast<uint16_t>(std::min(value, 65535));
++          out[0] = static_cast<uint8_t>(blended >> 8);
++          out[1] = static_cast<uint8_t>(blended);
++        }
++      }
++    }
++    return true;
++  }
++
+   // a standard screenshot is the rows of an 8-bit PNG
+   bool IsRgb() const { return m_gui.shot == CaptureScreenshot::STANDARD; }
+ 
+@@ -0,6 +0,7 @@
+   std::mutex m_lock;
+   bool m_read{false};
+   std::unique_ptr<uint8_t[]> m_buffer;
++  AMLCaptureNative m_native;
+ };
+ 
+ } // namespace
+@@ -0,15 +0,36 @@
+   return true;
+ }
+ 
+-void CScreenshotSurfaceAML::TakePixels(const CaptureSpec& spec, CaptureResult& result)
++void CScreenshotSurfaceAML::TakePixels(const CaptureSpec& requested, CaptureResult& result)
+ {
++  CaptureSpec spec = requested;
++  if (spec.screenshot == CaptureScreenshot::CONFIGURED)
++  {
++    const int type = CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(
++        CSettings::SETTING_COREELEC_AMLOGIC_SCREENSHOTTYPE);
++    spec.screenshot =
++        type == SCREENSHOT_TYPE_NATIVE ? CaptureScreenshot::NATIVE : CaptureScreenshot::STANDARD;
++  }
+   using KODI::WINDOWING::AML::CWinSystemAmlogicGLESContext;
+ 
+   const auto session = CAMLCapture::GetActive();
+   auto* winSystem = dynamic_cast<CWinSystemAmlogicGLESContext*>(CServiceBroker::GetWinSystem());
+-  if (!session || !session->IsPresented() || !winSystem ||
+-      (m_format != AV_PIX_FMT_RGBA && m_format != AV_PIX_FMT_BGRA))
++  // with no video presented a native screenshot is the GUI readback, which loses nothing
++  if (!session || !session->IsPresented() || !winSystem)
+     return CScreenshotSurfaceGLES::TakePixels(spec, result);
++  // only 8-bit readbacks get the video, and a native screenshot fails without it
++  if (m_format != AV_PIX_FMT_RGBA && m_format != AV_PIX_FMT_BGRA)
++  {
++    if (spec.screenshot == CaptureScreenshot::NATIVE)
++    {
++      CLog::Log(LOGWARNING, "CScreenshotSurfaceAML::{}: no native screenshot of a deep readback",
++                __FUNCTION__);
++      result.pixels = std::make_shared<CHeapCapturePixels>(nullptr);
++    }
++    else
++      CScreenshotSurfaceGLES::TakePixels(spec, result);
++    return;
++  }
+ 
+   GuiReadback gui;
+   gui.pixels.reset(TakeBuffer());
+@@ -0,7 +0,11 @@
+     gui.coding.transfer = AMLCaptureCoding::Transfer::PQ;
+   else if (transfer == AVCOL_TRC_ARIB_STD_B67)
+     gui.coding.transfer = AMLCaptureCoding::Transfer::HLG;
+-  gui.coding.whiteNits = winSystem->GetGuiCompositePeak() * PQ_PEAK_NITS;
++  // an SDR GUI over an HDR signal sits at the GUI's SDR white
++  const float white =
++      transfer ? winSystem->GetGuiCompositePeak()
++               : CGuiCompositeShaderGLES::PeakFromPQCode(winSystem->GetGuiSdrPeakLuminance());
++  gui.coding.whiteNits = white * PQ_PEAK_NITS;
+   gui.video = session->GetVisibleRect();
+   CAMLCapture::GetCaptureSize(gui.streamWidth, gui.streamHeight);
+   gui.shot = spec.screenshot;

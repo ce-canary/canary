@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 16 Oct 2026 14:53:35 -0500
+Subject: [PATCH] vdin: refuse v4l2 capture sizes the scaler cannot reach
+
+S_FMT takes any width and height, and start refuses only an upscale.
+A shrink of 32x or more leaves the vertical scaler off, and a width
+under the canvas alignment skips the horizontal one. vdin then writes
+the source size into the small capture buffers and corrupts memory.
+---
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,6 +0,14 @@
+ 	return 0;
+ }
+ 
++static void vdin_v4l2_bound_size(struct vdin_dev_s *devp,
++				 struct v4l2_pix_format_mplane *pix_mp)
++{
++	pix_mp->width = clamp_t(u32, rounddown(pix_mp->width, devp->canvas_align),
++				devp->canvas_align, VDIN_4K_SIZE >> 16);
++	pix_mp->height = clamp_t(u32, rounddown(pix_mp->height, 2), 2, VDIN_4K_SIZE & 0xffff);
++}
++
+ /*
+  * for mplane
+  * cmd ID:VIDIOC_S_FMT
+@@ -0,6 +0,7 @@
+ 		dprintk(2, "%s:force pixelformat to 0x%x\n", __func__,
+ 			devp->v4l2_fmt.fmt.pix_mp.pixelformat);
+ 	}
++	vdin_v4l2_bound_size(devp, &fmt->fmt.pix_mp);
+ #ifndef VDIN_V4L2_FILL_PIXFMT_MP
+ 	devp->v4l2_fmt.fmt.pix_mp.width	       = fmt->fmt.pix_mp.width;
+ 	devp->v4l2_fmt.fmt.pix_mp.height       = fmt->fmt.pix_mp.height;
+@@ -0,6 +0,7 @@
+ 			__func__, devp->index, f->fmt.pix_mp.pixelformat);
+ 		return -EINVAL;
+ 	}
++	vdin_v4l2_bound_size(devp, &f->fmt.pix_mp);
+ 
+ 	return 0;
+ }
+@@ -0,6 +0,16 @@
+ 		return -EINVAL;
+ 	}
+ 
++	/* the vdin scalers cannot shrink by 32 or more */
++	if (devp->v4l2_fmt.fmt.pix_mp.width * 32 <= vdin_cap_param.h_active ||
++		devp->v4l2_fmt.fmt.pix_mp.height * 32 <= vdin_cap_param.v_active) {
++		dprintk(0, "%s,out of scale range!v4l2_fmt:%dx%d active:%dx%d\n",
++			__func__, devp->v4l2_fmt.fmt.pix_mp.width,
++			devp->v4l2_fmt.fmt.pix_mp.height, vdin_cap_param.h_active,
++			vdin_cap_param.v_active);
++		return -EINVAL;
++	}
++
+ 	if (devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21 ||
+ 		devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21M)
+ 		vdin_cap_param.dfmt = TVIN_NV21;

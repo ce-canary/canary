@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 13 Oct 2026 13:32:59 -0500
+Subject: [PATCH] VideoPlayer: keep the disc's subtitle state in Blu-ray menu
+ mode
+
+In Blu-ray menu mode libbluray announces whether subtitles are shown.
+SetVideoSettings, run by the settings load at start, by the settings
+dialogs and by the tone map action, overwrote that with the per-file
+subtitle state, so subtitles the disc had turned off came back.
+---
+ .../DVDInputStreams/DVDInputStreamBluray.cpp    |  1 +
+ .../DVDInputStreams/DVDInputStreamBluray.h      |  4 ++++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp          | 17 ++++++++++++++++-
+ xbmc/cores/VideoPlayer/VideoPlayer.h            |  2 ++
+ 4 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,6 +0,7 @@
+   case BD_EVENT_PG_TEXTST:
+     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - BD_EVENT_PG_TEXTST {}", m_event.param);
+     pid = m_event.param;
++    m_pgEnabled = m_event.param != 0;
+     m_player->OnDiscNavResult(static_cast<void*>(&pid), BD_EVENT_PG_TEXTST);
+     break;
+ 
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,9 @@
+   //! show or hide the presentation graphic stream libbluray last reported, in navigation mode
+   void SetSubtitleVisible(bool visible);
+ 
++  //! the presentation graphic display flag libbluray last reported
++  bool IsPgEnabled() const { return m_pgEnabled; }
++
+   struct ClipTime
+   {
+     uint64_t inTime{0};
+@@ -0,4 +0,5 @@
+     bool m_clipStartHeld{false};
+     uint64_t m_clipStartEnd{0};
+     uint32_t m_pgStreamNumber{0};
++    bool m_pgEnabled{false};
+ };
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,7 @@
+   if (m_pInputStream.use_count() > 1)
+     throw std::runtime_error("m_pInputStream reference count is greater than 1");
+   m_pInputStream.reset();
++  m_blurayMenu = false;
+ 
+   CLog::Log(LOGINFO, "Creating InputStream");
+ 
+@@ -0,6 +0,16 @@
+     return false;
+   }
+ 
++  const std::shared_ptr<CDVDInputStream::IMenus> menus{
++      std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream)};
++  m_blurayMenu = m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY) && menus &&
++                 menus->GetSupportedMenuType() == MenuType::NATIVE;
++#if defined(HAVE_LIBBLURAY)
++  // a settings load before this point put the per-file subtitle state over the disc's
++  if (m_blurayMenu)
++    m_VideoPlayerVideo->EnableSubtitle(GetBlurayInputStream()->IsPgEnabled());
++#endif
++
+   // find any available external subtitles for non dvd files
+   if (!m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD) &&
+       !m_pInputStream->IsStreamType(DVDSTREAM_TYPE_PVRMANAGER))
+@@ -0,6 +0,7 @@
+   if (m_pInputStream.use_count() > 1)
+     throw std::runtime_error("m_pInputStream reference count is greater than 1");
+   m_pInputStream.reset();
++  m_blurayMenu = false;
+ 
+   // clean up all selection streams
+   m_SelectionStreams.Clear(StreamType::NONE, STREAM_SOURCE_NONE);
+@@ -0,6 +0,7 @@
+       if (m_pInputStream.use_count() > 1)
+         throw std::runtime_error("m_pInputStream reference count is greater than 1");
+       m_pInputStream.reset();
++      m_blurayMenu = false;
+ 
+       m_SelectionStreams.Clear(StreamType::NONE, STREAM_SOURCE_NONE);
+ 
+@@ -0,7 +0,9 @@
+   m_renderManager.SetDelay(static_cast<int>(settings.m_AudioDelay * 1000.0f));
+   m_renderManager.SetSubtitleVerticalPosition(settings.m_subtitleVerticalPosition,
+                                               settings.m_subtitleVerticalPositionSave);
+-  m_VideoPlayerVideo->EnableSubtitle(settings.m_SubtitleOn);
++  // libbluray owns the subtitle state of a menu-mode session
++  if (!m_blurayMenu)
++    m_VideoPlayerVideo->EnableSubtitle(settings.m_SubtitleOn);
+   m_VideoPlayerVideo->SetSubtitleDelay(static_cast<int>(-settings.m_SubtitleDelay * DVD_TIME_BASE));
+ }
+ 
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,8 @@
+   CDVDOverlayContainer m_overlayContainer;
+ 
+   std::shared_ptr<CDVDInputStream> m_pInputStream;
++  //! written on the player thread, read by SetVideoSettings from any thread
++  std::atomic<bool> m_blurayMenu{false};
+   std::unique_ptr<CDVDDemux> m_pDemuxer;
+   std::shared_ptr<CDVDDemux> m_pSubtitleDemuxer;
+   std::unordered_map<int64_t, std::shared_ptr<CDVDDemux>> m_subtitleDemuxerMap;

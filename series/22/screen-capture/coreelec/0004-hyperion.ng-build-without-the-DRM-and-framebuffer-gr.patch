@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 18 Oct 2026 15:14:29 -0500
+Subject: [PATCH] hyperion.ng: build without the DRM and framebuffer grabbers
+
+Kodi feeds Hyperion the GUI and the video. When selected, the DRM
+grabber reads the GUI buffer from uncached memory at a large CPU cost
+and takes DRM master before Kodi at boot. The framebuffer grabber shows
+only the boot splash.
+---
+ .../packages/addons/service/hyperion.ng/changelog.txt          | 1 +
+ .../Amlogic-ce/packages/addons/service/hyperion.ng/package.mk  | 3 ++-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt
+--- a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt
++++ b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt
+@@ -0,6 +0,7 @@
+ - Remove Amlogic grabber
+ - Drop platform script
+ - Feed the Kodi picture, video and menus, to Hyperion by itself over hyperiond's flatbuffer server, on by default (screen capture used to be opt-in)
++- Build without the DRM and framebuffer screen grabbers
+ 122
+ - Add platform script
+ 121
+diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/package.mk b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/package.mk
+--- a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/package.mk
++++ b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/package.mk
+@@ -0,7 +0,8 @@
+                          -DENABLE_AMLOGIC=OFF \
+                          -DENABLE_DISPMANX=OFF \
+                          -DENABLE_CEC=OFF \
+-                         -DENABLE_FB=ON \
++                         -DENABLE_FB=OFF \
++                         -DENABLE_DRM=OFF \
+                          -DENABLE_DEV_WS281XPWM=OFF \
+                          -DENABLE_X11=OFF \
+                          -DENABLE_V4L2=ON \

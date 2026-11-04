@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 30 Oct 2026 18:26:20 -0500
+Subject: [PATCH] amdv: route the enhancement layer to a running core1a
+
+Core1a takes VD2 as its EL input only when it starts from off. Under a
+kept picture it stays on, so a FEL item after a MEL item enables the
+composer EL while VD2 still goes to the VPP, and the picture is black.
+---
+ drivers/media/enhancement/amdolby_vision/amdv_hw.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/media/enhancement/amdolby_vision/amdv_hw.c b/drivers/media/enhancement/amdolby_vision/amdv_hw.c
+--- a/drivers/media/enhancement/amdolby_vision/amdv_hw.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv_hw.c
+@@ -0,6 +0,10 @@
+ 				VSYNC_WR_DV_REG_BITS
+ 					(AMDV_PATH_CTRL,
+ 					 0, 0, 1);
++				if (el_enable)
++					VSYNC_WR_DV_REG_BITS
++						(AMDV_PATH_CTRL,
++						 0, 1, 1);
+ 			} else if (is_aml_tm2_stbmode()) {
+ 				VSYNC_WR_DV_REG_BITS
+ 					(AMDV_PATH_CTRL,

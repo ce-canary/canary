@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 22 Oct 2026 18:38:18 -0500
+Subject: [PATCH] RenderCapture: release the Python lock while waiting for a
+ frame
+
+getImage blocks until the next captured frame, up to its timeout,
+while holding the interpreter lock. A capture add-on polling it stalls
+every other Python add-on for as long as it waits.
+---
+ xbmc/interfaces/legacy/RenderCapture.h | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/interfaces/legacy/RenderCapture.h b/xbmc/interfaces/legacy/RenderCapture.h
+--- a/xbmc/interfaces/legacy/RenderCapture.h
++++ b/xbmc/interfaces/legacy/RenderCapture.h
+@@ -0,6 +0,7 @@
+ 
+ #include "AddonClass.h"
+ #include "Exception.h"
++#include "LanguageHook.h"
+ #include "ServiceBroker.h"
+ #include "application/ApplicationComponents.h"
+ #include "application/ApplicationPlayer.h"
+@@ -0,6 +0,16 @@
+       unsigned int m_height{0};
+       std::unique_ptr<uint8_t[]> m_buffer;
+ 
++#ifndef SWIG
++      //! waits for the next frame without holding the interpreter lock
++      bool WaitFrame(unsigned int msec)
++      {
++        KODI::RENDERING::CAPTURE::CCaptureHandle& handle = *m_handle;
++        DelayedCallGuard dg(languageHook);
++        return handle.WaitNext(std::chrono::milliseconds(msec ? msec : 1000));
++      }
++#endif
++
+     public:
+       RenderCapture() = default;
+       ~RenderCapture() override = default;
+@@ -0,7 +0,7 @@
+       {
+         if (!m_handle)
+           return false;
+-        if (!m_handle->WaitNext(std::chrono::milliseconds(msec ? msec : 1000)))
++        if (!WaitFrame(msec))
+           return false;
+         const KODI::RENDERING::CAPTURE::CaptureResult result = m_handle->CopyResult();
+         // legacy contract: raw output-coded 8-bit BGRA, never tonemapped; an

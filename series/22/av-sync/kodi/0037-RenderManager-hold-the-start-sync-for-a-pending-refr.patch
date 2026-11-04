@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 2 Nov 2026 13:15:42 -0600
+Subject: [PATCH] RenderManager: hold the start sync for a pending refresh
+ switch
+
+Playback starts on the GUI refresh rate and switches it shortly after.
+On a rate that does not fit the video the clock sync is off and has no
+phase, so an audio start sync finishing before the switch hands its
+whole error to the clock.
+---
+ .../VideoRenderers/RenderManager.cpp           | 18 +++++++++++++++---
+ .../VideoPlayer/VideoRenderers/RenderManager.h |  2 +-
+ 2 files changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,8 +0,12 @@
+   }
+   else
+   {
+-    m_dvdClock.SetVsyncAdjust(0);
+-    m_dvdClock.GetVsyncPhase().SetPhasePeriod(0);
++    // the vsync thread leaves the phase to CheckEnableClockSync, which can hold it pending
++    if (!m_presenting)
++    {
++      m_dvdClock.SetVsyncAdjust(0);
++      m_dvdClock.GetVsyncPhase().SetPhasePeriod(0);
++    }
+     // with no lock to the display, release at the nearest vsync
+     if (!isPaused)
+       renderPts += frametime / 2;
+@@ -0,7 +0,15 @@
+   else
+   {
+     m_clockSync.m_enabled = false;
+-    m_dvdClock.SetVsyncAdjust(0);
++    // a start sync waits for the refresh rate that the pending switch sets
++    const CGraphicContext& gfx = CServiceBroker::GetWinSystem()->GetGfxContext();
++    if (m_presenting && m_bTriggerUpdateResolution && gfx.IsFullScreenVideo() &&
++        gfx.IsFullScreenRoot() && m_fps > 0.0f &&
++        CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(
++            CSettings::SETTING_VIDEOPLAYER_ADJUSTREFRESHRATE) != ADJUST_REFRESHRATE_OFF)
++      m_dvdClock.GetVsyncPhase().SetVsyncPhasePending();
++    else
++      m_dvdClock.SetVsyncAdjust(0);
+     m_dvdClock.GetVsyncPhase().SetPhasePeriod(0);
+   }
+ 
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -0,7 +0,7 @@
+   mutable CCriticalSection m_statelock;
+   CCriticalSection m_presentlock;
+   CCriticalSection m_datalock;
+-  bool m_bTriggerUpdateResolution = false;
++  std::atomic_bool m_bTriggerUpdateResolution{false};
+   bool m_bRenderGUI = true;
+   bool m_renderedDebugOverlay = false;
+   bool m_renderDebug = false;

@@ -1,0 +1,761 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 22 Oct 2026 18:39:56 -0500
+Subject: [PATCH] ScreenshotSurfaceAML: blend captured video under the GUI
+
+The GLES readback holds only the GUI, so an Amlogic screenshot during
+playback shows no video, and under an HDR GUI it is PQ coded while it is
+tagged SDR.
+---
+ xbmc/utils/AMLCapture.cpp                     |  11 +-
+ xbmc/utils/AMLCaptureConvert.cpp              | 201 ++++++++++++-
+ xbmc/utils/AMLCaptureConvert.h                |  42 ++-
+ xbmc/windowing/amlogic/CMakeLists.txt         |   6 +-
+ .../amlogic/ScreenshotSurfaceAML.cpp          | 275 ++++++++++++++++++
+ xbmc/windowing/amlogic/ScreenshotSurfaceAML.h |  23 ++
+ xbmc/windowing/amlogic/WinSystemAmlogic.cpp   |   4 +-
+ .../amlogic/WinSystemAmlogicGLESContext.h     |   4 +
+ 8 files changed, 553 insertions(+), 13 deletions(-)
+ create mode 100644 xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
+ create mode 100644 xbmc/windowing/amlogic/ScreenshotSurfaceAML.h
+
+diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
+--- a/xbmc/utils/AMLCapture.cpp
++++ b/xbmc/utils/AMLCapture.cpp
+@@ -0,10 +0,13 @@
+                                                             m_spec.height * 4);
+     const AMLCaptureImage dst = AMLCaptureImage::Packed(
+         AV_PIX_FMT_BGRA, m_spec.width, m_spec.height, buffer.get(), m_spec.width * 4);
+-    const bool ok = session->Read(
+-        m_streamWidth, m_streamHeight,
+-        [this, &dst](const AMLCaptureFrame& frame, CAMLCaptureConvert& convert)
+-        { return convert.Convert(CAMLCapture::Crop(frame.image, m_spec.rect), frame.color, dst); });
++    const bool ok =
++        session->Read(m_streamWidth, m_streamHeight,
++                      [this, &dst](const AMLCaptureFrame& frame, CAMLCaptureConvert& convert)
++                      {
++                        return convert.Convert(CAMLCapture::Crop(frame.image, m_spec.rect),
++                                               frame.color, AMLCaptureCoding(), dst);
++                      });
+ 
+     if (ok)
+       m_buffer = std::move(buffer);
+diff --git a/xbmc/utils/AMLCaptureConvert.cpp b/xbmc/utils/AMLCaptureConvert.cpp
+--- a/xbmc/utils/AMLCaptureConvert.cpp
++++ b/xbmc/utils/AMLCaptureConvert.cpp
+@@ -0,6 +0,14 @@
+ constexpr double HLG_GAMMA = 1.2;
+ constexpr double HLG_PEAK_NITS = 1000.0;
+ constexpr double HLG_SCENE_SCALE = 12.0;
++constexpr double HLG_MIN_LUMA = 1e-6;
++
++// IEC 61966-2-1, the coding of the GUI
++constexpr double SRGB_THRESHOLD = 0.04045;
++constexpr double SRGB_LINEAR_THRESHOLD = 0.0031308;
++constexpr double SRGB_SLOPE = 12.92;
++constexpr double SRGB_OFFSET = 0.055;
++constexpr double SRGB_GAMMA = 2.4;
+ 
+ // Kodi's default video tonemap curve: Hable at parameter 1.0 (CMediaSettings), as the GLES video
+ // shader applies it (YUV2RGBShaderGLES.cpp, gles_tonemap.frag, gles_yuv2rgb_basic.frag)
+@@ -0,6 +0,24 @@
+   return std::pow(std::max(p - PQ_C1, 0.0) / (PQ_C2 - PQ_C3 * p), 1 / PQ_M1);
+ }
+ 
++double LinearToPQ(double l)
++{
++  const double y = std::pow(std::max(l, 0.0), PQ_M1);
++  return std::pow((PQ_C1 + PQ_C2 * y) / (1 + PQ_C3 * y), PQ_M2);
++}
++
++double SrgbToLinear(double v)
++{
++  return v <= SRGB_THRESHOLD ? v / SRGB_SLOPE
++                             : std::pow((v + SRGB_OFFSET) / (1 + SRGB_OFFSET), SRGB_GAMMA);
++}
++
++double LinearToSrgb(double l)
++{
++  return l <= SRGB_LINEAR_THRESHOLD ? l * SRGB_SLOPE
++                                    : (1 + SRGB_OFFSET) * std::pow(l, 1 / SRGB_GAMMA) - SRGB_OFFSET;
++}
++
+ double HlgToScene(double e)
+ {
+   return e <= 0.5 ? e * e / 3 : (std::exp((e - HLG_C) / HLG_A) + HLG_B) / HLG_SCENE_SCALE;
+@@ -0,6 +0,20 @@
+   return std::pow(luma, HLG_GAMMA - 1) * HLG_PEAK_NITS / PQ_PEAK_NITS;
+ }
+ 
++// the inverse OOTF gain by the luma of linear light at the PQ peak, to scene light at 1.0 for
++// the HLG maximum
++double HlgInverseGain(double luma)
++{
++  const double display = PQ_PEAK_NITS / HLG_PEAK_NITS;
++  return display * std::pow(std::max(HLG_MIN_LUMA, luma * display), (1 - HLG_GAMMA) / HLG_GAMMA);
++}
++
++double SceneToHlg(double v)
++{
++  const double scene = v * HLG_SCENE_SCALE;
++  return scene < 1 ? 0.5 * std::sqrt(scene) : HLG_A * std::log(scene - HLG_B) + HLG_C;
++}
++
+ // one entry past the end, so a lookup at 1.0 interpolates without a bounds check
+ template<typename F>
+ std::vector<float> MakeTable(int steps, F f)
+@@ -0,8 +0,13 @@
+ struct Tables
+ {
+   std::vector<float> pqToLinear = MakeTable(PQ_EOTF_STEPS, PQToLinear);
++  std::vector<float> linearToPQLog = MakeLogTable(LinearToPQ);
++  std::vector<float> srgbToLinear = MakeTable(TABLE_STEPS, SrgbToLinear);
++  std::vector<float> linearToSrgbLog = MakeLogTable(LinearToSrgb);
+   std::vector<float> hlgToScene = MakeTable(TABLE_STEPS, HlgToScene);
+   std::vector<float> hlgSystemGain = MakeLogTable(HlgSystemGain);
++  std::vector<float> hlgInverseGain = MakeLogTable(HlgInverseGain);
++  std::vector<float> sceneToHlg = MakeLogTable(SceneToHlg);
+   std::vector<float> linearToBt1886 = MakeLogTable(LinearToBt1886);
+   std::vector<float> linearToSdr = MakeLogTable(LinearToSdr);
+ };
+@@ -0,6 +0,15 @@
+   }
+ }
+ 
++Matrix ScaleMatrix(const Matrix& m, double scale)
++{
++  Matrix out = m;
++  for (auto& row : out)
++    for (double& v : row)
++      v *= scale;
++  return out;
++}
++
+ void YccRow(const uint16_t* y,
+             const uint16_t* cb,
+             const uint16_t* cr,
+@@ -0,6 +0,24 @@
+   }
+ }
+ 
++// the GUI composite's HLG coding (gles_gui_composite.frag)
++void LinearRowToHlg(const Tables& tables, const Planes& p, int width)
++{
++  const float* gain = tables.hlgInverseGain.data();
++  const float* oetf = tables.sceneToHlg.data();
++  for (int x = 0; x < width; x++)
++  {
++    float linear[3];
++    for (int c = 0; c < 3; c++)
++      linear[c] = std::max(p[c][x], 0.0f);
++    const float luma =
++        BT2020_KR * linear[0] + (1 - BT2020_KR - BT2020_KB) * linear[1] + BT2020_KB * linear[2];
++    const float g = LookupLog(gain, luma);
++    for (int c = 0; c < 3; c++)
++      p[c][x] = LookupLog(oetf, linear[c] * g);
++  }
++}
++
+ // R'G'B' of an SDR signal, else linear BT.2020; true for linear
+ bool DecodeRow(AMLCaptureSignal signal,
+                const uint16_t* y,
+@@ -0,6 +0,11 @@
+   return static_cast<uint8_t>(v * 255 + 0.5f);
+ }
+ 
++uint16_t To16(float v)
++{
++  return static_cast<uint16_t>(v * 65535 + 0.5f);
++}
++
+ // a row of planes to opaque 8-bit pixels, red at R and blue at B
+ template<int R, int B>
+ [[gnu::always_inline]] inline void StoreRow8(const Planes& p, int width, uint8_t* __restrict out)
+@@ -0,6 +0,20 @@
+   }
+ }
+ 
++// the end of the run from x of pixels where the overlay gui is clear, or is not; without an overlay
++// the row is one run
++int RunEnd(const uint8_t* gui, int x, int width)
++{
++  if (!gui)
++    return width;
++
++  const bool clear = CAMLCaptureConvert::IsClear(gui + 4 * x);
++  int end = x + 1;
++  while (end < width && CAMLCaptureConvert::IsClear(gui + 4 * end) == clear)
++    end++;
++  return end;
++}
++
+ } // namespace
+ 
+ CAMLCaptureConvert::~CAMLCaptureConvert()
+@@ -0,10 +0,14 @@
+ 
+ bool CAMLCaptureConvert::Convert(const AMLCaptureImage& src,
+                                  const AMLCaptureColor& color,
+-                                 const AMLCaptureImage& dst)
++                                 const AMLCaptureCoding& coding,
++                                 const AMLCaptureImage& dst,
++                                 const AMLCaptureImage* gui,
++                                 const AMLCaptureImage* sdr)
+ {
++  const bool bgra = dst.format == AV_PIX_FMT_BGRA;
+   if (src.format != AV_PIX_FMT_NV12 || src.width <= 0 || src.height <= 0 || dst.width <= 0 ||
+-      dst.height <= 0 || dst.format != AV_PIX_FMT_BGRA)
++      dst.height <= 0 || (!bgra && dst.format != AV_PIX_FMT_RGBA64LE))
+     return false;
+ 
+   if (!Stage(src, dst.width, dst.height))
+@@ -0,6 +0,9 @@
+   const std::size_t plane = static_cast<std::size_t>(dst.width) * dst.height;
+   const std::vector<float>* toneMap = IsSdr(color.signal) ? nullptr : &GetToneMap(color.luminance);
+   const Tables& tables = GetTables();
++  // an HDR coding holds the SDR video as the GUI shader places SDR
++  const Matrix sdrToLinear =
++      ScaleMatrix(BT709_TO_BT2020, static_cast<double>(coding.whiteNits) / PQ_PEAK_NITS);
+   std::vector<float> rows(static_cast<std::size_t>(dst.width) * 3);
+   const Planes p = {rows.data(), rows.data() + dst.width, rows.data() + 2 * dst.width};
+   for (int y = 0; y < dst.height; y++)
+@@ -0,7 +0,104 @@
+       ToneMapRow(tables.linearToSdr, *toneMap, p, dst.width);
+     }
+ 
+-    StoreRow8<2, 0>(p, dst.width, dst.data[0] + static_cast<std::ptrdiff_t>(y) * dst.linesize[0]);
++    const uint8_t* overlay =
++        gui ? gui->data[0] + static_cast<std::ptrdiff_t>(y) * gui->linesize[0] : nullptr;
++    int x2 = 0;
++    for (int x1 = 0; x1 < dst.width; x1 = x2)
++    {
++      x2 = RunEnd(overlay, x1, dst.width);
++      const int width = x2 - x1;
++      const Planes span = {p[0] + x1, p[1] + x1, p[2] + x1};
++      if (overlay && IsClear(overlay + 4 * x1))
++      {
++        StoreRow8<0, 2>(span, width,
++                        sdr->data[0] + static_cast<std::ptrdiff_t>(y) * sdr->linesize[0] + x1 * 4);
++        continue;
++      }
++
++      if (coding.transfer != AMLCaptureCoding::Transfer::SDR)
++      {
++        for (float* v : span)
++          LookupRow(tables.srgbToLinear, v, width);
++        ApplyRow(sdrToLinear, span, width);
++        if (coding.transfer == AMLCaptureCoding::Transfer::PQ)
++        {
++          for (float* v : span)
++            LookupLogRow(tables.linearToPQLog, v, width);
++        }
++        else
++          LinearRowToHlg(tables, span, width);
++      }
++
++      uint8_t* row = dst.data[0] + static_cast<std::ptrdiff_t>(y) * dst.linesize[0];
++      if (bgra)
++        StoreRow8<2, 0>(span, width, row + x1 * 4);
++      else
++      {
++        uint16_t* out = reinterpret_cast<uint16_t*>(row) + x1 * 4;
++        for (int x = 0; x < width; x++, out += 4)
++        {
++          for (int c = 0; c < 3; c++)
++            out[c] = To16(std::clamp(span[c][x], 0.0f, 1.0f));
++          out[3] = 65535;
++        }
++      }
++    }
+   }
+   return true;
+ }
++
++void CAMLCaptureConvert::MapToSdr(const AMLCaptureImage& src,
++                                  const AMLCaptureCoding& coding,
++                                  const AMLCaptureImage& dst,
++                                  const AMLCaptureImage* gui)
++{
++  const Tables& tables = GetTables();
++  const Matrix toSdr =
++      ScaleMatrix(BT2020_TO_BT709, PQ_PEAK_NITS / static_cast<double>(coding.whiteNits));
++  std::vector<float> rows(static_cast<std::size_t>(src.width) * 3);
++  const Planes p = {rows.data(), rows.data() + src.width, rows.data() + 2 * src.width};
++  for (int y = 0; y < src.height; y++)
++  {
++    const uint8_t* overlay =
++        gui ? gui->data[0] + static_cast<std::ptrdiff_t>(y) * gui->linesize[0] : nullptr;
++    int x2 = 0;
++    for (int x1 = 0; x1 < src.width; x1 = x2)
++    {
++      x2 = RunEnd(overlay, x1, src.width);
++      if (overlay && IsClear(overlay + 4 * x1))
++        continue;
++
++      const int width = x2 - x1;
++      const Planes span = {p[0] + x1, p[1] + x1, p[2] + x1};
++      const uint16_t* in = reinterpret_cast<const uint16_t*>(
++                               src.data[0] + static_cast<std::ptrdiff_t>(y) * src.linesize[0]) +
++                           x1 * 4;
++      for (int x = 0; x < width; x++)
++      {
++        for (int c = 0; c < 3; c++)
++          span[c][x] = in[4 * x + c] / 65535.0f;
++      }
++      if (coding.transfer == AMLCaptureCoding::Transfer::HLG)
++        HlgRowToLinear(tables, span, width);
++      else
++      {
++        for (float* v : span)
++          LookupRow(tables.pqToLinear, v, width);
++      }
++      ApplyRow(toSdr, span, width);
++      for (float* v : span)
++        LookupLogRow(tables.linearToSrgbLog, v, width);
++
++      StoreRow8<0, 2>(span, width,
++                      dst.data[0] + static_cast<std::ptrdiff_t>(y) * dst.linesize[0] + x1 * 4);
++    }
++  }
++}
++
++AMLCaptureImage CAMLCaptureConvert::GetCompositeImage(int width, int height)
++{
++  m_composite.Resize(static_cast<std::size_t>(width) * height * 4);
++  return AMLCaptureImage::Packed(AV_PIX_FMT_RGBA64LE, width, height,
++                                 reinterpret_cast<uint8_t*>(m_composite.Data()), width * 8);
++}
+diff --git a/xbmc/utils/AMLCaptureConvert.h b/xbmc/utils/AMLCaptureConvert.h
+--- a/xbmc/utils/AMLCaptureConvert.h
++++ b/xbmc/utils/AMLCaptureConvert.h
+@@ -0,6 +0,7 @@
+ 
+ #include <cstddef>
+ #include <cstdint>
++#include <cstring>
+ #include <memory>
+ #include <vector>
+ 
+@@ -0,6 +0,19 @@
+   float luminance{0.0f};
+ };
+ 
++//! The coding of an R'G'B' image: SDR BT.709, or BT.2020 with SDR white at whiteNits
++struct AMLCaptureCoding
++{
++  enum class Transfer
++  {
++    SDR,
++    PQ,
++    HLG,
++  };
++  Transfer transfer{Transfer::SDR};
++  float whiteNits{0.0f};
++};
++
+ //! A view of pixels the caller owns; NV12 uses both planes, packed formats only the first.
+ struct AMLCaptureImage
+ {
+@@ -0,10 +0,33 @@
+   CAMLCaptureConvert& operator=(const CAMLCaptureConvert&) = delete;
+ 
+   //! Copy the NV12 image src out of its mapping, scale it to the size of dst and convert it to
+-  //! SDR AV_PIX_FMT_BGRA, tonemapping HDR.
++  //! SDR, tonemapping HDR, then to coding as the GUI places SDR. dst is AV_PIX_FMT_BGRA or
++  //! AV_PIX_FMT_RGBA64LE. Where gui, a premultiplied 8-bit overlay of the size of dst, is clear,
++  //! the pixel goes to sdr, AV_PIX_FMT_RGBA of that size, in SDR instead.
+   bool Convert(const AMLCaptureImage& src,
+                const AMLCaptureColor& color,
+-               const AMLCaptureImage& dst);
++               const AMLCaptureCoding& coding,
++               const AMLCaptureImage& dst,
++               const AMLCaptureImage* gui = nullptr,
++               const AMLCaptureImage* sdr = nullptr);
++
++  //! Map src, an AV_PIX_FMT_RGBA64LE image in an HDR coding, to SDR AV_PIX_FMT_RGBA of the same
++  //! size by the inverse of the coding, as the GUI places SDR. Pixels where gui is clear are left.
++  void MapToSdr(const AMLCaptureImage& src,
++                const AMLCaptureCoding& coding,
++                const AMLCaptureImage& dst,
++                const AMLCaptureImage* gui);
++
++  //! A premultiplied 8-bit pixel that leaves what is under it unchanged
++  static bool IsClear(const uint8_t* pixel)
++  {
++    uint32_t value = 0;
++    std::memcpy(&value, pixel, sizeof(value));
++    return value == 0;
++  }
++
++  //! An AV_PIX_FMT_RGBA64LE work image of width x height, reused between calls.
++  AMLCaptureImage GetCompositeImage(int width, int height);
+ 
+ private:
+   bool Stage(const AMLCaptureImage& src, int width, int height);
+@@ -0,6 +0,7 @@
+   SwsContext* m_scaleContext{nullptr};
+   CAMLCaptureScratch<uint8_t> m_source;
+   CAMLCaptureScratch<uint16_t> m_yuv;
++  CAMLCaptureScratch<uint16_t> m_composite;
+   std::vector<float> m_toneMap;
+   float m_toneMapLuminance{0.0f};
+ };
+diff --git a/xbmc/windowing/amlogic/CMakeLists.txt b/xbmc/windowing/amlogic/CMakeLists.txt
+--- a/xbmc/windowing/amlogic/CMakeLists.txt
++++ b/xbmc/windowing/amlogic/CMakeLists.txt
+@@ -0,8 +0,10 @@
+             AMLDisplay.h)
+ 
+ if(TARGET ${APP_NAME_LC}::OpenGLES)
+-  list(APPEND SOURCES WinSystemAmlogicGLESContext.cpp)
+-  list(APPEND HEADERS WinSystemAmlogicGLESContext.h)
++  list(APPEND SOURCES ScreenshotSurfaceAML.cpp
++                      WinSystemAmlogicGLESContext.cpp)
++  list(APPEND HEADERS ScreenshotSurfaceAML.h
++                      WinSystemAmlogicGLESContext.h)
+ endif()
+ 
+ core_add_library(windowing_Amlogic)
+diff --git a/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
+new file mode 100644
+--- /dev/null
++++ b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
+@@ -0,0 +0,275 @@
++/*
++ *  Copyright (C) 2026 Team CoreELEC
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#include "ScreenshotSurfaceAML.h"
++
++#include "ServiceBroker.h"
++#include "rendering/capture/CapturePixels.h"
++#include "utils/AMLCapture.h"
++#include "utils/Screenshot.h"
++#include "windowing/amlogic/WinSystemAmlogicGLESContext.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstddef>
++#include <cstring>
++#include <mutex>
++
++using namespace KODI::RENDERING::CAPTURE;
++
++namespace
++{
++
++constexpr int FULL_SPAN_8 = 255;
++constexpr int CODE_SPAN_8_TO_16 = 257;
++// the GUI composite peak is PQ-normalized luminance
++constexpr float PQ_PEAK_NITS = 10000.0f;
++
++// a normalized coordinate in pixels
++int Edge(float v, int pixels)
++{
++  return std::clamp(static_cast<int>(std::lround(v * pixels)), 0, pixels);
++}
++
++AMLCaptureImage Offset(AMLCaptureImage image, int x, int y, int pixelBytes)
++{
++  image.data[0] += static_cast<std::ptrdiff_t>(y) * image.linesize[0] + x * pixelBytes;
++  return image;
++}
++
++// fill(y, from, to) on the row spans of width x height around a w x h place at (x1, y1)
++template<typename Fill>
++void FillAround(int width, int height, int x1, int y1, int w, int h, const Fill& fill)
++{
++  for (int y = 0; y < height; y++)
++  {
++    if (y < y1 || y >= y1 + h)
++      fill(y, 0, width);
++    else
++    {
++      fill(y, 0, x1);
++      fill(y, x1 + w, width);
++    }
++  }
++}
++
++struct GuiReadback
++{
++  std::unique_ptr<uint8_t[]> pixels;
++  int width{0};
++  int height{0};
++  int stride{0};
++  bool bgra{false};
++  AMLCaptureCoding coding;
++  //! the visible video, normalized to the output
++  CRect video;
++  int streamWidth{0};
++  int streamHeight{0};
++
++  const uint8_t* Row(int y) const
++  {
++    return CaptureSrcRow0(pixels.get(), stride, static_cast<unsigned int>(height)) +
++           static_cast<std::ptrdiff_t>(y) * stride;
++  }
++  AMLCaptureImage Image() const
++  {
++    return AMLCaptureImage::Packed(bgra ? AV_PIX_FMT_BGRA : AV_PIX_FMT_RGBA, width, height,
++                                   const_cast<uint8_t*>(Row(0)), stride);
++  }
++};
++
++class CAMLCompositePixels : public ICapturePixels
++{
++public:
++  CAMLCompositePixels(std::weak_ptr<CAMLCapture> session,
++                      std::shared_ptr<void> lease,
++                      GuiReadback gui)
++    : m_session(std::move(session)),
++      m_lease(std::move(lease)),
++      m_gui(std::move(gui))
++  {
++  }
++
++  const uint8_t* Lock() override
++  {
++    std::lock_guard lock(m_lock);
++
++    if (m_read)
++      return m_buffer.get();
++    m_read = true;
++
++    m_buffer = std::make_unique_for_overwrite<uint8_t[]>(static_cast<size_t>(m_gui.width) *
++                                                         m_gui.height * 4);
++    const auto session = m_session.lock();
++    if (!session || !session->Read(m_gui.streamWidth, m_gui.streamHeight,
++                                   [this](const AMLCaptureFrame& frame, CAMLCaptureConvert& convert)
++                                   { return Blend(frame, convert); }))
++    {
++      // a GUI in an HDR coding would pass for SDR
++      if (m_gui.coding.transfer != AMLCaptureCoding::Transfer::SDR)
++        m_buffer.reset();
++      else
++        CopyGui();
++    }
++    return m_buffer.get();
++  }
++
++private:
++  // place the visible video, mapped to SDR, in the GUI's coding at its place on black, blend the
++  // premultiplied GUI over it as the OSD blender does, then invert the coding to SDR, so the GUI
++  // keeps its look and the video matches a video capture
++  bool Blend(const AMLCaptureFrame& frame, CAMLCaptureConvert& convert)
++  {
++    const int width = m_gui.width;
++    const int height = m_gui.height;
++    const size_t size = static_cast<size_t>(width) * height * 4;
++
++    const AMLCaptureCoding& coding = m_gui.coding;
++    const AMLCaptureImage image = convert.GetCompositeImage(width, height);
++    uint16_t* composite = reinterpret_cast<uint16_t*>(image.data[0]);
++
++    // in an HDR coding the video under clear GUI goes straight to SDR, the value the inverse of
++    // the coding would give
++    const AMLCaptureImage overlay = m_gui.Image();
++    const AMLCaptureImage dst =
++        AMLCaptureImage::Packed(AV_PIX_FMT_RGBA, width, height, m_buffer.get(), width * 4);
++    const bool hdr = coding.transfer != AMLCaptureCoding::Transfer::SDR;
++
++    // vdin1 holds the visible video at the frame origin, at its size on screen
++    const CRect& video = m_gui.video;
++    const int x1 = Edge(video.x1, width);
++    const int y1 = Edge(video.y1, height);
++    AMLCaptureImage place = Offset(image, x1, y1, 8);
++    place.width = Edge(video.x2, width) - x1;
++    place.height = Edge(video.y2, height) - y1;
++    const AMLCaptureImage overlayPlace = Offset(overlay, x1, y1, 4);
++    const AMLCaptureImage dstPlace = Offset(dst, x1, y1, 4);
++    if (place.width > 0 && place.height > 0 &&
++        !convert.Convert(
++            CAMLCapture::Crop(frame.image, CRect(0.0f, 0.0f, video.Width(), video.Height())),
++            frame.color, coding, place, hdr ? &overlayPlace : nullptr, &dstPlace))
++      return false;
++
++    // the video place is converted whole; around it the GUI is over black
++    FillAround(width, height, x1, y1, place.width, place.height,
++               [&](int y, int from, int to)
++               {
++                 const size_t first = static_cast<size_t>(y) * width + from;
++                 std::fill(composite + first * 4, composite + (first + to - from) * 4, 0);
++                 uint8_t* out = m_buffer.get() + first * 4;
++                 for (int x = from; hdr && x < to; x++, out += 4)
++                 {
++                   out[0] = 0;
++                   out[1] = 0;
++                   out[2] = 0;
++                   out[3] = 255;
++                 }
++               });
++
++    const int r = m_gui.bgra ? 2 : 0;
++    const int b = m_gui.bgra ? 0 : 2;
++    for (int y = 0; y < height; y++)
++    {
++      const uint8_t* gui = m_gui.Row(y);
++      uint16_t* out = composite + static_cast<size_t>(y) * width * 4;
++      for (int x = 0; x < width; x++, gui += 4, out += 4)
++      {
++        if (hdr && CAMLCaptureConvert::IsClear(gui))
++          continue;
++        const int alpha = gui[3];
++        const int channel[3] = {gui[r], gui[1], gui[b]};
++        for (int c = 0; c < 3; c++)
++        {
++          const int value =
++              channel[c] * CODE_SPAN_8_TO_16 + (FULL_SPAN_8 - alpha) * out[c] / FULL_SPAN_8;
++          out[c] = static_cast<uint16_t>(std::min(value, 65535));
++        }
++        out[3] = 65535;
++      }
++    }
++
++    if (!hdr)
++    {
++      for (size_t i = 0; i < size; i++)
++        m_buffer[i] =
++            static_cast<uint8_t>((composite[i] + CODE_SPAN_8_TO_16 / 2) / CODE_SPAN_8_TO_16);
++      return true;
++    }
++
++    convert.MapToSdr(image, coding, dst, &overlay);
++    return true;
++  }
++
++  void CopyGui()
++  {
++    for (int y = 0; y < m_gui.height; y++)
++    {
++      const uint8_t* gui = m_gui.Row(y);
++      uint8_t* out = m_buffer.get() + static_cast<size_t>(y) * m_gui.width * 4;
++      std::memcpy(out, gui, static_cast<size_t>(m_gui.width) * 4);
++      if (m_gui.bgra)
++      {
++        for (int x = 0; x < m_gui.width; x++)
++          std::swap(out[x * 4], out[x * 4 + 2]);
++      }
++    }
++  }
++
++  std::weak_ptr<CAMLCapture> m_session;
++  std::shared_ptr<void> m_lease;
++  GuiReadback m_gui;
++  std::mutex m_lock;
++  bool m_read{false};
++  std::unique_ptr<uint8_t[]> m_buffer;
++};
++
++} // namespace
++
++void CScreenshotSurfaceAML::Register()
++{
++  CScreenShot::Register(CScreenshotSurfaceAML::CreateSurface);
++}
++
++std::unique_ptr<IScreenshotSurface> CScreenshotSurfaceAML::CreateSurface()
++{
++  return std::make_unique<CScreenshotSurfaceAML>();
++}
++
++void CScreenshotSurfaceAML::TakePixels(const CaptureSpec& spec, CaptureResult& result)
++{
++  using KODI::WINDOWING::AML::CWinSystemAmlogicGLESContext;
++
++  const auto session = CAMLCapture::GetActive();
++  auto* winSystem = dynamic_cast<CWinSystemAmlogicGLESContext*>(CServiceBroker::GetWinSystem());
++  if (!session || !session->IsPresented() || !winSystem ||
++      (m_format != AV_PIX_FMT_RGBA && m_format != AV_PIX_FMT_BGRA))
++    return CScreenshotSurfaceGLES::TakePixels(spec, result);
++
++  GuiReadback gui;
++  gui.pixels.reset(TakeBuffer());
++  gui.width = m_width;
++  gui.height = m_height;
++  gui.stride = m_stride;
++  gui.bgra = m_format == AV_PIX_FMT_BGRA;
++  const int transfer = winSystem->GetGuiCompositeTransfer();
++  if (transfer == AVCOL_TRC_SMPTE2084)
++    gui.coding.transfer = AMLCaptureCoding::Transfer::PQ;
++  else if (transfer == AVCOL_TRC_ARIB_STD_B67)
++    gui.coding.transfer = AMLCaptureCoding::Transfer::HLG;
++  gui.coding.whiteNits = winSystem->GetGuiCompositePeak() * PQ_PEAK_NITS;
++  gui.video = session->GetVisibleRect();
++  CAMLCapture::GetCaptureSize(gui.streamWidth, gui.streamHeight);
++
++  result.pixels = std::make_shared<CAMLCompositePixels>(session, session->Lease(), std::move(gui));
++  result.width = static_cast<unsigned int>(m_width);
++  result.height = static_cast<unsigned int>(m_height);
++  result.stride = m_width * 4;
++  result.format = AV_PIX_FMT_RGBA;
++  result.color.primaries = AVCOL_PRI_BT709;
++  result.color.transfer = AVCOL_TRC_IEC61966_2_1;
++  result.color.range = AVCOL_RANGE_JPEG;
++}
+diff --git a/xbmc/windowing/amlogic/ScreenshotSurfaceAML.h b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.h
+new file mode 100644
+--- /dev/null
++++ b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.h
+@@ -0,0 +0,23 @@
++/*
++ *  Copyright (C) 2026 Team CoreELEC
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#pragma once
++
++#include "rendering/gles/ScreenshotSurfaceGLES.h"
++
++#include <memory>
++
++//! \brief The GLES GUI readback, with the vdin1 video blended under it while video plays.
++class CScreenshotSurfaceAML : public CScreenshotSurfaceGLES
++{
++public:
++  static void Register();
++  static std::unique_ptr<IScreenshotSurface> CreateSurface();
++
++  void TakePixels(const KODI::RENDERING::CAPTURE::CaptureSpec& spec,
++                  KODI::RENDERING::CAPTURE::CaptureResult& result) override;
++};
+diff --git a/xbmc/windowing/amlogic/WinSystemAmlogic.cpp b/xbmc/windowing/amlogic/WinSystemAmlogic.cpp
+--- a/xbmc/windowing/amlogic/WinSystemAmlogic.cpp
++++ b/xbmc/windowing/amlogic/WinSystemAmlogic.cpp
+@@ -0,7 +0,7 @@
+ #include "windowing/Resolution.h"
+ #include "platform/linux/powermanagement/LinuxPowerSyscall.h"
+ #include "platform/linux/FDEventMonitor.h"
+-#include "rendering/gles/ScreenshotSurfaceGLES.h"
++#include "windowing/amlogic/ScreenshotSurfaceAML.h"
+ #include "resources/LocalizeStrings.h"
+ #include "resources/ResourcesComponent.h"
+ #include "settings/DisplaySettings.h"
+@@ -0,7 +0,7 @@
+   RETRO::CRPProcessInfoAmlogic::Register();
+   RETRO::CRPProcessInfoAmlogic::RegisterRendererFactory(new RETRO::CRendererFactoryOpenGLES);
+   CRendererAML::Register();
+-  CScreenshotSurfaceGLES::Register();
++  CScreenshotSurfaceAML::Register();
+ 
+   auto setting = settings->GetSetting(CSettings::SETTING_VIDEOPLAYER_USEDISPLAYASCLOCK);
+   if (setting)
+diff --git a/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.h b/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.h
+--- a/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.h
++++ b/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.h
+@@ -0,6 +0,10 @@
+   void EndGuiComposite() override;
+   void CompositeGui() override;
+   bool IsHdrComposite() const override { return m_guiCompositing; }
++  // the transfer of the composited GUI for screenshots, 0 when the GUI is SDR
++  int GetGuiCompositeTransfer() const { return m_guiCompositing ? m_guiCompositeTransfer : 0; }
++  // the composited GUI's SDR white, PQ-normalized
++  float GetGuiCompositePeak() const { return m_guiCompositePeak; }
+   bool GuiWillRender() const override { return m_guiWillRender; }
+ 
+   EGLDisplay GetEGLDisplay() const;

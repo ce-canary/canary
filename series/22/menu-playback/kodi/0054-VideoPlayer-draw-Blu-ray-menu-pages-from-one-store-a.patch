@@ -1,0 +1,383 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 28 Oct 2026 15:36:11 -0500
+Subject: [PATCH] VideoPlayer: draw Blu-ray menu pages from one store at GUI
+ rate
+
+Blu-ray menu pages share the subtitle overlay store, where a subtitle
+open, a subtitle page, a flush or a forced caption ends them. A page
+also reaches the renderer only with the next decoded picture. A
+libbluray that releases each page when its picture is shown then has
+it drawn a picture late, and later still on a still menu.
+---
+ .../VideoPlayer/DVDSubtitles/CMakeLists.txt   |  2 +
+ .../VideoPlayer/DVDSubtitles/DVDMenuPlane.cpp | 34 ++++++++
+ .../VideoPlayer/DVDSubtitles/DVDMenuPlane.h   | 34 ++++++++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        |  8 +-
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  3 +
+ .../VideoRenderers/OverlayRenderer.cpp        | 79 +++++++++++++++++++
+ .../VideoRenderers/OverlayRenderer.h          | 10 +++
+ .../VideoRenderers/RenderManager.cpp          |  2 +
+ .../VideoRenderers/RenderManager.h            |  5 ++
+ 9 files changed, 175 insertions(+), 2 deletions(-)
+ create mode 100644 xbmc/cores/VideoPlayer/DVDSubtitles/DVDMenuPlane.cpp
+ create mode 100644 xbmc/cores/VideoPlayer/DVDSubtitles/DVDMenuPlane.h
+
+diff --git a/xbmc/cores/VideoPlayer/DVDSubtitles/CMakeLists.txt b/xbmc/cores/VideoPlayer/DVDSubtitles/CMakeLists.txt
+--- a/xbmc/cores/VideoPlayer/DVDSubtitles/CMakeLists.txt
++++ b/xbmc/cores/VideoPlayer/DVDSubtitles/CMakeLists.txt
+@@ -0,4 +0,5 @@
+ set(SOURCES DVDFactorySubtitle.cpp
++            DVDMenuPlane.cpp
+             DVDSubtitleLineCollection.cpp
+             DVDSubtitleParserMicroDVD.cpp
+             DVDSubtitleParserMPL2.cpp
+@@ -0,6 +0,7 @@
+             SubtitlesAdapter.cpp)
+ 
+ set(HEADERS DVDFactorySubtitle.h
++            DVDMenuPlane.h
+             DVDSubtitleLineCollection.h
+             DVDSubtitleParser.h
+             DVDSubtitleParserMPL2.h
+diff --git a/xbmc/cores/VideoPlayer/DVDSubtitles/DVDMenuPlane.cpp b/xbmc/cores/VideoPlayer/DVDSubtitles/DVDMenuPlane.cpp
+new file mode 100644
+--- /dev/null
++++ b/xbmc/cores/VideoPlayer/DVDSubtitles/DVDMenuPlane.cpp
+@@ -0,0 +0,34 @@
++/*
++ *  Copyright (C) 2026 Team CoreELEC
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#include "DVDMenuPlane.h"
++
++#include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlay.h"
++
++#include <mutex>
++#include <utility>
++
++void CDVDMenuPlane::Set(std::shared_ptr<CDVDOverlay> page)
++{
++  std::unique_lock lock(m_section);
++
++  m_page = std::move(page);
++  m_sequence++;
++}
++
++void CDVDMenuPlane::Clear()
++{
++  Set(nullptr);
++}
++
++std::shared_ptr<CDVDOverlay> CDVDMenuPlane::Get(uint64_t& sequence) const
++{
++  std::unique_lock lock(m_section);
++
++  sequence = m_sequence;
++  return m_page;
++}
+diff --git a/xbmc/cores/VideoPlayer/DVDSubtitles/DVDMenuPlane.h b/xbmc/cores/VideoPlayer/DVDSubtitles/DVDMenuPlane.h
+new file mode 100644
+--- /dev/null
++++ b/xbmc/cores/VideoPlayer/DVDSubtitles/DVDMenuPlane.h
+@@ -0,0 +0,34 @@
++/*
++ *  Copyright (C) 2026 Team CoreELEC
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#pragma once
++
++#include "threads/CriticalSection.h"
++
++#include <atomic>
++#include <cstdint>
++#include <memory>
++
++class CDVDOverlay;
++
++//! The Blu-ray menu page on screen. libbluray replaces it when the page is due, the renderer
++//! draws it on every GUI frame.
++class CDVDMenuPlane
++{
++public:
++  void Set(std::shared_ptr<CDVDOverlay> page);
++  void Clear();
++
++  //! \return the page, and in \p sequence a number that changes with every Set or Clear
++  std::shared_ptr<CDVDOverlay> Get(uint64_t& sequence) const;
++  uint64_t GetSequence() const { return m_sequence; }
++
++private:
++  mutable CCriticalSection m_section;
++  std::shared_ptr<CDVDOverlay> m_page;
++  std::atomic<uint64_t> m_sequence{0};
++};
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,7 @@
+ #include "DVDInputStreams/DVDInputStreamNavigator.h"
+ #include "DVDInputStreams/InputStreamPVRBase.h"
+ #include "DVDMessage.h"
++#include "DVDSubtitles/DVDMenuPlane.h"
+ #include "FileItem.h"
+ #include "LangInfo.h"
+ #include "ServiceBroker.h"
+@@ -0,6 +0,8 @@
+     m_renderManager(m_clock, this)
+ {
+   m_players_created = false;
++  m_menuPlane = std::make_shared<CDVDMenuPlane>();
++  m_renderManager.SetMenuPlane(m_menuPlane);
+ 
+   m_dvd.Clear();
+   m_State.Clear();
+@@ -0,6 +0,7 @@
+   m_offset_pts = 0;
+   m_CurrentAudio.lastdts = DVD_NOPTS_VALUE;
+   m_CurrentVideo.lastdts = DVD_NOPTS_VALUE;
++  m_menuPlane->Clear();
+ 
+   IPlayerCallback *cb = &m_callback;
+   CFileItem fileItem = m_item;
+@@ -0,6 +0,7 @@
+   if (m_pInputStream.use_count() > 1)
+     throw std::runtime_error("m_pInputStream reference count is greater than 1");
+   m_pInputStream.reset();
++  m_menuPlane->Clear();
+   m_blurayMenu = false;
+ 
+   // clean up all selection streams
+@@ -0,8 +0,7 @@
+     switch (iMessage)
+     {
+     case BD_EVENT_MENU_OVERLAY:
+-      m_overlayContainer.ProcessAndAddOverlayIfValid(
+-          *static_cast<std::shared_ptr<CDVDOverlay>*>(pData));
++      m_menuPlane->Set(*static_cast<std::shared_ptr<CDVDOverlay>*>(pData));
+       break;
+     case BD_EVENT_MENU:
+       // Interactive menu visible?
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+ 
+ class CDVDInputStream;
+ class CDVDInputStreamBluray;
++class CDVDMenuPlane;
+ 
+ class CDVDDemux;
+ class CDemuxStreamVideo;
+@@ -0,6 +0,8 @@
+ 
+   CDVDClock m_clock;
+   CDVDOverlayContainer m_overlayContainer;
++  // blu-ray menu page of a libbluray that holds it until its picture is shown
++  std::shared_ptr<CDVDMenuPlane> m_menuPlane;
+ 
+   std::shared_ptr<CDVDInputStream> m_pInputStream;
+   //! written on the player thread, read by SetVideoSettings from any thread
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
+@@ -0,6 +0,7 @@
+ #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayLibass.h"
+ #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlaySpu.h"
+ #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayStereoUtils.h"
++#include "cores/VideoPlayer/DVDSubtitles/DVDMenuPlane.h"
+ #include "guilib/GUIComponent.h"
+ #include "guilib/GUIWindowManager.h"
+ #include "settings/DisplaySettings.h"
+@@ -0,6 +0,10 @@
+ 
+   for(std::vector<SElement>& buffer : m_buffers)
+     Release(buffer);
++  if (!m_menu.empty())
++    MarkDirty();
++  Release(m_menu);
++  m_menuSequence = 0;
+ 
+   ReleaseCache();
+   Reset();
+@@ -0,6 +0,14 @@
+       if (found)
+         break;
+     }
++    for (const SElement& e : m_menu)
++    {
++      if (e.overlay_dvd && e.overlay_dvd->m_textureid == it->first)
++      {
++        found = true;
++        break;
++      }
++    }
+     if (!found)
+     {
+       it = m_textureCache.erase(it);
+@@ -0,6 +0,7 @@
+         Render(o.get());
+     }
+   }
++  RenderMenu(false);
+ 
+   ReleaseUnused();
+ }
+@@ -0,12 +0,74 @@
+       Render(o.get());
+     }
+   }
++  RenderMenu(true);
+ 
+   gfxContext.SetRenderOrder(renderOrder);
+ 
+   ReleaseUnused();
+ }
+ 
++void CRenderer::SetMenuPlane(std::shared_ptr<CDVDMenuPlane> menuPlane)
++{
++  std::unique_lock lock(m_section);
++
++  m_menuPlane = std::move(menuPlane);
++}
++
++void CRenderer::PrepareMenu()
++{
++  std::unique_lock lock(m_section);
++  if (!m_menuPlane || m_menuPlane->GetSequence() == m_menuSequence)
++    return;
++
++  uint64_t sequence{0};
++  const std::shared_ptr<CDVDOverlay> page = m_menuPlane->Get(sequence);
++  m_menuSequence = sequence;
++  const bool shown = !m_menu.empty();
++  Release(m_menu);
++  if (page && page->IsOverlayType(DVDOVERLAY_TYPE_GROUP))
++  {
++    for (const std::shared_ptr<CDVDOverlay>& o : static_cast<CDVDOverlayGroup&>(*page).m_overlays)
++    {
++      SElement e;
++      e.overlay_dvd = o;
++      m_menu.push_back(e);
++    }
++  }
++  else if (page)
++  {
++    SElement e;
++    e.overlay_dvd = page;
++    m_menu.push_back(e);
++  }
++  if (shown || !m_menu.empty())
++    MarkDirty();
++}
++
++// the HDR pass draws the HDR pages of an HDR composite, the GUI pass all others
++void CRenderer::RenderMenu(bool hdrOverlays)
++{
++  if (m_menu.empty())
++    return;
++
++  const bool hdrComposite = CServiceBroker::GetWinSystem()->IsHdrComposite();
++  const RenderStereoView stereoView =
++      CServiceBroker::GetWinSystem()->GetGfxContext().GetStereoView();
++
++  for (SElement& e : m_menu)
++  {
++    std::shared_ptr<COverlay> o = Convert(e);
++    if (!o || (hdrComposite && o->m_isHDROverlay) != hdrOverlays)
++      continue;
++
++    if (!KODI::VIDEO::SUBTITLES::ShouldRenderStereoOverlay(e.overlay_dvd->m_stereoView, stereoView,
++                                                           m_stereomode))
++      continue;
++
++    Render(o.get());
++  }
++}
++
+ void CRenderer::Render(COverlay* o)
+ {
+   SRenderState state;
+@@ -0,6 +0,9 @@
+   if (idx < 0 || idx >= NUM_BUFFERS)
+     return false;
+ 
++  if (!m_menu.empty())
++    return true;
++
+   for (const auto& e : m_buffers[idx])
+   {
+     if (!e.overlay_dvd)
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
+@@ -0,6 +0,7 @@
+ 
+ typedef struct ass_image ASS_Image;
+ 
++class CDVDMenuPlane;
+ class CDVDOverlay;
+ class CDVDOverlayLibass;
+ class CDVDOverlayImage;
+@@ -0,6 +0,11 @@
+      */
+     void PrepareOverlays(int idx);
+ 
++    void SetMenuPlane(std::shared_ptr<CDVDMenuPlane> menuPlane);
++
++    //! \brief Take a new Blu-ray menu page from the menu plane, on the GUI thread
++    void PrepareMenu();
++
+     /*!
+      * \brief Release resources
+      */
+@@ -0,6 +0,7 @@
+     };
+ 
+     void Render(COverlay* o);
++    void RenderMenu(bool hdrOverlays);
+     std::shared_ptr<COverlay> Convert(SElement& e);
+     // Build a COverlay (cached or freshly created) from the libass output
+     // already produced by PrepareOverlays. Does not call ass_render_frame.
+@@ -0,5 +0,8 @@
+     // to detect arrival/disappearance transitions (image/SPU have no
+     // per-frame change signal of their own, unlike libass detect_change).
+     int m_prevImageSpuCount{0};
++    std::shared_ptr<CDVDMenuPlane> m_menuPlane;
++    std::vector<SElement> m_menu;
++    uint64_t m_menuSequence{0};
+   };
+ }
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,6 +0,8 @@
+     m_bRenderGUI = true;
+   }
+ 
++  m_overlays.PrepareMenu();
++
+   m_playerPort->UpdateGuiRender(IsGuiLayer() || !m_pRenderer->VideoBypassesFramebuffer() ||
+                                 firstFrame);
+ 
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -0,6 +0,11 @@
+    */
+   void SetSubtitleVerticalPosition(const int value, bool save);
+ 
++  void SetMenuPlane(std::shared_ptr<CDVDMenuPlane> menuPlane)
++  {
++    m_overlays.SetMenuPlane(std::move(menuPlane));
++  }
++
+   // Functions called from GUI
+   bool Supports(ERENDERFEATURE feature) const;
+   bool Supports(ESCALINGMETHOD method) const;

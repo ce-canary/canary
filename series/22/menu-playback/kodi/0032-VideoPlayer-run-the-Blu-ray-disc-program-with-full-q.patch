@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 27 Oct 2026 23:56:55 -0500
+Subject: [PATCH] VideoPlayer: run the Blu-ray disc program with full queues
+
+libbluray runs the disc program only inside a read. Nothing reads while
+the queues are full or in the nav-tail and sync waits, nor while paused
+with nothing read, so a disc event waits until the old item has drained.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 27 ++++++++++++++++++++++----
+ xbmc/cores/VideoPlayer/VideoPlayer.h   |  1 +
+ 2 files changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,9 +0,11 @@
+         m_pDemuxer->FillBuffer(fillBuffer);
+     }
+ 
+-    // if the queues are full, no need to read more
+-    if ((!m_VideoPlayerAudio->AcceptsData() && m_CurrentAudio.id >= 0) ||
+-        (!m_VideoPlayerVideo->AcceptsData() && m_CurrentVideo.id >= 0))
++    // if the queues are full, no need to read more; a held disc event goes to the read, which
++    // hands it on
++    if (((!m_VideoPlayerAudio->AcceptsData() && m_CurrentAudio.id >= 0) ||
++         (!m_VideoPlayerVideo->AcceptsData() && m_CurrentVideo.id >= 0)) &&
++        !PollBlurayEvents())
+     {
+       if (m_playSpeed == DVD_PLAYSPEED_PAUSE &&
+           m_demuxerSpeed != DVD_PLAYSPEED_PAUSE)
+@@ -0,7 +0,8 @@
+       // when paused, demuxer could be be returning empty
+       if (m_playSpeed == DVD_PLAYSPEED_PAUSE)
+       {
+-        if (m_navTail || IsBlurayTitleEndWait())
++        const bool held = PollBlurayEvents();
++        if (m_navTail || held)
+           CThread::Sleep(10ms);
+         continue;
+       }
+@@ -0,6 +0,7 @@
+           m_State.menuType == MenuType::NATIVE &&
+           (ShouldWaitForSync(std::chrono::steady_clock::now()) || PlayNavTail()))
+       {
++        PollBlurayEvents();
+         CThread::Sleep(10ms);
+         continue;
+       }
+@@ -0,6 +0,21 @@
+ #endif
+ }
+ 
++// true once the read is held
++bool CVideoPlayer::PollBlurayEvents()
++{
++#if defined(HAVE_LIBBLURAY)
++  const auto bluray = GetBlurayInputStream();
++  if (!bluray)
++    return false;
++
++  bluray->PollEvents();
++  return bluray->IsReadHeld();
++#else
++  return false;
++#endif
++}
++
+ // plays out the old item without blocking, as at the end of file; waits for the players that
+ // CloseStream would wait for, video until its decoder has drained
+ bool CVideoPlayer::PlayNavTail()
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+   bool IsBlurayTitleEnded() const;
+   bool IsBlurayTitleEndWait() const;
+   bool TakeBlurayItemAbandoned();
++  bool PollBlurayEvents();
+   double GetBlurayPresentedTime();
+   void ReportBlurayPresented();
+   bool PlayNavTail();

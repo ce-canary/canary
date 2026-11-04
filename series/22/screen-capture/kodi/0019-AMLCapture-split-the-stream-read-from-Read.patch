@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 22 Oct 2026 18:41:32 -0500
+Subject: [PATCH] AMLCapture: split the stream read from Read
+
+---
+ xbmc/utils/AMLCapture.cpp | 9 ++++++++-
+ xbmc/utils/AMLCapture.h   | 4 ++++
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
+--- a/xbmc/utils/AMLCapture.cpp
++++ b/xbmc/utils/AMLCapture.cpp
+@@ -0,6 +0,13 @@
+ 
+   std::lock_guard read(m_readLock);
+ 
++  return ReadStream(input, width, height,
++                    [this, &use](CStream&, unsigned int, const AMLCaptureFrame& frame)
++                    { return use(frame, m_convert); });
++}
++
++bool CAMLCapture::ReadStream(AMLCaptureInput input, int width, int height, const StreamFunc& use)
++{
+   const float fps = CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
+   const int waitMs =
+       static_cast<int>(std::ceil(FRAME_WAIT_PERIODS * 1000.0f / std::max(fps, 1.0f)));
+@@ -0,7 +0,7 @@
+       if (input == AMLCaptureInput::VIDEO)
+         frame.color = GetSignal(source);
+       frame.image = stream->Image(index);
+-      const bool ok = use(frame, m_convert);
++      const bool ok = use(*stream, index, frame);
+       stream->Queue(index);
+       return ok;
+     }
+diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
+--- a/xbmc/utils/AMLCapture.h
++++ b/xbmc/utils/AMLCapture.h
+@@ -0,8 +0,12 @@
+ 
+ private:
+   class CStream;
++  using StreamFunc =
++      std::function<bool(CStream& stream, unsigned int index, const AMLCaptureFrame& frame)>;
+ 
+   void ReleaseLease(AMLCaptureInput input, int width, int height);
++  //! m_readLock must be held; `use` runs on buffer `index`, which is queued again after it.
++  bool ReadStream(AMLCaptureInput input, int width, int height, const StreamFunc& use);
+   //! m_lock must be held
+   bool CanRead(AMLCaptureInput input) const;
+   //! takes m_stream for Close; m_lock must be held

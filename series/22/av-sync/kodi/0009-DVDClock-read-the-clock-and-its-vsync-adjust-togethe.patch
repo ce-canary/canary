@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 23:59:11 -0500
+Subject: [PATCH] DVDClock: read the clock and its vsync adjust together
+
+The audio engine reads the clock and the vsync adjust under two lock
+takes. A clock move or a new vsync adjust between them reaches the
+engine as one wrong sync error sample.
+---
+ xbmc/cores/VideoPlayer/AudioSinkAE.cpp |  2 +-
+ xbmc/cores/VideoPlayer/DVDClock.cpp    | 10 ++++++----
+ xbmc/cores/VideoPlayer/DVDClock.h      |  3 ++-
+ 3 files changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/AudioSinkAE.cpp b/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
+--- a/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
++++ b/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
+@@ -0,7 +0,7 @@
+ double CAudioSinkAE::GetClock()
+ {
+   if (m_pClock)
+-    return (m_pClock->GetClock() + m_pClock->GetVsyncAdjust()) / DVD_TIME_BASE * 1000;
++    return m_pClock->GetClockWithVsyncAdjust() / DVD_TIME_BASE * 1000;
+   else
+     return 0.0;
+ }
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.cpp b/xbmc/cores/VideoPlayer/DVDClock.cpp
+--- a/xbmc/cores/VideoPlayer/DVDClock.cpp
++++ b/xbmc/cores/VideoPlayer/DVDClock.cpp
+@@ -0,16 +0,18 @@
+   return SystemToPlaying(current);
+ }
+ 
+-void CDVDClock::SetVsyncAdjust(double adjustment)
++double CDVDClock::GetClockWithVsyncAdjust()
+ {
+   std::unique_lock lock(m_critSection);
+-  m_vSyncAdjust = adjustment;
++
++  const double clock = GetClock();
++  return clock + m_vSyncAdjust;
+ }
+ 
+-double CDVDClock::GetVsyncAdjust()
++void CDVDClock::SetVsyncAdjust(double adjustment)
+ {
+   std::unique_lock lock(m_critSection);
+-  return m_vSyncAdjust;
++  m_vSyncAdjust = adjustment;
+ }
+ 
+ void CDVDClock::Pause(bool pause)
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.h b/xbmc/cores/VideoPlayer/DVDClock.h
+--- a/xbmc/cores/VideoPlayer/DVDClock.h
++++ b/xbmc/cores/VideoPlayer/DVDClock.h
+@@ -0,6 +0,8 @@
+ 
+   double GetClock(bool interpolated = true);
+   double GetClock(double& absolute, bool interpolated = true);
++  //! The clock plus the vsync adjust, read together
++  double GetClockWithVsyncAdjust();
+ 
+   double ErrorAdjust(double error, const char* log);
+   void Discontinuity(double clock, double absolute);
+@@ -0,7 +0,6 @@
+ 
+   bool GetClockInfo(int& MissedVblanks, double& ClockSpeed, double& RefreshRate) const;
+   void SetVsyncAdjust(double adjustment);
+-  double GetVsyncAdjust();
+ 
+   void Pause(bool pause);
+   bool IsPaused() const;

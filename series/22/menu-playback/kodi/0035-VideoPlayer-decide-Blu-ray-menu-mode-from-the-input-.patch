@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 13 Oct 2026 13:41:34 -0500
+Subject: [PATCH] VideoPlayer: decide Blu-ray menu mode from the input stream
+
+OpenDefaultStreams tested the menu type of the play state. Prepare
+clears the play state before its first call, so a Blu-ray in menu mode
+counted as a playlist without menus when the streams were first opened.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,8 +0,10 @@
+ {
+   // if input stream dictate, we will open later
+   // unless we are loading a bluray playlist directly in which case set now
+-  const bool noBlurayMenu{m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY) &&
+-                          m_State.menuType == MenuType::NONE};
++  const std::shared_ptr<CDVDInputStream::IMenus> menus{
++      std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream)};
++  const bool noBlurayMenu{m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY) && menus &&
++                          menus->GetSupportedMenuType() == MenuType::NONE};
+   if (!noBlurayMenu && (m_dvd.iSelectedAudioStream >= 0 || m_dvd.iSelectedSPUStream >= 0))
+     return;
+ 

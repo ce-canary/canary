@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 09:09:57 -0600
+Subject: [PATCH] VideoPlayer: round the audio delay to whole milliseconds
+
+The audio delay arrives as a float in seconds. A step that rounds
+to 25 ms is stored just below 0.025, and the cast to whole
+milliseconds truncates it to 24 ms.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,7 +0,7 @@
+ void CVideoPlayer::SetAVDelay(float fValue)
+ {
+   m_processInfo->GetVideoSettingsLocked().SetAudioDelay(fValue);
+-  m_renderManager.SetDelay(static_cast<int>(fValue * 1000.0f));
++  m_renderManager.SetDelay(static_cast<int>(std::lround(fValue * 1000.0f)));
+ }
+ 
+ float CVideoPlayer::GetAVDelay()
+@@ -0,7 +0,7 @@
+ {
+   m_processInfo->SetVideoSettings(settings);
+   m_renderManager.SetVideoSettings(settings);
+-  m_renderManager.SetDelay(static_cast<int>(settings.m_AudioDelay * 1000.0f));
++  m_renderManager.SetDelay(static_cast<int>(std::lround(settings.m_AudioDelay * 1000.0f)));
+   m_renderManager.SetSubtitleVerticalPosition(settings.m_subtitleVerticalPosition,
+                                               settings.m_subtitleVerticalPositionSave);
+   // libbluray owns the subtitle state of a menu-mode session

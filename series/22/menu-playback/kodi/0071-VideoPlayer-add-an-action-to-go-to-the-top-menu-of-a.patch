@@ -1,0 +1,201 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 13:28:03 -0600
+Subject: [PATCH] VideoPlayer: add an action to go to the top menu of a disc
+
+ShowVideoMenu opens the popup menu of a Blu-ray and falls back to the
+top menu only when the disc rejects the popup key. A BD-J program can
+take the key and ignore it, for example during an extra, and then
+nothing leads back to the menu but stop. Players have a separate top
+menu key for this.
+---
+ xbmc/addons/interfaces/gui/GUITranslator.cpp      |  4 ++++
+ .../include/kodi/c-api/gui/input/action_ids.h     |  3 +++
+ .../VideoPlayer/DVDInputStreams/DVDInputStream.h  |  5 +++++
+ .../DVDInputStreams/DVDInputStreamBluray.cpp      | 15 +++++++++++++++
+ .../DVDInputStreams/DVDInputStreamBluray.h        |  1 +
+ .../DVDInputStreams/DVDInputStreamNavigator.cpp   |  8 ++++++++
+ .../DVDInputStreams/DVDInputStreamNavigator.h     |  1 +
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp            |  3 ++-
+ xbmc/input/actions/ActionIDs.h                    |  3 +++
+ xbmc/input/actions/ActionTranslator.cpp           |  1 +
+ xbmc/interfaces/builtins/PlayerBuiltins.cpp       |  6 ++++++
+ 11 files changed, 49 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/addons/interfaces/gui/GUITranslator.cpp b/xbmc/addons/interfaces/gui/GUITranslator.cpp
+--- a/xbmc/addons/interfaces/gui/GUITranslator.cpp
++++ b/xbmc/addons/interfaces/gui/GUITranslator.cpp
+@@ -0,6 +0,8 @@
+       return ADDON_ACTION_VIS_RATE_PRESET_MINUS;
+     case ACTION_SHOW_VIDEOMENU:
+       return ADDON_ACTION_SHOW_VIDEOMENU;
++    case ACTION_SHOW_VIDEOTOPMENU:
++      return ADDON_ACTION_SHOW_VIDEOTOPMENU;
+     case ACTION_ENTER:
+       return ADDON_ACTION_ENTER;
+     case ACTION_INCREASE_RATING:
+@@ -0,6 +0,8 @@
+       return ACTION_VIS_RATE_PRESET_MINUS;
+     case ADDON_ACTION_SHOW_VIDEOMENU:
+       return ACTION_SHOW_VIDEOMENU;
++    case ADDON_ACTION_SHOW_VIDEOTOPMENU:
++      return ACTION_SHOW_VIDEOTOPMENU;
+     case ADDON_ACTION_ENTER:
+       return ACTION_ENTER;
+     case ADDON_ACTION_INCREASE_RATING:
+diff --git a/xbmc/addons/kodi-dev-kit/include/kodi/c-api/gui/input/action_ids.h b/xbmc/addons/kodi-dev-kit/include/kodi/c-api/gui/input/action_ids.h
+--- a/xbmc/addons/kodi-dev-kit/include/kodi/c-api/gui/input/action_ids.h
++++ b/xbmc/addons/kodi-dev-kit/include/kodi/c-api/gui/input/action_ids.h
+@@ -0,6 +0,9 @@
+   /// @brief <b>`272 `</b>: Open the dialog window to select a subtitle stream
+   ADDON_ACTION_DIALOG_SELECT_SUBTITLE = 272,
+ 
++  /// @brief <b>`273`</b>: Go to the top menu of the DVD/BR
++  ADDON_ACTION_SHOW_VIDEOTOPMENU = 273,
++
+   /// @brief <b>`300`</b>: Voice actions
+   ADDON_ACTION_VOICE_RECOGNIZE = 300,
+ 
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStream.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStream.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStream.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStream.h
+@@ -0,6 +0,11 @@
+     * \return true if the menu is successfully opened, false otherwise
+     */
+     virtual bool OnMenu() = 0;
++
++    /*! \brief Go to the top menu of the disc
++    * \return true if the top menu is called, false otherwise
++    */
++    virtual bool OnTopMenu() = 0;
+     virtual void OnBack() = 0;
+     virtual void OnNext() = 0;
+     virtual void OnPrevious() = 0;
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,6 +0,21 @@
+   return true;
+ }
+ 
++bool CDVDInputStreamBluray::OnTopMenu()
++{
++  if (m_bd == nullptr || !m_navmode)
++    return false;
++
++  MarkMenuInput();
++  if (bd_menu_call(m_bd, -1) <= 0)
++  {
++    CLog::Log(LOGDEBUG, "CDVDInputStreamBluray::OnTopMenu - top menu call failed");
++    m_menuInput = false;
++    return false;
++  }
++  return true;
++}
++
+ bool CDVDInputStreamBluray::IsInMenu()
+ {
+   if(m_bd == nullptr || !m_navmode)
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,7 @@
+   * \return true if the menu is successfully opened, false otherwise
+   */
+   bool OnMenu() override;
++  bool OnTopMenu() override;
+   void OnBack() override
+   {
+     if(IsInMenu())
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp
+@@ -0,6 +0,14 @@
+   return m_dll.dvdnav_menu_call(m_dvdnav, DVD_MENU_Escape) == DVDNAV_STATUS_OK;
+ }
+ 
++bool CDVDInputStreamNavigator::OnTopMenu()
++{
++  if (!m_dvdnav)
++    return false;
++
++  return m_dll.dvdnav_menu_call(m_dvdnav, DVD_MENU_Title) == DVDNAV_STATUS_OK;
++}
++
+ void CDVDInputStreamNavigator::OnBack()
+ {
+   if (m_dvdnav) m_dll.dvdnav_go_up(m_dvdnav);
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h
+@@ -0,6 +0,7 @@
+   * \return true if the menu is successfully opened, false otherwise
+   */
+   bool OnMenu() override;
++  bool OnTopMenu() override;
+ 
+   void OnBack() override;
+   void OnNext() override;
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,10 +0,11 @@
+       break;
+ #endif
+     case ACTION_SHOW_VIDEOMENU:   // start button
++    case ACTION_SHOW_VIDEOTOPMENU:
+       {
+         THREAD_ACTION(action);
+         CLog::LogF(LOGDEBUG, "Trying to go to the menu");
+-        if (pMenus->OnMenu())
++        if (action.GetID() == ACTION_SHOW_VIDEOTOPMENU ? pMenus->OnTopMenu() : pMenus->OnMenu())
+         {
+           if (m_playSpeed == DVD_PLAYSPEED_PAUSE)
+           {
+diff --git a/xbmc/input/actions/ActionIDs.h b/xbmc/input/actions/ActionIDs.h
+--- a/xbmc/input/actions/ActionIDs.h
++++ b/xbmc/input/actions/ActionIDs.h
+@@ -0,6 +0,9 @@
+ //! Open the dialog window to select a subtitle stream
+ constexpr const int ACTION_DIALOG_SELECT_SUBTITLE = 272;
+ 
++//! Go to the top menu of the DVD/BR
++constexpr const int ACTION_SHOW_VIDEOTOPMENU = 273;
++
+ // Voice actions
+ constexpr const int ACTION_VOICE_RECOGNIZE = 300;
+ 
+diff --git a/xbmc/input/actions/ActionTranslator.cpp b/xbmc/input/actions/ActionTranslator.cpp
+--- a/xbmc/input/actions/ActionTranslator.cpp
++++ b/xbmc/input/actions/ActionTranslator.cpp
+@@ -0,6 +0,7 @@
+     {"increasevisrating", ACTION_VIS_RATE_PRESET_PLUS},
+     {"decreasevisrating", ACTION_VIS_RATE_PRESET_MINUS},
+     {"showvideomenu", ACTION_SHOW_VIDEOMENU},
++    {"showvideotopmenu", ACTION_SHOW_VIDEOTOPMENU},
+     {"enter", ACTION_ENTER},
+     {"increaserating", ACTION_INCREASE_RATING},
+     {"decreaserating", ACTION_DECREASE_RATING},
+diff --git a/xbmc/interfaces/builtins/PlayerBuiltins.cpp b/xbmc/interfaces/builtins/PlayerBuiltins.cpp
+--- a/xbmc/interfaces/builtins/PlayerBuiltins.cpp
++++ b/xbmc/interfaces/builtins/PlayerBuiltins.cpp
+@@ -0,6 +0,11 @@
+     if (appPlayer->IsPlaying())
+       appPlayer->OnAction(CAction(ACTION_SHOW_VIDEOMENU));
+   }
++  else if (paramlow == "showvideotopmenu")
++  {
++    if (appPlayer->IsPlaying())
++      appPlayer->OnAction(CAction(ACTION_SHOW_VIDEOTOPMENU));
++  }
+   else if (StringUtils::StartsWithNoCase(params[0], "partymode"))
+   {
+     std::string strXspPath;
+@@ -0,6 +0,7 @@
+ ///     | Partymode(video) **     | Toggles video partymode                | none                        |             |
+ ///     | Partymode(path to .xsp) | Partymode for *.xsp-file               | Partymode for *.xsp-file    |             |
+ ///     | ShowVideoMenu           | Shows the DVD/BR menu if available     | none                        |             |
++///     | ShowVideoTopMenu        | Goes to the DVD/BR top menu            | none                        | Kodi v22    |
+ ///     | FrameAdvance(n) ***     | Advance video by _n_ frames            | none                        | Kodi v18    |
+ ///     <br>
+ ///     '*' = For these controls\, the PlayerControl built-in function can make use of the 'notify'-parameter. For example: PlayerControl(random\, notify)

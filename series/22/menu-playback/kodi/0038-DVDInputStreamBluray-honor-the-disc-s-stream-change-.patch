@@ -1,0 +1,158 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 13 Oct 2026 13:33:48 -0500
+Subject: [PATCH] DVDInputStreamBluray: honor the disc's stream change
+ restrictions
+
+A Blu-ray program can forbid changing the audio or subtitle stream and
+showing or hiding subtitles, which a disc player then refuses. libbluray
+reports this in its user operation mask but does not enforce it at its
+default level, and Kodi ignored the mask, so picks and toggles went
+through in navigation mode against the disc.
+---
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 38 ++++++++++++++++++-
+ .../DVDInputStreams/DVDInputStreamBluray.h    |  7 ++++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 26 +++++++++++++
+ 3 files changed, 69 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,7 +0,11 @@
+   case BD_EVENT_SECONDARY_VIDEO_SIZE:
+   case BD_EVENT_SECONDARY_VIDEO_STREAM:
+   case BD_EVENT_KEY_INTEREST_TABLE:
++    break;
++
+   case BD_EVENT_UO_MASK_CHANGED:
++    CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - BD_EVENT_UO_MASK_CHANGED {:#x}", m_event.param);
++    m_uoMask = m_event.param;
+     break;
+ 
+   case BD_EVENT_PLAYMARK:
+@@ -0,20 +0,50 @@
+   if (number == 0)
+     return false;
+ 
+-  bd_select_stream(m_bd, BLURAY_PG_TEXTST_STREAM, number, visible);
++  // the flag rides along with the stream number, so keep the disc's while it forbids toggling
++  bd_select_stream(m_bd, BLURAY_PG_TEXTST_STREAM, number,
++                   CanToggleSubtitle() ? visible : m_pgEnabled);
+   m_pgStreamNumber = number;
+   return true;
+ }
+ 
+ void CDVDInputStreamBluray::SetSubtitleVisible(bool visible)
+ {
+-  if (!CanSelectStream() || m_pgStreamNumber == 0 ||
++  if (!CanSelectStream() || !CanToggleSubtitle() || m_pgStreamNumber == 0 ||
+       m_pgStreamNumber > static_cast<uint32_t>(m_clip->pg_stream_count))
+     return;
+ 
+   bd_select_stream(m_bd, BLURAY_PG_TEXTST_STREAM, m_pgStreamNumber, visible);
+ }
+ 
++// the audio and presentation graphic bits of the mask are reported since libbluray 1.4.1
++bool CDVDInputStreamBluray::CanChangeAudioStream() const
++{
++#if (BLURAY_VERSION >= BLURAY_VERSION_CODE(1, 4, 1))
++  return !m_navmode || !(m_uoMask & BLURAY_UO_PRIMARY_AUDIO_CHANGE_MASK);
++#else
++  return true;
++#endif
++}
++
++bool CDVDInputStreamBluray::CanChangeSubtitleStream() const
++{
++#if (BLURAY_VERSION >= BLURAY_VERSION_CODE(1, 4, 1))
++  return !m_navmode || !(m_uoMask & BLURAY_UO_PG_TEXTST_CHANGE_MASK);
++#else
++  return true;
++#endif
++}
++
++bool CDVDInputStreamBluray::CanToggleSubtitle() const
++{
++#if (BLURAY_VERSION >= BLURAY_VERSION_CODE(1, 4, 1))
++  return !m_navmode || !(m_uoMask & BLURAY_UO_PG_TEXTST_ENABLE_DISABLE_MASK);
++#else
++  return true;
++#endif
++}
++
+ std::optional<CDVDInputStreamBluray::ClipTime> CDVDInputStreamBluray::GetClipTime(
+     uint64_t readPos) const
+ {
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,12 @@
+   //! show or hide the presentation graphic stream libbluray last reported, in navigation mode
+   void SetSubtitleVisible(bool visible);
+ 
++  //! whether the disc lets the user change the audio stream, change the presentation graphic
++  //! stream or show or hide it, always true outside navigation mode
++  bool CanChangeAudioStream() const;
++  bool CanChangeSubtitleStream() const;
++  bool CanToggleSubtitle() const;
++
+   //! the presentation graphic display flag libbluray last reported
+   bool IsPgEnabled() const { return m_pgEnabled; }
+ 
+@@ -0,5 +0,6 @@
+     bool m_clipStartHeld{false};
+     uint64_t m_clipStartEnd{0};
+     uint32_t m_pgStreamNumber{0};
++    uint32_t m_uoMask{0};
+     bool m_pgEnabled{false};
+ };
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,13 @@
+               m_pInputStream && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY))
+           {
+             CDemuxStream* stream = m_pDemuxer->GetStream(st.demuxerId, st.id);
++            if (stream && stream->dvdNavId != m_dvd.iSelectedAudioStream &&
++                !std::static_pointer_cast<CDVDInputStreamBluray>(m_pInputStream)
++                     ->CanChangeAudioStream())
++            {
++              CLog::Log(LOGDEBUG, "CVideoPlayer - the disc does not allow an audio stream change");
++              continue;
++            }
+             if (stream && std::static_pointer_cast<CDVDInputStreamBluray>(m_pInputStream)
+                               ->SetActiveAudioStream(stream->dvdNavId))
+               m_dvd.iSelectedAudioStream = stream->dvdNavId;
+@@ -0,6 +0,14 @@
+               m_pInputStream && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY))
+           {
+             CDemuxStream* stream = m_pDemuxer->GetStream(st.demuxerId, st.id);
++            if (stream && stream->dvdNavId != m_dvd.iSelectedSPUStream &&
++                !std::static_pointer_cast<CDVDInputStreamBluray>(m_pInputStream)
++                     ->CanChangeSubtitleStream())
++            {
++              CLog::Log(LOGDEBUG,
++                        "CVideoPlayer - the disc does not allow a subtitle stream change");
++              continue;
++            }
+             if (stream && std::static_pointer_cast<CDVDInputStreamBluray>(m_pInputStream)
+                               ->SetActiveSubtitleStream(stream->dvdNavId,
+                                                         m_VideoPlayerVideo->IsSubtitleEnabled()))
+@@ -0,6 +0,17 @@
+       const auto& ss = m_SelectionStreams.Get(StreamType::SUBTITLE, GetSubtitle());
+       const auto& as = m_SelectionStreams.Get(StreamType::AUDIO, GetAudioStream());
+ 
++#if defined(HAVE_LIBBLURAY)
++      if (STREAM_SOURCE_MASK(ss.source) == STREAM_SOURCE_DEMUX && m_pInputStream &&
++          m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY) &&
++          isVisible != m_VideoPlayerVideo->IsSubtitleEnabled() &&
++          !std::static_pointer_cast<CDVDInputStreamBluray>(m_pInputStream)->CanToggleSubtitle())
++      {
++        CLog::Log(LOGDEBUG, "CVideoPlayer - the disc does not allow showing or hiding subtitles");
++        continue;
++      }
++#endif
++
+       // Image type subtitles (e.g. VOBSUB), ensure to have the stream opened to read overlays
+       if (isVisible && StreamUtils::IsCodecSupportForcedOverlay(ss.codecId) &&
+           m_CurrentSubtitle.id == -1)

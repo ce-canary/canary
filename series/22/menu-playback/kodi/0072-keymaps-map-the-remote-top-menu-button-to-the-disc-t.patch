@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 13:28:03 -0600
+Subject: [PATCH] keymaps: map the remote top menu button to the disc top menu
+
+The VideoMenu window is where a disc menu or BD-J overlay is open.
+---
+ system/keymaps/remote.xml | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/system/keymaps/remote.xml b/system/keymaps/remote.xml
+--- a/system/keymaps/remote.xml
++++ b/system/keymaps/remote.xml
+@@ -0,6 +0,7 @@
+       <menu>OSD</menu>
+       <contentsmenu>OSD</contentsmenu>
+       <rootmenu>OSD</rootmenu>
++      <topmenu>PlayerControl(ShowVideoTopMenu)</topmenu>
+       <start>OSD</start>
+       <select>OSD</select>
+       <title>PlayerProcessInfo</title>
+@@ -0,6 +0,7 @@
+       <menu>OSD</menu>
+       <contentsmenu>OSD</contentsmenu>
+       <rootmenu>OSD</rootmenu>
++      <topmenu>PlayerControl(ShowVideoTopMenu)</topmenu>
+       <info>Info</info>
+       <title>PlayerProcessInfo</title>
+       <zero>Number0</zero>

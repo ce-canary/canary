@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 23:59:25 -0500
+Subject: [PATCH] RendererAML: tell the vsync presenter which wake ended the
+ wait
+
+---
+ xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h      | 8 ++++++++
+ .../VideoRenderers/HwDecRender/RendererAML.cpp            | 2 ++
+ .../VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h  | 3 +++
+ 3 files changed, 13 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h b/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
+@@ -0,6 +0,14 @@
+   virtual void StopVsyncPresent() {}
+   //! Blocks until the plane's next vsync, a wake or a liveness bound; false when stopped
+   virtual bool WaitVsync() { return false; }
++  enum class VsyncPresentWake
++  {
++    VSYNC,
++    STEP,
++    TIMEOUT,
++  };
++  //! What ended the last wait that returned true, for the vsync thread
++  virtual VsyncPresentWake GetVsyncPresentWake() const { return VsyncPresentWake::STEP; }
+   //! Hands the frame at `index` to the plane, from the vsync thread; false if no new picture
+   virtual bool PresentFrame(int index) { return false; }
+   //! Makes the vsync thread run a step now instead of at the next vsync
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+@@ -0,10 +0,12 @@
+       case CAMLCodec::VsyncWake::VSYNC:
+       case CAMLCodec::VsyncWake::TIMEOUT:
+         m_lastWakeVsync = wake == CAMLCodec::VsyncWake::VSYNC;
++        m_lastWake = m_lastWakeVsync ? VsyncPresentWake::VSYNC : VsyncPresentWake::TIMEOUT;
+         // amvideo shows a released frame from the vsync after the release
+         PublishReleasedFrame();
+         return true;
+       case CAMLCodec::VsyncWake::STEP:
++        m_lastWake = VsyncPresentWake::STEP;
+         // a requested step leaves the GUI pacing as it is
+         return true;
+       case CAMLCodec::VsyncWake::HANDOVER:
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
+@@ -0,6 +0,7 @@
+   virtual bool StartVsyncPresent() override;
+   virtual void StopVsyncPresent() override;
+   virtual bool WaitVsync() override;
++  virtual VsyncPresentWake GetVsyncPresentWake() const override { return m_lastWake; }
+   virtual bool PresentFrame(int index) override;
+   virtual void WakeVsyncPresent() override;
+   virtual int GetPresentLatency() const override;
+@@ -0,6 +0,8 @@
+   std::atomic<double> m_presentHold{0.0};
+   //! Vsync thread only: whether its last wake was a real vsync (what the GUI may pace on)
+   bool m_lastWakeVsync{false};
++  //! Vsync thread only: the wake that ended its last wait
++  VsyncPresentWake m_lastWake{VsyncPresentWake::STEP};
+   //! Codec of the frame last queued from the vsync thread, for the render loop to apply geometry
+   std::mutex m_pendingGeometryLock;
+   std::shared_ptr<CAMLCodec> m_pendingGeometry;

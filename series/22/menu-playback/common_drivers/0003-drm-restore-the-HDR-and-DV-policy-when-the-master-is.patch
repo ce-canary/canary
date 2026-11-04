@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 29 Oct 2026 21:10:54 -0500
+Subject: [PATCH] drm: restore the HDR and DV policy when the master is dropped
+
+The dv_policy, hdr_policy and force_output properties write module
+globals that outlive the master that set them. A master killed with a
+forced output leaves it to the next one. The GUI then stays in Dolby
+Vision or HDR10, and HDR titles play SDR until a later title resets it.
+---
+ drivers/drm/meson_crtc.c | 46 ++++++++++++++++++++++++++++++++++++++++
+ drivers/drm/meson_crtc.h |  3 +++
+ drivers/drm/meson_drv.c  |  2 ++
+ 3 files changed, 51 insertions(+)
+
+diff --git a/drivers/drm/meson_crtc.c b/drivers/drm/meson_crtc.c
+--- a/drivers/drm/meson_crtc.c
++++ b/drivers/drm/meson_crtc.c
+@@ -0,6 +0,18 @@
+ 	return ret;
+ }
+ 
++/*
++ * The policy properties write module globals, which outlive the master
++ * that set them, also a master that crashed: the value before its first
++ * write is put back when it is dropped.
++ */
++static bool master_hdr_policy_set;
++static int master_hdr_policy;
++static bool master_dv_policy_set;
++static int master_dv_policy;
++static bool master_force_output_set;
++static enum output_format_e master_force_output;
++
+ static int meson_crtc_atomic_set_property(struct drm_crtc *crtc,
+ 	struct drm_crtc_state *state,
+ 	struct drm_property *property,
+@@ -0,12 +0,24 @@
+ 		set_amdv_mode(val);
+ 		return 0;
+ 	} else if (property == meson_crtc->hdr_policy_property) {
++		if (!master_hdr_policy_set) {
++			master_hdr_policy = get_hdr_policy();
++			master_hdr_policy_set = true;
++		}
+ 		set_hdr_policy(val);
+ 		return 0;
+ 	} else if (property == meson_crtc->force_output_property) {
++		if (!master_force_output_set) {
++			master_force_output = get_force_output();
++			master_force_output_set = true;
++		}
+ 		set_force_output(val);
+ 		return 0;
+ 	} else if (property == meson_crtc->dv_policy_property) {
++		if (!master_dv_policy_set) {
++			master_dv_policy = get_amdv_policy();
++			master_dv_policy_set = true;
++		}
+ 		set_amdv_policy(val);
+ 		return 0;
+ 	} else if (property == meson_crtc->dv_ll_policy_property) {
+@@ -0,6 +0,28 @@
+ 	return ret;
+ }
+ 
++void meson_crtc_master_set(struct drm_device *dev, struct drm_file *file_priv,
++			   bool from_open)
++{
++	master_hdr_policy_set = false;
++	master_dv_policy_set = false;
++	master_force_output_set = false;
++}
++
++void meson_crtc_master_drop(struct drm_device *dev, struct drm_file *file_priv)
++{
++	/* set_hdr_policy() also writes the dv policy while dv is enabled */
++	if (master_hdr_policy_set && get_hdr_policy() != master_hdr_policy)
++		set_hdr_policy(master_hdr_policy);
++	if (master_dv_policy_set && get_amdv_policy() != master_dv_policy)
++		set_amdv_policy(master_dv_policy);
++	if (master_force_output_set && get_force_output() != master_force_output)
++		set_force_output(master_force_output);
++	master_hdr_policy_set = false;
++	master_dv_policy_set = false;
++	master_force_output_set = false;
++}
++
+ static void meson_crtc_atomic_print_state(struct drm_printer *p,
+ 		const struct drm_crtc_state *state)
+ {
+diff --git a/drivers/drm/meson_crtc.h b/drivers/drm/meson_crtc.h
+--- a/drivers/drm/meson_crtc.h
++++ b/drivers/drm/meson_crtc.h
+@@ -0,6 +0,9 @@
+ 	int idx);
+ int meson_crtc_creat_present_fence_ioctl(struct drm_device *dev,
+ 			void *data, struct drm_file *file_priv);
++void meson_crtc_master_set(struct drm_device *dev, struct drm_file *file_priv,
++			   bool from_open);
++void meson_crtc_master_drop(struct drm_device *dev, struct drm_file *file_priv);
+ #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+ int am_meson_lcd_get_vrr_range(struct drm_connector *connector,
+ 			struct drm_vrr_mode_group *groups, int max_group);
+diff --git a/drivers/drm/meson_drv.c b/drivers/drm/meson_drv.c
+--- a/drivers/drm/meson_drv.c
++++ b/drivers/drm/meson_drv.c
+@@ -0,6 +0,8 @@
+ #endif
+ 
+ 	/* Misc */
++	.master_set		= meson_crtc_master_set,
++	.master_drop		= meson_crtc_master_drop,
+ 	.fops			= &meson_drm_fops,
+ 	.name			= DRIVER_NAME,
+ 	.desc			= DRIVER_DESC,

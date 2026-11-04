@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 29 Oct 2026 00:07:39 -0500
+Subject: [PATCH] BitstreamConverter: compare the end of sequence as an hevc
+ nal
+
+The end of sequence check compares the hevc nal type with the avc value,
+so it never matches. At a clip end the base layer's last packet ends in
+end of sequence, ahead of the enhancement layer and rpu. The decoder
+stops there and outputs the last picture without dovi metadata, so the
+output switches to hdr10 for that frame.
+---
+ xbmc/utils/BitstreamConverter.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/xbmc/utils/BitstreamConverter.cpp b/xbmc/utils/BitstreamConverter.cpp
+--- a/xbmc/utils/BitstreamConverter.cpp
++++ b/xbmc/utils/BitstreamConverter.cpp
+@@ -0,7 +0,7 @@
+       buf += 4;
+       nal_type = (buf[0] >> 1) & 0x3f;
+ 
+-      if (nal_type != AVC_NAL_END_SEQUENCE)
++      if (nal_type != HEVC_NAL_EOS_NUT || end - (buf + size) > 4)
+         BitstreamAllocAndCopy(&m_convertBuffer, &offset, buf, size, nal_type);
+       else
+       {

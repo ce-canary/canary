@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 20:19:44 -0500
+Subject: [PATCH] ActiveAE: stop scaling down the sync error of TrueHD
+ passthrough
+
+The error was scaled down because TrueHD frames reached the engine in
+uneven bursts. The passthrough codec packs them into MAT frames of
+exactly 20 ms, so the scaling only hides how far TrueHD audio is off.
+---
+ xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,11 +0,6 @@
+         double maxError = ((*it)->m_syncState == CAESyncInfo::SYNC_INSYNC) ? 1000 : 5000;
+         double error = playingPts - (*it)->m_pClock->GetClock();
+ 
+-        // underestimate error for TrueHD passthrough
+-        // oscillations should be less than frametime 40ms to avoid unnecessary a/v sync corrections
+-        if (isTrueHDPassthrough)
+-          error *= 0.45;
+-
+         if (error > maxError)
+         {
+           CLog::Log(LOGWARNING, "ActiveAE - large audio sync error: {:f}", error);

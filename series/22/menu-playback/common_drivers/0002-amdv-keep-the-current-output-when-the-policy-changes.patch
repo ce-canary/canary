@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 29 Oct 2026 09:02:33 -0500
+Subject: [PATCH] amdv: keep the current output when the policy changes to
+ force
+
+The forced output mode only changes when userspace writes a mode, so
+it keeps what an earlier forced session left. Userspace sets the force
+policy and the mode in two writes. A vsync between them applies the
+stale mode, and a Dolby Vision output leaves its mode for a frame or
+more before the requested mode arrives.
+---
+ drivers/media/enhancement/amdolby_vision/amdv.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhancement/amdolby_vision/amdv.c
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -0,6 +0,10 @@
+ 
+ void set_amdv_policy(int policy)
+ {
++	/* keep the current output until userspace writes a forced mode */
++	if (policy == AMDV_FORCE_OUTPUT_MODE &&
++	    dolby_vision_policy != AMDV_FORCE_OUTPUT_MODE)
++		force_mode = dolby_vision_mode;
+ 	dolby_vision_policy = policy;
+ }
+ EXPORT_SYMBOL(set_amdv_policy);

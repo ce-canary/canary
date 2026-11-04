@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 30 Oct 2026 08:41:54 -0500
+Subject: [PATCH] VideoPlayerVideo: release a picture dropped in a drain right
+ away
+
+A dropped picture keeps its video buffer until the next decoded picture
+replaces it. With the renderer gone, as after a stop, every picture in
+a drain is dropped, and the last one is never replaced. A hardware
+decoder that drains until all its frames are back then never ends the
+drain, and the player waits for it until the 40 s synchronize timeout.
+---
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+@@ -0,6 +0,14 @@
+         m_pVideoCodec->SetCodecControl(DVD_CODEC_CTRL_DRAIN);
+         if (!ProcessDecoderOutput(frametime, pts))
+           break;
++
++        // a picture dropped in the drain is never rendered, and a decoder that drains until its
++        // frames come back needs its buffer now, not at the next picture
++        if (m_outputSate == OUTPUT_DROPPED && m_picture.videoBuffer)
++        {
++          m_picture.videoBuffer->Release();
++          m_picture.videoBuffer = nullptr;
++        }
+       }
+     }
+     else if (pMsg->IsType(CDVDMsg::GENERAL_PAUSE))

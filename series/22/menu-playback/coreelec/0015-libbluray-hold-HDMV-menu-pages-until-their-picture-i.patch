@@ -1,0 +1,830 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 10:33:03 -0600
+Subject: [PATCH] libbluray: hold HDMV menu pages until their picture is
+ presented
+
+The library draws an HDMV menu page when the player reads the data
+that carries it, which runs ahead of the picture on screen by the
+player's buffer depth. A page timed with its video shows early, and the
+page of a closed playlist is cleared as early.
+---
+ ...ges-until-their-picture-is-presented.patch | 810 ++++++++++++++++++
+ 1 file changed, 810 insertions(+)
+ create mode 100644 packages/multimedia/libbluray/patches/libbluray-19-bluray-hold-HDMV-menu-pages-until-their-picture-is-presented.patch
+
+diff --git a/packages/multimedia/libbluray/patches/libbluray-19-bluray-hold-HDMV-menu-pages-until-their-picture-is-presented.patch b/packages/multimedia/libbluray/patches/libbluray-19-bluray-hold-HDMV-menu-pages-until-their-picture-is-presented.patch
+new file mode 100644
+--- /dev/null
++++ b/packages/multimedia/libbluray/patches/libbluray-19-bluray-hold-HDMV-menu-pages-until-their-picture-is-presented.patch
+@@ -0,0 +0,810 @@
++From 63ba268812feabece166939f90bbe0ea297e6c31 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Tue, 3 Nov 2026 09:41:57 -0600
++Subject: [PATCH] bluray: hold HDMV menu pages until their picture is presented
++
++The library draws an HDMV menu page when the player reads the data
++that carries it, which runs ahead of the picture on screen by the
++player's buffer depth. A page timed with its video shows early, and the
++page of a closed playlist is cleared as early.
++---
++ src/libbluray/bluray.c                       | 234 ++++++++++++++++---
++ src/libbluray/bluray.h                       |  13 +-
++ src/libbluray/decoders/graphics_controller.c |  64 ++++-
++ src/libbluray/decoders/graphics_controller.h |  12 +-
++ src/libbluray/decoders/graphics_processor.c  |   8 +-
++ src/libbluray/decoders/graphics_processor.h  |   6 +-
++ src/libbluray/decoders/m2ts_demux.c          |   3 +-
++ src/libbluray/decoders/m2ts_demux.h          |   3 +-
++ src/libbluray/decoders/pes_buffer.h          |   2 +
++ 9 files changed, 301 insertions(+), 44 deletions(-)
++
++diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
++index 5f81162dc7..85ea472dbe 100644
++--- a/src/libbluray/bluray.c
+++++ b/src/libbluray/bluray.c
++@@ -106,11 +106,12 @@ typedef struct {
++ 
++ enum {
++     PRES_BDJ,        /* BD-J notification */
+++    PRES_GC,         /* HDMV graphics controller control */
++     PRES_END,        /* end of the title */
++ };
++ 
++ typedef struct {
++-    uint32_t ev;
+++    uint32_t ev;     /* BD-J event or gc_ctrl_e */
++     uint32_t param;
++     uint32_t due;    /* title time (45 kHz) of the picture it belongs to */
++     uint8_t  kind;   /* PRES_* */
++@@ -177,7 +178,7 @@ struct bluray {
++     uint8_t         bdj_wait_start;  /* BD-J has selected playlist (prefetch) but not yet started playback */
++     uint8_t         bdj_started;     /* BD-J has started playback and not stopped it */
++ 
++-    /* BD-J notifications of the read, held until the player presents their picture */
+++    /* notifications, menu pages and the title end of the read, held until presented */
++     uint8_t         pres_hold;       /* requested by the player */
++     uint8_t         pres_active;     /* BD-J implementation supports it */
++     uint8_t         pres_start;      /* 1 - playback start pending. 2 - its first data was read */
++@@ -189,6 +190,7 @@ struct bluray {
++     unsigned        pres_first;
++     unsigned        pres_count;
++     unsigned        pres_size;
+++    unsigned        gc_held;         /* PRES_GC entries in pres_events */
++ 
++     /* HDMV graphics */
++     GRAPHICS_CONTROLLER *graphics_controller;
++@@ -1525,7 +1527,7 @@ void bdpriv_bdj_osd_cb(BLURAY *bd, const unsigned *img, int w, int h,
++ }
++ 
++ /*
++- * BD-J notifications on presentation time
+++ * Notifications, menu pages and the title end on presentation time
++  */
++ 
++ static int _pres_holding(BLURAY *bd)
++@@ -1604,6 +1606,123 @@ static int _pres_hold_event(BLURAY *bd, unsigned ev, unsigned param)
++     return 1;
++ }
++ 
+++/*
+++ * HDMV menu pages on presentation time
+++ */
+++
+++static int _gc_holding(BLURAY *bd)
+++{
+++    return bd->pres_hold && bd->title_type == title_hdmv;
+++}
+++
+++static void _gc_hold(BLURAY *bd, gc_ctrl_e ctrl, uint32_t param, uint32_t due)
+++{
+++    BD_HELD_EVENT *held = _pres_push(bd);
+++
+++    if (!held) {
+++        _run_gc(bd, ctrl, param);
+++        return;
+++    }
+++
+++    held->ev = ctrl;
+++    held->param = param;
+++    held->due = due;
+++    held->kind = PRES_GC;
+++    bd->gc_held++;
+++
+++    BD_DEBUG(DBG_BLURAY, "graphics controller %d held, due %" PRIu32 "\n", ctrl, due);
+++}
+++
+++/* a decoded IG composition is due at its pts in the clip it was read from */
+++static void _gc_init_menu(BLURAY *bd)
+++{
+++    const NAV_CLIP *clip;
+++    int64_t  pts;
+++    uint64_t offset;
+++    unsigned src = 0;
+++    uint32_t due = 0;
+++
+++    if (!_gc_holding(bd) || (pts = gc_ig_pts(bd->graphics_controller, &src)) < 0) {
+++        _run_gc(bd, GC_CTRL_INIT_MENU, 0);
+++        return;
+++    }
+++
+++    /* 33-bit pts. a composition timed before the clip start is due at the clip start */
+++    clip = &bd->title->clip_list.clip[src];
+++    offset = (uint64_t)(pts - 2 * (int64_t)clip->in_time) & ((UINT64_C(1) << 33) - 1);
+++    if (offset < (UINT64_C(1) << 32)) {
+++        due = (uint32_t)(offset / 2);
+++        if (due > clip->out_time - clip->in_time) {
+++            due = clip->out_time - clip->in_time;
+++        }
+++    }
+++
+++    _gc_hold(bd, GC_CTRL_INIT_MENU, 0, clip->title_time + due);
+++}
+++
+++/* a preloaded IG sub-path composition is due with the first picture of the playback start */
+++static void _gc_init_start(BLURAY *bd)
+++{
+++    if (_gc_holding(bd) && gc_ig_pts(bd->graphics_controller, NULL) >= 0) {
+++        _gc_hold(bd, GC_CTRL_INIT_MENU, 0, _title_time(bd));
+++    } else {
+++        _run_gc(bd, GC_CTRL_INIT_MENU, 0);
+++    }
+++}
+++
+++/* a page command waits behind the held page it applies to */
+++static void _gc_run_or_hold(BLURAY *bd, gc_ctrl_e ctrl, uint32_t param)
+++{
+++    if (bd->gc_held) {
+++        _gc_hold(bd, ctrl, param, bd->pres_events[bd->pres_first + bd->pres_count - 1].due);
+++    } else {
+++        _run_gc(bd, ctrl, param);
+++    }
+++}
+++
+++static void _gc_run_held(BLURAY *bd, const BD_HELD_EVENT *held, int *nav)
+++{
+++    bd->gc_held--;
+++    _run_gc_cmds(bd, (gc_ctrl_e)held->ev, held->param, nav);
+++
+++    /* IG decoding waits while an entry is held: the decoder updates the composition in place */
+++    if (!bd->gc_held && bd->st0.ig_pid > 0 &&
+++        gc_decode_ts(bd->graphics_controller, bd->st0.ig_pid, NULL, 0, -1) > 0) {
+++        _gc_init_menu(bd);
+++    }
+++}
+++
+++/* run every held entry and every IG composition queued behind them */
+++static void _gc_flush(BLURAY *bd, int *nav)
+++{
+++    while (bd->gc_held) {
+++        unsigned i = bd->pres_first;
+++        BD_HELD_EVENT held;
+++
+++        while (bd->pres_events[i].kind != PRES_GC) {
+++            i++;
+++        }
+++        held = bd->pres_events[i];
+++        memmove(bd->pres_events + i, bd->pres_events + i + 1,
+++                (bd->pres_first + bd->pres_count - i - 1) * sizeof(held));
+++        bd->pres_count--;
+++
+++        _gc_run_held(bd, &held, nav);
+++    }
+++}
+++
+++/* user input acts on the held page: it decides the UO mask, and its auto action
+++ * replaces the HDMV object the input would set (returns 1) */
+++static int _gc_flush_input(BLURAY *bd)
+++{
+++    int nav = 0;
+++
+++    if (bd->title_type == title_hdmv) {
+++        _gc_flush(bd, &nav);
+++    }
+++    return nav;
+++}
+++
++ /* the player has data of the playback start or seek */
++ static void _pres_data_read(BLURAY *bd)
++ {
++@@ -1663,7 +1782,9 @@ static void _pres_release(BLURAY *bd, int64_t title_time)
++             return;
++         }
++         bd->pres_start = 0;
++-        bdj_presentation_start(bd->bdjava);
+++        if (bd->title_type == title_bdj) {
+++            bdj_presentation_start(bd->bdjava);
+++        }
++     }
++ 
++     /* media time of a seek runs from the first picture after its data was read.
++@@ -1680,7 +1801,11 @@ static void _pres_release(BLURAY *bd, int64_t title_time)
++         }
++         bd->pres_first++;
++         bd->pres_count--;
++-        bdj_process_event(bd->bdjava, held.ev, held.param);
+++        if (held.kind == PRES_GC) {
+++            _gc_run_held(bd, &held, NULL);
+++        } else {
+++            bdj_process_event(bd->bdjava, held.ev, held.param);
+++        }
++     }
++     if (!bd->pres_count) {
++         bd->pres_first = 0;
++@@ -1690,10 +1815,14 @@ static void _pres_release(BLURAY *bd, int64_t title_time)
++ /* playback leaves the data read: a pending start or seek happened */
++ static void _pres_flush_begin(BLURAY *bd)
++ {
+++    _gc_flush(bd, NULL);
+++
++     if (bd->pres_start || bd->pres_seek) {
++         bd->pres_start = 0;
++         bd->pres_seek = 0;
++-        bdj_presentation_start(bd->bdjava);
+++        if (bd->title_type == title_bdj) {
+++            bdj_presentation_start(bd->bdjava);
+++        }
++     }
++     bd->pres_raised = 0;
++ }
++@@ -2422,12 +2551,14 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len)
++ 
++                     // handle still mode clips
++                     if (st->clip->still_mode == BLURAY_STILL_INFINITE) {
+++                        _gc_flush(bd, NULL);
++                         bd->pres_read = 0;
++                         _queue_event(bd, BD_EVENT_STILL_TIME, 0);
++                         return 0;
++                     }
++                     if (st->clip->still_mode == BLURAY_STILL_TIME) {
++                         if (bd->event_queue) {
+++                            _gc_flush(bd, NULL);
++                             bd->pres_read = 0;
++                             _queue_event(bd, BD_EVENT_STILL_TIME, st->clip->still_time);
++                             return 0;
++@@ -2458,9 +2589,10 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len)
++                 if (r > 0) {
++ 
++                     if (st->ig_pid > 0) {
++-                        if (gc_decode_ts(bd->graphics_controller, st->ig_pid, bd->int_buf, 1, -1) > 0) {
+++                        gc_queue_ts(bd->graphics_controller, st->ig_pid, bd->int_buf, 1, st->clip->ref);
+++                        if (!bd->gc_held && gc_decode_ts(bd->graphics_controller, st->ig_pid, NULL, 0, -1) > 0) {
++                             /* initialize menus */
++-                            _run_gc(bd, GC_CTRL_INIT_MENU, 0);
+++                            _gc_init_menu(bd);
++                         }
++                     }
++                     if (st->pg_pid > 0) {
++@@ -2781,25 +2913,29 @@ static int _bdj_stop_before_presented_end(BLURAY *bd)
++            bd->presented_time < (int64_t)bd->title->duration * 2;
++ }
++ 
++-static void _close_playlist(BLURAY *bd)
+++/* returns 1 if the IG plane is kept on screen */
+++static int _close_playlist(BLURAY *bd, int keep_ig)
++ {
++     /* the application has not been told of the end yet */
++     int end_held = _pres_end_held(bd);
+++    int ig_kept = 0;
++ 
++     _pres_flush_begin(bd);
++ 
++     if (bd->graphics_controller) {
++-        gc_run(bd->graphics_controller, GC_CTRL_RESET, 0, NULL);
+++        ig_kept = gc_run(bd->graphics_controller, GC_CTRL_RESET, keep_ig, NULL) > 0;
++     }
++ 
++     /* the menu of a dropped IG is closed */
++-    if (bd->gc_status & GC_STATUS_MENU_OPEN) {
++-        _queue_event(bd, BD_EVENT_MENU, 0);
++-    }
++-    if (bd->gc_status & GC_STATUS_POPUP) {
++-        _queue_event(bd, BD_EVENT_POPUP, 0);
+++    if (!ig_kept) {
+++        if (bd->gc_status & GC_STATUS_MENU_OPEN) {
+++            _queue_event(bd, BD_EVENT_MENU, 0);
+++        }
+++        if (bd->gc_status & GC_STATUS_POPUP) {
+++            _queue_event(bd, BD_EVENT_POPUP, 0);
+++        }
+++        bd->gc_status = GC_STATUS_NONE;
++     }
++-    bd->gc_status = GC_STATUS_NONE;
++ 
++     /* stopping playback in middle of playlist ? */
++     if (bd->title && bd->st0.clip) {
++@@ -2835,6 +2971,8 @@ static void _close_playlist(BLURAY *bd)
++     _update_uo_mask(bd);
++ 
++     _pres_flush_end(bd);
+++
+++    return ig_kept;
++ }
++ 
++ static int _add_known_playlist(BD_DISC *p, const char *mpls_id)
++@@ -2867,6 +3005,7 @@ static int _add_known_playlist(BD_DISC *p, const char *mpls_id)
++ static int _open_playlist(BLURAY *bd, unsigned playlist, unsigned angle)
++ {
++     char f_name[12];
+++    int ig_kept;
++ 
++     if (playlist > 99999) {
++         BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Invalid playlist %u!\n", playlist);
++@@ -2881,7 +3020,15 @@ static int _open_playlist(BLURAY *bd, unsigned playlist, unsigned angle)
++         disc_event(bd->disc, DISC_EVENT_START, bd->disc_info.num_titles);
++     }
++ 
++-    _close_playlist(bd);
+++    ig_kept = _close_playlist(bd, _gc_holding(bd));
+++    if (_gc_holding(bd)) {
+++        /* menu pages of the playback start wait for its first data */
+++        bd->pres_start = 1;
+++    }
+++    if (ig_kept) {
+++        /* the old page goes with the first picture of the new playlist */
+++        _gc_hold(bd, GC_CTRL_IG_CLOSE, 0, 0);
+++    }
++ 
++     bd->title = nav_title_open(bd->disc, f_name, angle);
++     if (bd->title == NULL) {
++@@ -2978,7 +3125,7 @@ int bdpriv_seek(BLURAY *bd, int playitem, int playmark, int64_t time)
++ static int _play_playlist_at(BLURAY *bd, int playlist, int playitem, int playmark, int64_t time)
++ {
++     if (playlist < 0) {
++-        _close_playlist(bd);
+++        _close_playlist(bd, 0);
++         return 1;
++     }
++ 
++@@ -4078,6 +4225,8 @@ int bd_play_title(BLURAY *bd, unsigned title)
++     return ret;
++ }
++ 
+++static int _run_hdmv_loop(BLURAY *bd, BD_EVENT *event);
+++
++ static int _try_menu_call(BLURAY *bd, int64_t pts)
++ {
++     _set_scr(bd, pts);
++@@ -4087,6 +4236,19 @@ static int _try_menu_call(BLURAY *bd, int64_t pts)
++         return 0;
++     }
++ 
+++    /* the held page's auto action runs as a read would have run it before the call arrived */
+++    if (bd->title_type == title_hdmv) {
+++        int nav = 0;
+++
+++        _gc_flush(bd, &nav);
+++        if (nav && _run_hdmv_loop(bd, NULL) < 0) {
+++            BD_DEBUG(DBG_BLURAY | DBG_CRIT, "bd_menu_call(): HDMV VM error\n");
+++            _gc_flush(bd, NULL);
+++            bd->title_type = title_undef;
+++            return 0;
+++        }
+++    }
+++
++     if (BLURAY_PLAYER_SETTING_UO_RESTRICTION_RELAXED <= bd->uo_restriction_level && bd->uo_mask.menu_call) {
++         BD_DEBUG(DBG_BLURAY | DBG_CRIT, "bd_menu_call(): UO menu call masked\n");
++         // FIXME: UO_MASK_MENU_CALL_INDEX is not part of BD-J API UOMaskTableControl
++@@ -4119,7 +4281,7 @@ static void _process_hdmv_vm_event(BLURAY *bd, HDMV_EVENT *hev)
++ 
++     switch (hev->event) {
++         case HDMV_EVENT_TITLE:
++-            _close_playlist(bd);
+++            _close_playlist(bd, 0);
++             _play_title(bd, hev->param);
++             break;
++ 
++@@ -4150,7 +4312,7 @@ static void _process_hdmv_vm_event(BLURAY *bd, HDMV_EVENT *hev)
++ 
++             /* initialize menus */
++             _init_ig_stream(bd);
++-            _run_gc(bd, GC_CTRL_INIT_MENU, 0);
+++            _gc_init_start(bd);
++             break;
++ 
++         case HDMV_EVENT_PLAY_PI:
++@@ -4163,7 +4325,7 @@ static void _process_hdmv_vm_event(BLURAY *bd, HDMV_EVENT *hev)
++ 
++         case HDMV_EVENT_PLAY_STOP:
++             // stop current playlist
++-            _close_playlist(bd);
+++            _close_playlist(bd, 0);
++ 
++             bd->hdmv_suspended = !hdmv_vm_running(bd->hdmv_vm);
++             break;
++@@ -4173,23 +4335,23 @@ static void _process_hdmv_vm_event(BLURAY *bd, HDMV_EVENT *hev)
++             break;
++ 
++         case HDMV_EVENT_ENABLE_BUTTON:
++-            _run_gc(bd, GC_CTRL_ENABLE_BUTTON, hev->param);
+++            _gc_run_or_hold(bd, GC_CTRL_ENABLE_BUTTON, hev->param);
++             break;
++ 
++         case HDMV_EVENT_DISABLE_BUTTON:
++-            _run_gc(bd, GC_CTRL_DISABLE_BUTTON, hev->param);
+++            _gc_run_or_hold(bd, GC_CTRL_DISABLE_BUTTON, hev->param);
++             break;
++ 
++         case HDMV_EVENT_SET_BUTTON_PAGE:
++-            _run_gc(bd, GC_CTRL_SET_BUTTON_PAGE, hev->param);
+++            _gc_run_or_hold(bd, GC_CTRL_SET_BUTTON_PAGE, hev->param);
++             break;
++ 
++         case HDMV_EVENT_POPUP_OFF:
++-            _run_gc(bd, GC_CTRL_POPUP, 0);
+++            _gc_run_or_hold(bd, GC_CTRL_POPUP, 0);
++             break;
++ 
++         case HDMV_EVENT_IG_END:
++-            _run_gc(bd, GC_CTRL_IG_END, 0);
+++            _gc_run_or_hold(bd, GC_CTRL_IG_END, 0);
++             break;
++ 
++         case HDMV_EVENT_END:
++@@ -4243,8 +4405,11 @@ static int _run_hdmv_loop(BLURAY *bd, BD_EVENT *event)
++              */
++             BD_DEBUG(DBG_BLURAY | DBG_CRIT, "bd_read_ext(): detected possible HDMV mode live lock (%d loops)\n", loops);
++             _queue_event(bd, BD_EVENT_ERROR, BD_ERROR_HDMV);
+++            if (!event) {
+++                break;
+++            }
++         }
++-        if (_get_event(bd, event)) {
+++        if (event && _get_event(bd, event)) {
++             return 1;
++         }
++     }
++@@ -4264,6 +4429,7 @@ static int _read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
++         int r = _run_hdmv_loop(bd, event);
++         if (r < 0) {
++             BD_DEBUG(DBG_BLURAY|DBG_CRIT, "bd_read_ext(): HDMV VM error\n");
+++            _gc_flush(bd, NULL);
++             bd->title_type = title_undef;
++             return -1;
++         }
++@@ -4271,7 +4437,7 @@ static int _read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
++             return 0;
++         }
++ 
++-        if (bd->gc_status & GC_STATUS_ANIMATE) {
+++        if ((bd->gc_status & GC_STATUS_ANIMATE) && !bd->gc_held) {
++             _run_gc(bd, GC_CTRL_NOP, 0);
++         }
++     }
++@@ -4375,7 +4541,7 @@ int64_t bd_presented(BLURAY *bd, int64_t title_time)
++ 
++     bd_mutex_lock(&bd->mutex);
++     bd->presented_time = title_time < 0 ? -1 : title_time;
++-    if (_pres_holding(bd)) {
+++    if (_pres_holding(bd) || _gc_holding(bd)) {
++         if (title_time >= 0) {
++             _pres_release(bd, title_time);
++         }
++@@ -4464,7 +4630,9 @@ int bd_mouse_select(BLURAY *bd, int64_t pts, uint16_t x, uint16_t y)
++     _set_scr(bd, pts);
++ 
++     if (bd->title_type == title_hdmv) {
++-        result = _run_gc(bd, GC_CTRL_MOUSE_MOVE, param);
+++        int nav = 0;
+++        _gc_flush(bd, &nav);
+++        result = nav ? 0 : _run_gc(bd, GC_CTRL_MOUSE_MOVE, param);
++     } else if (bd->title_type == title_bdj) {
++         result = _bdj_event(bd, BDJ_EVENT_MOUSE, param);
++     }
++@@ -4537,6 +4705,12 @@ int bd_user_input(BLURAY *bd, int64_t pts, uint32_t key)
++     bd_mutex_lock(&bd->mutex);
++ 
++     _set_scr(bd, pts);
+++
+++    if (_gc_flush_input(bd)) {
+++        bd_mutex_unlock(&bd->mutex);
+++        return 0;
+++    }
+++
++     if (_get_key_uo_index(bd, BD_VK_KEY(key), &uo_mask_idx)) {
++         uo_is_masked = _is_uo_masked(bd, uo_mask_idx);
++     }
++diff --git a/src/libbluray/bluray.h b/src/libbluray/bluray.h
++index 33f83eba3e..0ee3f841d0 100644
++--- a/src/libbluray/bluray.h
+++++ b/src/libbluray/bluray.h
++@@ -1145,11 +1145,16 @@ BD_PUBLIC void bd_set_scr(BLURAY *bd, int64_t pts);
++  *  BD_PRESENTED_ALL is reported at the end of the playlist. A seek before the start of
++  *  playback is presented keeps the start held.
++  *
++- *  Must be called before bd_play(). Without a BD-J implementation that supports it
++- *  the notifications are not held.
+++ *  HDMV menu pages and the page commands behind them are held the same way. User or mouse
+++ *  input and a menu call release the held pages early. The page of a closed playlist stays
+++ *  until the first picture of the next playlist is reported, unless a seek or resume right
+++ *  after the open removes it first.
+++ *
+++ *  Must be called before bd_play(). Without a BD-J implementation that supports it the
+++ *  BD-J notifications are not held; HDMV menu pages are held without BD-J.
++  *
++  * @param bd  BLURAY object
++- * @param enable  1 to hold the notifications, 0 to deliver them when read
+++ * @param enable  1 to hold the notifications and HDMV menu pages, 0 to deliver them when read
++  */
++ BD_PUBLIC void bd_set_presentation_hold(BLURAY *bd, int enable);
++ 
++@@ -1162,6 +1167,8 @@ BD_PUBLIC void bd_set_presentation_hold(BLURAY *bd, int enable);
++  *  Held BD-J notifications due at the reported time are delivered. On seek, playlist change
++  *  and title change the last held play item, chapter and stream change are delivered unless
++  *  the change raised a newer one, and the other held notifications are dropped.
+++ *  Held HDMV menu pages are drawn when due, and at once on seek, playlist change, title
+++ *  change, still and user input.
++  *
++  * @param bd  BLURAY object
++  * @param title_time title time of the presented picture (1/90000s), -1 if unknown
++diff --git a/src/libbluray/decoders/graphics_controller.c b/src/libbluray/decoders/graphics_controller.c
++index 094168c76d..656834aeda 100644
++--- a/src/libbluray/decoders/graphics_controller.c
+++++ b/src/libbluray/decoders/graphics_controller.c
++@@ -76,6 +76,7 @@ struct graphics_controller_s {
++     /* state */
++     unsigned        ig_open;
++     unsigned        ig_drawn;
+++    unsigned        ig_kept;   /* IG plane left on screen by a reset until GC_CTRL_IG_CLOSE */
++     unsigned        ig_dirty;
++     unsigned        pg_open;
++     unsigned        pg_drawn;
++@@ -475,6 +476,7 @@ static void _open_osd(GRAPHICS_CONTROLLER *gc, int plane,
++ 
++         if (plane == BD_OVERLAY_IG) {
++             gc->ig_open = 1;
+++            gc->ig_kept = 0;
++         } else {
++             gc->pg_open = 1;
++         }
++@@ -495,6 +497,7 @@ static void _close_osd(GRAPHICS_CONTROLLER *gc, int plane)
++     if (plane == BD_OVERLAY_IG) {
++         gc->ig_open = 0;
++         gc->ig_drawn = 0;
+++        gc->ig_kept = 0;
++     } else {
++         gc->pg_open = 0;
++         gc->pg_drawn = 0;
++@@ -740,12 +743,16 @@ static void _select_page(GRAPHICS_CONTROLLER *gc, uint16_t page_id, int out_effe
++     }
++ }
++ 
++-static void _gc_reset(GRAPHICS_CONTROLLER *gc)
+++static int _gc_reset(GRAPHICS_CONTROLLER *gc, int keep_ig)
++ {
++     if (gc->pg_open) {
++         _close_osd(gc, BD_OVERLAY_PG);
++     }
++-    if (gc->ig_open) {
+++    if (keep_ig && (gc->ig_open || gc->ig_kept)) {
+++        gc->ig_kept  = 1;
+++        gc->ig_open  = 0;
+++        gc->ig_drawn = 0;
+++    } else if (gc->ig_open || gc->ig_kept) {
++         _close_osd(gc, BD_OVERLAY_IG);
++     }
++ 
++@@ -766,6 +773,8 @@ static void _gc_reset(GRAPHICS_CONTROLLER *gc)
++     gc->textst_user_style = -1;
++ 
++     memset(gc->bog_data, 0, sizeof(gc->bog_data));
+++
+++    return gc->ig_kept;
++ }
++ 
++ /*
++@@ -840,7 +849,7 @@ void gc_free(GRAPHICS_CONTROLLER **p)
++ 
++         bd_psr_unregister_cb(gc->regs, _process_psr_event, gc);
++ 
++-        _gc_reset(gc);
+++        _gc_reset(gc, 0);
++ 
++         if (gc->overlay_proc) {
++             gc->overlay_proc(gc->overlay_proc_handle, NULL);
++@@ -950,6 +959,44 @@ int gc_decode_ts(GRAPHICS_CONTROLLER *gc, uint16_t pid, uint8_t *block, unsigned
++     return -1;
++ }
++ 
+++void gc_queue_ts(GRAPHICS_CONTROLLER *gc, uint16_t pid, uint8_t *block, unsigned num_blocks, unsigned src)
+++{
+++    if (!gc || !IS_HDMV_PID_IG(pid)) {
+++        return;
+++    }
+++
+++    if (!gc->igp) {
+++        gc->igp = graphics_processor_init();
+++        if (!gc->igp) {
+++            return;
+++        }
+++    }
+++
+++    bd_mutex_lock(&gc->mutex);
+++    graphics_processor_queue_ts(gc->igp, pid, block, num_blocks, src);
+++    bd_mutex_unlock(&gc->mutex);
+++}
+++
+++int64_t gc_ig_pts(GRAPHICS_CONTROLLER *gc, unsigned *src)
+++{
+++    int64_t pts = -1;
+++
+++    if (!gc) {
+++        return -1;
+++    }
+++
+++    bd_mutex_lock(&gc->mutex);
+++    if (gc->igs && gc->igs->ics && gc->igs->complete) {
+++        pts = gc->igs->ics->pts;
+++        if (src) {
+++            *src = gc->igs->ics_src;
+++        }
+++    }
+++    bd_mutex_unlock(&gc->mutex);
+++
+++    return pts;
+++}
+++
++ /*
++  * TextST rendering
++  */
++@@ -2000,7 +2047,15 @@ int gc_run(GRAPHICS_CONTROLLER *gc, gc_ctrl_e ctrl, uint32_t param, GC_NAV_CMDS
++     /* always accept reset */
++     switch (ctrl) {
++         case GC_CTRL_RESET:
++-            _gc_reset(gc);
+++            result = _gc_reset(gc, param);
+++
+++            bd_mutex_unlock(&gc->mutex);
+++            return result;
+++
+++        case GC_CTRL_IG_CLOSE:
+++            if (gc->ig_kept) {
+++                _close_osd(gc, BD_OVERLAY_IG);
+++            }
++ 
++             bd_mutex_unlock(&gc->mutex);
++             return 0;
++@@ -2105,6 +2160,7 @@ int gc_run(GRAPHICS_CONTROLLER *gc, gc_ctrl_e ctrl, uint32_t param, GC_NAV_CMDS
++          * but not handled here.
++          */
++         case GC_CTRL_RESET:
+++        case GC_CTRL_IG_CLOSE:
++         case GC_CTRL_PG_RESET:
++         case GC_CTRL_PG_UPDATE:
++         case GC_CTRL_PG_CHARCODE:
++diff --git a/src/libbluray/decoders/graphics_controller.h b/src/libbluray/decoders/graphics_controller.h
++index e356f0488d..db5d152805 100644
++--- a/src/libbluray/decoders/graphics_controller.h
+++++ b/src/libbluray/decoders/graphics_controller.h
++@@ -46,7 +46,7 @@ typedef enum {
++     /* */
++     GC_CTRL_INIT_MENU,       /* */
++     GC_CTRL_NOP,             /* No input. Render page / run timers / run animations */
++-    GC_CTRL_RESET,           /* reset graphics controller */
+++    GC_CTRL_RESET,           /* reset graphics controller, param: 1 to keep the IG plane on screen */
++ 
++     /* user input */
++     GC_CTRL_VK_KEY,          /* param: bd_vk_key_e */
++@@ -58,6 +58,7 @@ typedef enum {
++     GC_CTRL_SET_BUTTON_PAGE,
++     GC_CTRL_POPUP,           /* param: on/off */
++     GC_CTRL_IG_END,          /* execution of IG object is complete */
+++    GC_CTRL_IG_CLOSE,        /* close the IG plane kept by GC_CTRL_RESET */
++ 
++     /* PG */
++     GC_CTRL_PG_UPDATE,       /* render decoded PG composition */
++@@ -118,6 +119,15 @@ BD_PRIVATE int                  gc_decode_ts(GRAPHICS_CONTROLLER *p,
++                                              uint8_t *block, unsigned num_blocks,
++                                              int64_t stc);
++ 
+++/* queue IG data read from source src for a later gc_decode_ts(p, pid, NULL, 0, -1) */
+++BD_PRIVATE void                 gc_queue_ts(GRAPHICS_CONTROLLER *p,
+++                                            uint16_t pid,
+++                                            uint8_t *block, unsigned num_blocks,
+++                                            unsigned src);
+++
+++/* pts of the complete IG composition (90 kHz), -1 if none. src is set to its source */
+++BD_PRIVATE int64_t              gc_ig_pts(GRAPHICS_CONTROLLER *p, unsigned *src);
+++
++ /*
++  * run graphics controller
++  */
++diff --git a/src/libbluray/decoders/graphics_processor.c b/src/libbluray/decoders/graphics_processor.c
++index 4445b31b39..507dcf7ee7 100644
++--- a/src/libbluray/decoders/graphics_processor.c
+++++ b/src/libbluray/decoders/graphics_processor.c
++@@ -394,6 +394,7 @@ static int _decode_ics(PG_DISPLAY_SET *s, BITBUFFER *bb, PES_BUFFER *p)
++     }
++ 
++     s->ics->pts  = p->pts;
+++    s->ics_src   = p->src;
++     s->valid_pts = p->pts;
++ 
++     _check_epoch_start(s);
++@@ -606,7 +607,8 @@ void graphics_processor_free(GRAPHICS_PROCESSOR **p)
++ }
++ 
++ int graphics_processor_queue_ts(GRAPHICS_PROCESSOR *p,
++-                                uint16_t pid, uint8_t *unit, unsigned num_units)
+++                                uint16_t pid, uint8_t *unit, unsigned num_units,
+++                                unsigned src)
++ {
++     unsigned ii;
++ 
++@@ -623,7 +625,7 @@ int graphics_processor_queue_ts(GRAPHICS_PROCESSOR *p,
++     }
++ 
++     for (ii = 0; ii < num_units; ii++) {
++-        pes_buffer_append(&p->queue, m2ts_demux(p->demux, unit));
+++        pes_buffer_append(&p->queue, m2ts_demux(p->demux, unit, src));
++         unit += 6144;
++     }
++ 
++@@ -637,7 +639,7 @@ int graphics_processor_decode_ts(GRAPHICS_PROCESSOR *p,
++ {
++     int result = 0;
++ 
++-    if (!graphics_processor_queue_ts(p, pid, unit, num_units)) {
+++    if (!graphics_processor_queue_ts(p, pid, unit, num_units, 0)) {
++         return 0;
++     }
++ 
++diff --git a/src/libbluray/decoders/graphics_processor.h b/src/libbluray/decoders/graphics_processor.h
++index 0957906cbc..8f164fb022 100644
++--- a/src/libbluray/decoders/graphics_processor.h
+++++ b/src/libbluray/decoders/graphics_processor.h
++@@ -55,6 +55,8 @@ typedef struct {
++     BD_PG_COMPOSITION   *pcs;
++     BD_TEXTST_DIALOG_STYLE *style;
++ 
+++    unsigned ics_src; /* source of the ICS, from PES_BUFFER src */
+++
++     uint8_t decoding; /* internal flag: PCS/ICS decoded, but no end of presentation seen yet */
++ 
++ } PG_DISPLAY_SET;
++@@ -76,11 +78,13 @@ BD_PRIVATE void                graphics_processor_free(GRAPHICS_PROCESSOR **p);
++  * @param pid  mpeg-ts PID (HDMV IG/PG stream)
++  * @param unit  mpeg-ts data
++  * @param num_units  number of aligned units in data
+++ * @param src  source of the data, stored with each PES packet that starts in it
++  * @return 0 on error
++  */
++ BD_PRIVATE int
++ graphics_processor_queue_ts(GRAPHICS_PROCESSOR *p,
++-                            uint16_t pid, uint8_t *unit, unsigned num_units);
+++                            uint16_t pid, uint8_t *unit, unsigned num_units,
+++                            unsigned src);
++ 
++ /**
++  *
++diff --git a/src/libbluray/decoders/m2ts_demux.c b/src/libbluray/decoders/m2ts_demux.c
++index 73bd4d9d8e..8fee1e0a1a 100644
++--- a/src/libbluray/decoders/m2ts_demux.c
+++++ b/src/libbluray/decoders/m2ts_demux.c
++@@ -204,7 +204,7 @@ static int _parse_pes(PES_BUFFER *p, uint8_t *buf, unsigned len)
++  *
++  */
++ 
++-PES_BUFFER *m2ts_demux(M2TS_DEMUX *p, uint8_t *buf)
+++PES_BUFFER *m2ts_demux(M2TS_DEMUX *p, uint8_t *buf, unsigned src)
++ {
++     uint8_t   *end = buf + 6144;
++     PES_BUFFER *result = NULL;
++@@ -258,6 +258,7 @@ PES_BUFFER *m2ts_demux(M2TS_DEMUX *p, uint8_t *buf)
++                 continue;
++             }
++             p->pes_length = r;
+++            p->buf->src = src;
++ 
++         } else {
++ 
++diff --git a/src/libbluray/decoders/m2ts_demux.h b/src/libbluray/decoders/m2ts_demux.h
++index a344b59d42..4d8caaf218 100644
++--- a/src/libbluray/decoders/m2ts_demux.h
+++++ b/src/libbluray/decoders/m2ts_demux.h
++@@ -39,10 +39,11 @@ BD_PRIVATE void m2ts_demux_reset(M2TS_DEMUX *);
++ /*
++  *   Demux aligned unit (mpeg-ts + pes).
++  *   input:  aligned unit (6144 bytes). NULL to flush demuxer buffer.
+++ *           src is stored with each PES that starts in the unit.
++  *   output: PES payload
++  *   Flush demuxer internal cache if block == NULL.
++  */
++-BD_PRIVATE struct pes_buffer_s *m2ts_demux(M2TS_DEMUX *, uint8_t *block);
+++BD_PRIVATE struct pes_buffer_s *m2ts_demux(M2TS_DEMUX *, uint8_t *block, unsigned src);
++ 
++ 
++ #endif // _M2TS_DEMUX_H_
++diff --git a/src/libbluray/decoders/pes_buffer.h b/src/libbluray/decoders/pes_buffer.h
++index f18d1338a4..8c77c05edf 100644
++--- a/src/libbluray/decoders/pes_buffer.h
+++++ b/src/libbluray/decoders/pes_buffer.h
++@@ -34,6 +34,8 @@ struct pes_buffer_s {
++     int64_t   pts;
++     int64_t   dts;
++ 
+++    unsigned  src;  // source of the data (caller defined)
+++
++     struct pes_buffer_s *next;
++ };
++ 

@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 10:33:03 -0600
+Subject: [PATCH] libbluray: report the 2160p video size
+
+StreamInfo.getVideoSize() has no break after the 2160p video format,
+so it returns null for every UHD stream. VideoControl, the background
+video and the PiP controls dereference that size when they clip, size
+or place the video, so such an application throws NullPointerException.
+---
+ ...y-08-bdj-report-the-2160p-video-size.patch | 25 +++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+ create mode 100644 packages/multimedia/libbluray/patches/libbluray-08-bdj-report-the-2160p-video-size.patch
+
+diff --git a/packages/multimedia/libbluray/patches/libbluray-08-bdj-report-the-2160p-video-size.patch b/packages/multimedia/libbluray/patches/libbluray-08-bdj-report-the-2160p-video-size.patch
+new file mode 100644
+--- /dev/null
++++ b/packages/multimedia/libbluray/patches/libbluray-08-bdj-report-the-2160p-video-size.patch
+@@ -0,0 +0,25 @@
++From 00311d96f90ccaffd49857226a73a802f3e59923 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Tue, 27 Oct 2026 23:43:00 -0500
++Subject: [PATCH] bdj: report the 2160p video size
++
++StreamInfo.getVideoSize() has no break after the 2160p video format,
++so it returns null for every UHD stream. VideoControl, the background
++video and the PiP controls dereference that size when they clip, size
++or place the video, so such an application throws NullPointerException.
++---
++ src/libbluray/bdj/java/org/videolan/StreamInfo.java | 1 +
++ 1 file changed, 1 insertion(+)
++
++diff --git a/src/libbluray/bdj/java/org/videolan/StreamInfo.java b/src/libbluray/bdj/java/org/videolan/StreamInfo.java
++index 4cf4fd4e15..61d6eeb2d2 100644
++--- a/src/libbluray/bdj/java/org/videolan/StreamInfo.java
+++++ b/src/libbluray/bdj/java/org/videolan/StreamInfo.java
++@@ -73,6 +73,7 @@ public class StreamInfo {
++         case (byte)0x08:
++             width = 3840;
++             height = 2160;
+++            break;
++         default:
++                 return null;
++         }

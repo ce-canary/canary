@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 13 Oct 2026 13:32:38 -0500
+Subject: [PATCH] VideoPlayer: let the disc select the streams in Blu-ray menu
+ mode
+
+In Blu-ray menu mode the disc program and libbluray select the streams,
+as on a disc player. OpenDefaultStreams still opened the streams and the
+subtitle state of the per-file settings while libbluray had announced
+none, so the session started from settings the disc never saw.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,9 @@
+       std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream)};
+   const bool noBlurayMenu{m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY) && menus &&
+                           menus->GetSupportedMenuType() == MenuType::NONE};
++  // in menu mode the disc program selects every stream through libbluray, as on a disc player
++  if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY) && !noBlurayMenu)
++    return;
+   if (!noBlurayMenu && (m_dvd.iSelectedAudioStream >= 0 || m_dvd.iSelectedSPUStream >= 0))
+     return;
+ 

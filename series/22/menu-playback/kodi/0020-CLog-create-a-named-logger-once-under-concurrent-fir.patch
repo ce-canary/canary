@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 17 Oct 2026 14:51:58 -0500
+Subject: [PATCH] CLog: create a named logger once under concurrent first use
+
+Two threads that log under the same name for the first time at the
+same moment both create its logger. spdlog throws on the second
+registration of the name, and the exception ends the losing thread.
+---
+ xbmc/utils/log.cpp | 6 ++++++
+ xbmc/utils/log.h   | 2 ++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/xbmc/utils/log.cpp b/xbmc/utils/log.cpp
+--- a/xbmc/utils/log.cpp
++++ b/xbmc/utils/log.cpp
+@@ -0,6 +0,12 @@
+ Logger CLog::GetLogger(const std::string& loggerName)
+ {
+   auto logger = spdlog::get(loggerName);
++  if (logger != nullptr)
++    return logger;
++
++  // spdlog throws if two threads register the same name
++  std::unique_lock lock(m_loggerMutex);
++  logger = spdlog::get(loggerName);
+   if (logger == nullptr)
+     logger = CreateLogger(loggerName);
+ 
+diff --git a/xbmc/utils/log.h b/xbmc/utils/log.h
+--- a/xbmc/utils/log.h
++++ b/xbmc/utils/log.h
+@@ -0,6 +0,7 @@
+ #include "utils/IPlatformLog.h"
+ #include "utils/logtypes.h"
+ 
++#include <mutex>
+ #include <source_location>
+ #include <string>
+ #include <vector>
+@@ -0,6 +0,7 @@
+   std::unique_ptr<IPlatformLog> m_platform;
+   std::shared_ptr<spdlog::sinks::dist_sink<std::mutex>> m_sinks;
+   Logger m_defaultLogger;
++  std::mutex m_loggerMutex;
+ 
+   std::shared_ptr<spdlog::sinks::sink> m_fileSink;
+ 

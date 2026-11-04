@@ -1,0 +1,299 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 20:15:52 -0500
+Subject: [PATCH] ActiveAE: count queued passthrough packets by their duration
+
+A passthrough buffer holds one frame in bytes, so its nb_samples is no
+sample count. The stream queues counted a MAT frame as 1.28 s instead
+of 20 ms. The engine counted every passthrough buffer as one frame.
+That included a pause burst shorter than a frame and a skipped packet
+that plays nothing.
+---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 31 +++++++++++++------
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.h   |  5 +--
+ .../Engines/ActiveAE/ActiveAEBuffer.cpp       | 20 +++++++++---
+ .../Engines/ActiveAE/ActiveAEBuffer.h         |  1 +
+ .../Engines/ActiveAE/ActiveAESink.cpp         | 26 ++++++++++------
+ .../Engines/ActiveAE/ActiveAEStream.cpp       |  4 +--
+ 6 files changed, 60 insertions(+), 27 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,26 +0,31 @@
+   m_sinkDelay.SetDelay(0.0);
+   m_sinkSampleRate = sampleRate;
+   m_bufferedSamples = 0;
++  m_bufferedPauseMs = 0;
+   m_suspended = false;
+   m_pcmOutput = pcm;
+ }
+ 
+-void CEngineStats::UpdateSinkDelay(const AEDelayStatus& status, int samples)
++void CEngineStats::UpdateSinkDelay(const AEDelayStatus& status, int samples, int pauseMs)
+ {
+   std::unique_lock lock(m_lock);
+   m_sinkDelay = status;
+-  if (samples > m_bufferedSamples)
++  if (samples > m_bufferedSamples || pauseMs > m_bufferedPauseMs)
+   {
+     CLog::Log(LOGERROR, "CEngineStats::UpdateSinkDelay - inconsistency in buffer time");
+   }
+   else
++  {
+     m_bufferedSamples -= samples;
++    m_bufferedPauseMs -= pauseMs;
++  }
+ }
+ 
+-void CEngineStats::AddSamples(int samples, const std::list<CActiveAEStream*>& streams)
++void CEngineStats::AddSamples(int samples, const std::list<CActiveAEStream*>& streams, int pauseMs)
+ {
+   std::unique_lock lock(m_lock);
+   m_bufferedSamples += samples;
++  m_bufferedPauseMs += pauseMs;
+ 
+   for (auto stream : streams)
+   {
+@@ -0,7 +0,8 @@
+     status.delay += static_cast<double>(m_bufferedSamples) / m_sinkSampleRate;
+   else
+     status.delay +=
+-        static_cast<double>(m_bufferedSamples) * m_sinkFormat.m_streamInfo.GetDuration() / 1000;
++        static_cast<double>(m_bufferedSamples) * m_sinkFormat.m_streamInfo.GetDuration() / 1000 +
++        static_cast<double>(m_bufferedPauseMs) / 1000;
+ }
+ 
+ void CEngineStats::AddStream(unsigned int streamid)
+@@ -0,7 +0,8 @@
+     status.delay += static_cast<double>(m_bufferedSamples) / m_sinkSampleRate;
+   else
+     status.delay +=
+-        static_cast<double>(m_bufferedSamples) * m_sinkFormat.m_streamInfo.GetDuration() / 1000;
++        static_cast<double>(m_bufferedSamples) * m_sinkFormat.m_streamInfo.GetDuration() / 1000 +
++        static_cast<double>(m_bufferedPauseMs) / 1000;
+ 
+   for (auto &str : m_streamStats)
+   {
+@@ -0,7 +0,8 @@
+     status.delay += static_cast<double>(m_bufferedSamples) / m_sinkSampleRate;
+   else
+     status.delay +=
+-        static_cast<double>(m_bufferedSamples) * m_sinkFormat.m_streamInfo.GetDuration() / 1000;
++        static_cast<double>(m_bufferedSamples) * m_sinkFormat.m_streamInfo.GetDuration() / 1000 +
++        static_cast<double>(m_bufferedPauseMs) / 1000;
+ 
+   status.delay += static_cast<double>(m_sinkLatency);
+ 
+@@ -0,7 +0,8 @@
+     return static_cast<float>(m_bufferedSamples) / m_sinkSampleRate;
+   else
+     return static_cast<float>(static_cast<double>(m_bufferedSamples) *
+-                              m_sinkFormat.m_streamInfo.GetDuration() / 1000.0);
++                                  m_sinkFormat.m_streamInfo.GetDuration() / 1000.0 +
++                              static_cast<double>(m_bufferedPauseMs) / 1000.0);
+ }
+ 
+ void CEngineStats::SetSuspended(bool state)
+@@ -0,7 +0,8 @@
+       // update stats
+       if(out)
+       {
+-        int samples = (m_mode == MODE_TRANSCODE) ? 1 : out->pkt->nb_samples;
++        int samples =
++            (m_mode == MODE_TRANSCODE) ? (out->pkt->nb_samples > 0 ? 1 : 0) : out->pkt->nb_samples;
+         m_stats.AddSamples(samples, m_streams);
+         m_sinkBuffers->m_inputSamples.push_back(out);
+       }
+@@ -0,7 +0,10 @@
+             buffer = (*it)->m_processingBuffers->m_outputSamples.front();
+             (*it)->m_processingBuffers->m_outputSamples.pop_front();
+           }
+-          m_stats.AddSamples(1, m_streams);
++          if (buffer->pkt->nb_samples > 0)
++            m_stats.AddSamples(1, m_streams);
++          else
++            m_stats.AddSamples(0, m_streams, buffer->pkt->pause_burst_ms);
+           m_sinkBuffers->m_inputSamples.push_back(buffer);
+         }
+       }
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
+@@ -0,8 +0,8 @@
+ {
+ public:
+   void Reset(unsigned int sampleRate, bool pcm);
+-  void UpdateSinkDelay(const AEDelayStatus& status, int samples);
+-  void AddSamples(int samples, const std::list<CActiveAEStream*>& streams);
++  void UpdateSinkDelay(const AEDelayStatus& status, int samples, int pauseMs = 0);
++  void AddSamples(int samples, const std::list<CActiveAEStream*>& streams, int pauseMs = 0);
+   void GetDelay(AEDelayStatus& status);
+   void AddStream(unsigned int streamid);
+   void RemoveStream(unsigned int streamid);
+@@ -0,6 +0,7 @@
+   float m_sinkCacheTotal;
+   float m_sinkLatency;
+   int m_bufferedSamples;
++  int m_bufferedPauseMs{0};
+   unsigned int m_sinkSampleRate;
+   AEDelayStatus m_sinkDelay;
+   bool m_suspended;
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.cpp
+@@ -0,6 +0,18 @@
+   m_freeSamples.push_back(buffer);
+ }
+ 
++// a passthrough buffer holds one frame in bytes, a pause burst or nothing
++float CActiveAEBufferPool::GetPlayingTime(const CSampleBuffer* buffer) const
++{
++  if (m_format.m_dataFormat != AE_FMT_RAW)
++    return static_cast<float>(buffer->pkt->nb_samples) / buffer->pkt->config.sample_rate;
++
++  if (buffer->pkt->nb_samples > 0)
++    return static_cast<float>(m_format.m_streamInfo.GetDuration() / 1000);
++
++  return static_cast<float>(buffer->pkt->pause_burst_ms) / 1000;
++}
++
+ bool CActiveAEBufferPool::Create(unsigned int totaltime)
+ {
+   CSampleBuffer *buffer;
+@@ -0,12 +0,12 @@
+ 
+   for(itBuf=m_inputSamples.begin(); itBuf!=m_inputSamples.end(); ++itBuf)
+   {
+-    delay += (float)(*itBuf)->pkt->nb_samples / (*itBuf)->pkt->config.sample_rate;
++    delay += GetPlayingTime(*itBuf);
+   }
+ 
+   for(itBuf=m_outputSamples.begin(); itBuf!=m_outputSamples.end(); ++itBuf)
+   {
+-    delay += (float)(*itBuf)->pkt->nb_samples / (*itBuf)->pkt->config.sample_rate;
++    delay += GetPlayingTime(*itBuf);
+   }
+ 
+   if (m_resampler)
+@@ -0,12 +0,12 @@
+ 
+   for (auto &buf : m_inputSamples)
+   {
+-    delay += (float)buf->pkt->nb_samples / buf->pkt->config.sample_rate;
++    delay += GetPlayingTime(buf);
+   }
+ 
+   for (auto &buf : m_outputSamples)
+   {
+-    delay += (float)buf->pkt->nb_samples / buf->pkt->config.sample_rate;
++    delay += GetPlayingTime(buf);
+   }
+ 
+   if (m_pTempoFilter->IsActive())
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.h
+@@ -0,6 +0,7 @@
+   virtual bool Create(unsigned int totaltime);
+   CSampleBuffer *GetFreeBuffer();
+   void ReturnBuffer(CSampleBuffer *buffer);
++  float GetPlayingTime(const CSampleBuffer* buffer) const;
+   AEAudioFormat m_format;
+   std::deque<CSampleBuffer*> m_allSamples;
+   std::deque<CSampleBuffer*> m_freeSamples;
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
+@@ -0,9 +0,17 @@
+   int retry = 0;
+   unsigned int written = 0;
+   AEDelayStatus status;
++  // as the engine counted it: a packet, a pause burst or nothing
++  int rawPackets = 0;
++  int rawPauseMs = 0;
+ 
+   if (m_requestedFormat.m_dataFormat == AE_FMT_RAW)
+   {
++    if (samples->pool && samples->pkt->nb_samples > 0)
++      rawPackets = 1;
++    else if (samples->pool)
++      rawPauseMs = samples->pkt->pause_burst_ms;
++
+     bool skipSwap = false;
+     if (m_needIecPack)
+     {
+@@ -0,14 +0,12 @@
+       {
+         m_sink->AddPause(samples->pkt->pause_burst_ms);
+         m_sink->GetDelay(status);
+-        m_stats->UpdateSinkDelay(status, samples->pool ? 1 : 0);
++        m_stats->UpdateSinkDelay(status, rawPackets, rawPauseMs);
+         return status.delay * 1000;
+       }
+     }
+   }
+ 
+-  int framesOrPackets;
+-
+   while (frames > 0)
+   {
+     maxFrames = std::min(frames, m_sinkFormat.m_frames);
+@@ -0,10 +0,10 @@
+         m_extError = true;
+         CLog::Log(LOGERROR, "CActiveAESink::OutputSamples - failed");
+         status.SetDelay(0);
+-        framesOrPackets = frames;
+         if (m_requestedFormat.m_dataFormat == AE_FMT_RAW)
+-          framesOrPackets = 1;
+-        m_stats->UpdateSinkDelay(status, samples->pool ? framesOrPackets : 0);
++          m_stats->UpdateSinkDelay(status, rawPackets, rawPauseMs);
++        else
++          m_stats->UpdateSinkDelay(status, samples->pool ? frames : 0);
+         return 0;
+       }
+       else
+@@ -0,10 +0,10 @@
+       m_extError = true;
+       CLog::Log(LOGERROR, "CActiveAESink::OutputSamples - sink returned error");
+       status.SetDelay(0);
+-      framesOrPackets = frames;
+       if (m_requestedFormat.m_dataFormat == AE_FMT_RAW)
+-        framesOrPackets = 1;
+-      m_stats->UpdateSinkDelay(status, samples->pool ? framesOrPackets : 0);
++        m_stats->UpdateSinkDelay(status, rawPackets, rawPauseMs);
++      else
++        m_stats->UpdateSinkDelay(status, samples->pool ? frames : 0);
+       return 0;
+     }
+     frames -= written;
+@@ -0,7 +0,7 @@
+   }
+ 
+   if (m_requestedFormat.m_dataFormat == AE_FMT_RAW)
+-    m_stats->UpdateSinkDelay(status, samples->pool ? 1 : 0);
++    m_stats->UpdateSinkDelay(status, rawPackets, rawPauseMs);
+ 
+   return status.delay * 1000;
+ }
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.cpp
+@@ -0,7 +0,7 @@
+ 
+   for (auto &buf : m_inputSamples)
+   {
+-    delay += (float)buf->pkt->nb_samples / buf->pkt->config.sample_rate;
++    delay += m_resampleBuffers->GetPlayingTime(buf);
+   }
+ 
+   delay += m_resampleBuffers->GetDelay();
+@@ -0,7 +0,7 @@
+ 
+   for (auto &buf : m_outputSamples)
+   {
+-    delay += (float)buf->pkt->nb_samples / buf->pkt->config.sample_rate;
++    delay += m_atempoBuffers->GetPlayingTime(buf);
+   }
+ 
+   return delay;

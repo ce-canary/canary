@@ -1,0 +1,217 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 27 Oct 2026 15:17:38 -0500
+Subject: [PATCH] DVDInputStreamBluray: map MVC playlists to title time
+
+MVC playlists stay on raw clip time, since the dependent view is read
+from its own file and pairs with the base view by exact timestamp. Their
+items get no seamless joins in navigation mode, and the bytes that start
+a new item go to the demuxer being closed.
+---
+ .../DVDDemuxers/DVDDemuxFFmpeg.cpp            |  4 ++-
+ .../VideoPlayer/DVDDemuxers/DemuxMVC.cpp      | 29 ++++++++++++++++---
+ xbmc/cores/VideoPlayer/DVDDemuxers/DemuxMVC.h | 21 +++++++++++++-
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 27 +++++++----------
+ .../DVDInputStreams/DVDInputStreamBluray.h    |  2 +-
+ 5 files changed, 60 insertions(+), 23 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+@@ -0,7 +0,9 @@
+               const std::shared_ptr<CDVDInputStream::IMenus> menuInterface =
+                   std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInput);
+               CDemuxMVC *extDemux = static_cast<CDemuxMVC*>(pExt->GetExtentionDemux());
+-              extDemux->SetStartTime(m_pFormatContext->start_time, menuInterface->GetSupportedMenuType());
++              extDemux->SetStartTime(m_pFormatContext->start_time,
++                                     menuInterface->GetSupportedMenuType(),
++                                     !m_checkTransportStream);
+               mvcStream = extDemux->GetAVStream();
+             }
+             else if (CDVDCodecUtils::GetH264MvcStreamIndex(m_pFormatContext, &mvcIndex))
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DemuxMVC.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DemuxMVC.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DemuxMVC.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DemuxMVC.cpp
+@@ -0,15 +0,36 @@
+     else
+     {
+       AVStream *stream = m_pFormatContext->streams[pkt->stream_index];
++      if (m_hasClipTime && pkt->dts != AV_NOPTS_VALUE)
++      {
++        // libbluray reads the base view of the play item only
++        const int64_t outTime =
++            av_rescale_q(static_cast<int64_t>(m_clipOutTime), CDVDDemuxUtils::BLURAY_CLIP_TIME_BASE,
++                         stream->time_base);
++        if (CDVDDemuxUtils::BlurayTitleTime(pkt->dts, stream, m_clipInTime, 0, false) >=
++            CDVDDemuxUtils::BlurayTitleTime(outTime, stream, m_clipInTime, 0, false))
++        {
++          av_packet_unref(pkt);
++          break;
++        }
++      }
+       newPkt = CDVDDemuxUtils::AllocateDemuxPacket(pkt->size);
+       if (pkt->data)
+         memcpy(newPkt->pData, pkt->data, pkt->size);
+       newPkt->iSize = pkt->size;
+       newPkt->iStreamId = stream->id;
+-      newPkt->dts =
+-        ConvertTimestamp(pkt->dts, stream->time_base.den, stream->time_base.num);
+-      newPkt->pts =
+-        ConvertTimestamp(pkt->pts, stream->time_base.den, stream->time_base.num);
++      if (m_hasClipTime)
++      {
++        newPkt->dts = CDVDDemuxUtils::BlurayTitleTime(pkt->dts, stream, m_clipInTime,
++                                                      m_clipStartTime, m_clampPreroll);
++        newPkt->pts = CDVDDemuxUtils::BlurayTitleTime(pkt->pts, stream, m_clipInTime,
++                                                      m_clipStartTime, m_clampPreroll);
++      }
++      else
++      {
++        newPkt->dts = ConvertTimestamp(pkt->dts, stream->time_base.den, stream->time_base.num);
++        newPkt->pts = ConvertTimestamp(pkt->pts, stream->time_base.den, stream->time_base.num);
++      }
+       newPkt->duration = DVD_SEC_TO_TIME((double)pkt->duration * stream->time_base.num /
+                                           stream->time_base.den);
+       break;
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DemuxMVC.h b/xbmc/cores/VideoPlayer/DVDDemuxers/DemuxMVC.h
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DemuxMVC.h
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DemuxMVC.h
+@@ -0,8 +0,22 @@
+   virtual int GetNrOfStreams() const override { return 1; };
+   virtual std::string GetFileName();
+ 
+-  void SetStartTime(int64_t start_time, MenuType menu_type) { m_start_time = start_time; m_menu_type = menu_type; }
++  void SetStartTime(int64_t start_time, MenuType menu_type, bool clampPreroll)
++  {
++    m_start_time = start_time;
++    m_menu_type = menu_type;
++    m_clampPreroll = clampPreroll;
++  }
+   int64_t GetStartTime() const { return m_start_time; }
++  bool GetClampPreroll() const { return m_clampPreroll; }
++  //! puts the packets on the title time of the base view's clip and keeps those of its play item
++  void SetClipTime(uint64_t inTime, uint64_t outTime, uint64_t startTime)
++  {
++    m_clipInTime = inTime;
++    m_clipOutTime = outTime;
++    m_clipStartTime = startTime;
++    m_hasClipTime = true;
++  }
+ 
+   AVStream* GetAVStream();
+   CDVDInputStream*    m_pInput;
+@@ -0,4 +0,9 @@
+   int                 m_nStreamIndex = -1;
+   int64_t			  m_start_time = 0;
+   MenuType		  m_menu_type = MenuType::NONE;
++  bool m_clampPreroll{false};
++  bool m_hasClipTime{false};
++  uint64_t m_clipInTime{0};
++  uint64_t m_clipOutTime{0};
++  uint64_t m_clipStartTime{0};
+ };
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,8 +0,7 @@
+     // the running demuxer plays on into the next play item of the title, a discontinuity holds it
+     const auto joinsInLine = [this, &result]
+     {
+-      return result > 0 && !m_hasMVCExtension && m_titleInfo && m_clip &&
+-             m_event.param < m_titleInfo->clip_count &&
++      return result > 0 && m_titleInfo && m_clip && m_event.param < m_titleInfo->clip_count &&
+              m_event.param == static_cast<uint32_t>(m_clip - m_titleInfo->clips) + 1;
+     };
+     do {
+@@ -0,7 +0,7 @@
+               m_itemAbandoned = true;
+             // the read starts the new play item, which the demuxer being closed must not consume
+             if ((m_event.event == BD_EVENT_PLAYITEM || m_event.event == BD_EVENT_DISCONTINUITY) &&
+-                result > 0 && !m_hasMVCExtension)
++                result > 0)
+             {
+               HoldClipStart(buf, result);
+               return 0;
+@@ -0,13 +0,9 @@
+               playItemInLine = true;
+               break;
+             }
+-            if(!m_hasMVCExtension)
+-            {
+-              m_hold = HOLD_HELD;
+-              HoldClipStart(buf, result);
+-              return 0;
+-            }
+-            [[fallthrough]];
++            m_hold = HOLD_HELD;
++            HoldClipStart(buf, result);
++            return 0;
+           case BD_EVENT_SEEK:
+           case BD_EVENT_TITLE:
+           case BD_EVENT_ANGLE:
+@@ -0,7 +0,7 @@
+           case BD_EVENT_STILL_TIME:
+           case BD_EVENT_DISCONTINUITY:
+             m_hold = HOLD_HELD;
+-            if (playItemInLine || (m_event.event == BD_EVENT_DISCONTINUITY && !m_hasMVCExtension))
++            if (playItemInLine || m_event.event == BD_EVENT_DISCONTINUITY)
+             {
+               HoldClipStart(buf, result);
+               return 0;
+@@ -0,7 +0,7 @@
+       ProcessEvent();
+     }
+     // the read starts the new clip, which the demuxer being reset must not consume
+-    if (discontinuity && result > 0 && !m_hasMVCExtension)
++    if (discontinuity && result > 0)
+     {
+       HoldClipStart(buf, result);
+       return 0;
+@@ -0,9 +0,6 @@
+ std::optional<CDVDInputStreamBluray::ClipTime> CDVDInputStreamBluray::GetClipTime(
+     uint64_t readPos) const
+ {
+-  if (m_hasMVCExtension)
+-    return {};
+-
+   const auto it = std::ranges::upper_bound(m_clipSpans, readPos, {}, &ClipSpan::readPos);
+   if (it == m_clipSpans.begin())
+     return {};
+@@ -0,6 +0,7 @@
+ 
+   // save start time for the next clip
+   int64_t start_time = pMVCDemux->GetStartTime();
++  const bool clampPreroll = pMVCDemux->GetClampPreroll();
+ 
+   CloseMVCDemux();
+ 
+@@ -0,7 +0,7 @@
+     if (nextDemux) {
+       // set start time for next clip
+       CDVDInputStream::IMenus *menu = dynamic_cast<CDVDInputStream::IMenus*>(this);
+-      nextDemux->SetStartTime(start_time, menu->GetSupportedMenuType());
++      nextDemux->SetStartTime(start_time, menu->GetSupportedMenuType(), clampPreroll);
+     }
+   }
+ 
+@@ -0,6 +0,8 @@
+   }
+ 
+   m_nMVCClip = m_titleInfo->clips + playItem;
++  // the dependent view shares the in and out time of its play item
++  pMVCDemux->SetClipTime(m_nMVCClip->in_time, m_nMVCClip->out_time, m_nMVCClip->start_time);
+   return true;
+ }
+ 
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,7 +0,7 @@
+   /*!
+    * \brief Get the in time and start time (90 kHz) of the clip a byte was read from.
+    * \param readPos The position of the byte in the bytes Read returned since Open
+-   * \return The clip time, or nothing without a clip and on a playlist with an MVC extension
++   * \return The clip time, or nothing without a clip
+    */
+   std::optional<ClipTime> GetClipTime(uint64_t readPos) const;
+ 

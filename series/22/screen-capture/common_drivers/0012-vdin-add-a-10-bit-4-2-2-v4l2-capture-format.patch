@@ -1,0 +1,202 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 21 Oct 2026 18:22:41 -0500
+Subject: [PATCH] vdin: add a 10-bit 4:2:2 v4l2 capture format
+
+The v4l2 capture forced 8 bits, so a client could not read the 10-bit
+codes vdin1 receives from VD1. t3x sets its bit depth outside this
+path, so vdin1 is the only node that needs the format. A 2:1
+horizontal downscale without the pre-scaler drops every other column
+instead of averaging pixel pairs.
+---
+ drivers/media/vin/tvin/vdin/vdin_ctl.c     | 16 +++++++--
+ drivers/media/vin/tvin/vdin/vdin_ctl.h     |  1 +
+ drivers/media/vin/tvin/vdin/vdin_ctl_s5.c  | 10 ++++--
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 41 +++++++++++++++++++---
+ include/uapi/amlogic/tvin.h                |  3 ++
+ 5 files changed, 60 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_ctl.c b/drivers/media/vin/tvin/vdin/vdin_ctl.c
+--- a/drivers/media/vin/tvin/vdin/vdin_ctl.c
++++ b/drivers/media/vin/tvin/vdin/vdin_ctl.c
+@@ -0,8 +0,8 @@
+ 
+ 	if (devp->prop.scaling4w < devp->h_active &&
+ 	    devp->prop.scaling4w > 0) {
+-		if (devp->pre_h_scale_en && (devp->prop.scaling4w <=
+-		    (devp->h_active >> 1)))
++		if ((devp->pre_h_scale_en || vdin_is_v4l2_10bit(devp)) &&
++		    devp->prop.scaling4w <= (devp->h_active >> 1))
+ 			vdin_set_pre_h_scale(devp);
+ 
+ 		if (devp->prop.scaling4w < devp->h_active)
+@@ -0,8 +0,12 @@
+ 		break;
+ 	}
+ 
+-	if (devp->work_mode == VDIN_WORK_MD_V4L)
++	if (vdin_is_v4l2_10bit(devp)) {
++		bit_dep = VDIN_COLOR_DEEPS_10BIT;
++		devp->full_pack = VDIN_422_FULL_PK_EN;
++	} else if (devp->work_mode == VDIN_WORK_MD_V4L) {
+ 		bit_dep = VDIN_COLOR_DEEPS_8BIT;
++	}
+ 	devp->source_bitdepth = bit_dep;
+ #ifdef VDIN_BRINGUP_BYPASS_COLOR_CNVT
+ 	devp->source_bitdepth = devp->prop.colordepth;
+@@ -0,6 +0,12 @@
+ 		return false;
+ }
+ 
++bool vdin_is_v4l2_10bit(struct vdin_dev_s *devp)
++{
++	return devp->work_mode == VDIN_WORK_MD_V4L &&
++	       devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_AML_YUV422_10P;
++}
++
+ bool vdin_is_hdr_signal_in(struct vdin_dev_s *devp)
+ {
+ 	if (devp->prop.hdr_info.hdr_state == HDR_STATE_GET)
+diff --git a/drivers/media/vin/tvin/vdin/vdin_ctl.h b/drivers/media/vin/tvin/vdin/vdin_ctl.h
+--- a/drivers/media/vin/tvin/vdin/vdin_ctl.h
++++ b/drivers/media/vin/tvin/vdin/vdin_ctl.h
+@@ -0,6 +0,7 @@
+ bool vdin_is_convert_to_422(u32 format_convert);
+ bool vdin_is_convert_to_nv21(u32 format_convert);
+ bool vdin_is_4k(struct vdin_dev_s *devp);
++bool vdin_is_v4l2_10bit(struct vdin_dev_s *devp);
+ void vdin_set_matrix_color(struct vdin_dev_s *devp);
+ void vdin_set_bist_pattern(struct vdin_dev_s *devp, unsigned int on_off, unsigned int pat);
+ 
+diff --git a/drivers/media/vin/tvin/vdin/vdin_ctl_s5.c b/drivers/media/vin/tvin/vdin/vdin_ctl_s5.c
+--- a/drivers/media/vin/tvin/vdin/vdin_ctl_s5.c
++++ b/drivers/media/vin/tvin/vdin/vdin_ctl_s5.c
+@@ -0,8 +0,8 @@
+ 
+ 	if (devp->prop.scaling4w < devp->h_active &&
+ 	    devp->prop.scaling4w > 0) {
+-		if (devp->pre_h_scale_en && (devp->prop.scaling4w <=
+-		    (devp->h_active >> 1)))
++		if ((devp->pre_h_scale_en || vdin_is_v4l2_10bit(devp)) &&
++		    devp->prop.scaling4w <= (devp->h_active >> 1))
+ 			vdin_set_pre_h_scale_s5(devp);
+ 
+ 		if (devp->prop.scaling4w < devp->h_active)
+@@ -0,8 +0,12 @@
+ 		break;
+ 	}
+ 
+-	if (devp->work_mode == VDIN_WORK_MD_V4L)
++	if (vdin_is_v4l2_10bit(devp)) {
++		bit_dep = VDIN_COLOR_DEEPS_10BIT;
++		devp->full_pack = VDIN_422_FULL_PK_EN;
++	} else if (devp->work_mode == VDIN_WORK_MD_V4L) {
+ 		bit_dep = VDIN_COLOR_DEEPS_8BIT;
++	}
+ 	devp->source_bitdepth = bit_dep;
+ #ifdef VDIN_BRINGUP_BYPASS_COLOR_CNVT
+ 	devp->source_bitdepth = devp->prop.colordepth;
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,6 +0,9 @@
+ 
+ 	{.fourcc = V4L2_PIX_FMT_UYVY,
+ 	 .depth  = 16, },
++
++	{.fourcc = V4L2_PIX_FMT_AML_YUV422_10P,
++	 .depth  = 20, },
+ };
+ 
+ static struct v4l2_capability g_vdin_v4l2_cap[VDIN_MAX_DEVS] = {
+@@ -0,6 +0,12 @@
+ 				v4l2_fmt->fmt.pix_mp.width * v4l2_fmt->fmt.pix_mp.height * 3 / 2;
+ 			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
+ 				(v4l2_fmt->fmt.pix_mp.width * 12) >> 3;
++		} else if (v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_AML_YUV422_10P) {
++			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
++				roundup(v4l2_fmt->fmt.pix_mp.width * 5 / 2, devp->canvas_align);
++			v4l2_fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
++				v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline *
++				v4l2_fmt->fmt.pix_mp.height;
+ 		}
+ 		v4l2_fmt->fmt.pix_mp.plane_fmt[1].sizeimage = 0;
+ 		v4l2_fmt->fmt.pix_mp.plane_fmt[1].bytesperline = 0;
+@@ -0,6 +0,13 @@
+ 	return devp->vb_queue.owner && devp->vb_queue.owner != file->private_data;
+ }
+ 
++/* 10 bits only for the vdin1 loopback; the t3x bit depth path forces 8 bits */
++static bool vdin_v4l2_fmt_supported(struct vdin_dev_s *devp, u32 fourcc)
++{
++	return fourcc != V4L2_PIX_FMT_AML_YUV422_10P ||
++	       (devp->index == 1 && devp->dtdata->hw_ver != VDIN_HW_T3X);
++}
++
+ /*
+  * Query device capability
+  * cmd ID:VIDIOC_QUERYCAP
+@@ -0,7 +0,8 @@
+ 		if (fmt->fmt.pix_mp.pixelformat == pix_formats[i].fourcc)
+ 			break;
+ 	}
+-	if (i >= ARRAY_SIZE(pix_formats)) {
++	if (i >= ARRAY_SIZE(pix_formats) ||
++	    !vdin_v4l2_fmt_supported(devp, fmt->fmt.pix_mp.pixelformat)) {
+ 		dprintk(0, "%s vdin%d v4l2 do not support pixelformat=%#x\n",
+ 			__func__, devp->index, fmt->fmt.pix_mp.pixelformat);
+ 		return -EINVAL;
+@@ -0,14 +0,27 @@
+ static int vdin_vidioc_enum_fmt_vid_cap(struct file *file, void *priv,
+ 				   struct v4l2_fmtdesc *f)
+ {
+-	struct vdin_v4l2_pix_fmt *fmt;
++	struct vdin_v4l2_pix_fmt *fmt = NULL;
++	struct vdin_dev_s *devp = video_drvdata(file);
++	unsigned int i;
++	unsigned int n = 0;
+ 
+-	if (f->index >= ARRAY_SIZE(pix_formats))
++	for (i = 0; i < ARRAY_SIZE(pix_formats); i++) {
++		if (!vdin_v4l2_fmt_supported(devp, pix_formats[i].fourcc))
++			continue;
++		if (n++ == f->index) {
++			fmt = &pix_formats[i];
++			break;
++		}
++	}
++	if (!fmt)
+ 		return -EINVAL;
+ 
+-	fmt = &pix_formats[f->index];
+ 	/* description will be filled by v4l_fill_fmtdesc */
+ 	f->pixelformat = fmt->fourcc;
++	if (fmt->fourcc == V4L2_PIX_FMT_AML_YUV422_10P)
++		strscpy(f->description, "YUV 4:2:2 10-bit full pack",
++			sizeof(f->description));
+ 
+ 	dprintk(0, "%s index:%d pixelformat:%x\n",
+ 		__func__, f->index, f->pixelformat);
+@@ -0,7 +0,8 @@
+ 		if (f->fmt.pix_mp.pixelformat == pix_formats[i].fourcc)
+ 			break;
+ 	}
+-	if (i >= ARRAY_SIZE(pix_formats)) {
++	if (i >= ARRAY_SIZE(pix_formats) ||
++	    !vdin_v4l2_fmt_supported(devp, f->fmt.pix_mp.pixelformat)) {
+ 		dprintk(0, "%s vdin%d v4l2 do not support pixelformat=%#x\n",
+ 			__func__, devp->index, f->fmt.pix_mp.pixelformat);
+ 		return -EINVAL;
+diff --git a/include/uapi/amlogic/tvin.h b/include/uapi/amlogic/tvin.h
+--- a/include/uapi/amlogic/tvin.h
++++ b/include/uapi/amlogic/tvin.h
+@@ -0,6 +0,9 @@
+ 	__u8 secure_memory_en; /* 0:not secure memory 1:secure memory */
+ };
+ 
++/* yuv422 10bit full pack, one plane */
++#define V4L2_PIX_FMT_AML_YUV422_10P	v4l2_fourcc('A', 'Y', '2', 'P')
++
+ enum tvin_cn_type_e {
+ 	GRAPHICS,
+ 	PHOTO,

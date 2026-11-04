@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 2 Nov 2026 13:12:56 -0600
+Subject: [PATCH] WinSystemAmlogicGLESContext: report the latency of a flip
+
+The GLES renderer has no present latency, so its release lead falls
+back to (buffers + 1) refreshes. Hardware decoded video does the same
+when the vsync presenter cannot start. A flip on Amlogic latches at the
+next vsync and scans out from the one after, so video was released one
+refresh early with two buffers, two with three.
+---
+ .../windowing/amlogic/WinSystemAmlogicGLESContext.cpp | 11 +++++++++++
+ xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.h  |  1 +
+ 2 files changed, 12 insertions(+)
+
+diff --git a/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.cpp b/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.cpp
+--- a/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.cpp
++++ b/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.cpp
+@@ -0,6 +0,12 @@
+ using namespace KODI::WINDOWING::AML;
+ using namespace std::chrono_literals;
+ 
++namespace
++{
++// a swapped frame latches at the next vsync and scans out from the one after
++constexpr float PRESENT_DEPTH_REFRESHES = 2.0f;
++} // namespace
++
+ CWinSystemAmlogicGLESContext::CWinSystemAmlogicGLESContext()
+ : m_pGLContext(new CEGLContextUtils(EGL_PLATFORM_GBM_MESA, "EGL_EXT_platform_base"))
+ {
+@@ -0,6 +0,11 @@
+   }
+ }
+ 
++float CWinSystemAmlogicGLESContext::GetDisplayLatency()
++{
++  return PRESENT_DEPTH_REFRESHES / m_gfxContext->GetFPS() * 1000.0f;
++}
++
+ bool CWinSystemAmlogicGLESContext::SetGuiCompositing(int colorTransfer)
+ {
+   m_guiCompositing = (colorTransfer != 0);
+diff --git a/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.h b/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.h
+--- a/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.h
++++ b/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.h
+@@ -0,6 +0,7 @@
+ 
+   bool SupportsStereo(const RenderStereoMode mode) const override;
+   void PresentRender(bool rendered, bool videoLayer) override;
++  float GetDisplayLatency() override;
+ 
+   // GUI compositing for HDR
+   bool SetGuiCompositing(int colorTransfer) override;

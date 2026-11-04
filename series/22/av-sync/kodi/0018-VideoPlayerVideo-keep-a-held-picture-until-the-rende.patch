@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 01:38:35 -0600
+Subject: [PATCH] VideoPlayerVideo: keep a held picture until the renderer
+ takes it
+
+A held picture waits for the renderer while only priority messages are
+served, but any priority message (a speed change at resume) ended that
+wait. The next packet then released the picture unrendered; on Amlogic
+that drops every older queued frame and video runs ahead of audio.
+---
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+@@ -0,7 +0,8 @@
+     MsgQueueReturnCode ret = GetMessage(pMsg, timeout, iPriority);
+ 
+     const bool drainPending = drainWait;
+-    onlyPrioMsgs = false;
++    // a packet decoded over a held picture releases it unrendered
++    onlyPrioMsgs = m_outputSate == OUTPUT_AGAIN && m_picture.videoBuffer;
+     drainWait = false;
+ 
+     if (MSGQ_IS_ERROR(ret))

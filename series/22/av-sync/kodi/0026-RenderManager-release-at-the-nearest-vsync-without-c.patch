@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 21:25:09 -0600
+Subject: [PATCH] RenderManager: release at the nearest vsync without clock
+ sync
+
+When the display rate is not a multiple of the frame rate, clock sync is
+off and a picture is released at the first vsync at or after its time.
+It reaches the screen half a display period late on average, about 8 ms
+at 60 Hz, while the audio follows the clock.
+---
+ xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,6 +0,9 @@
+   else
+   {
+     m_dvdClock.SetVsyncAdjust(0);
++    // with no lock to the display, release at the nearest vsync
++    if (!isPaused)
++      renderPts += frametime / 2;
+   }
+ 
+   CLog::LogFC(LOGDEBUG, LOGAVTIMING,

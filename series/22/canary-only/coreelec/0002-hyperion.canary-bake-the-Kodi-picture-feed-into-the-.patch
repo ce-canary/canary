@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 16:12:35 -0600
+Subject: [PATCH] hyperion.canary: bake the Kodi picture feed into the image
+
+Canary only, never headed upstream. Stock's add-on has no feed for the
+new capture path, and an image copy under stock's id would leave its
+enabled state and systemd links behind after going back to a nightly.
+---
+ .../Amlogic-ce/devices/Amlogic-no/options     |  2 +-
+ .../addons/canary/hyperion.canary/package.mk  | 33 +++++++++++++++++++
+ .../source/bin/hyperiond.start                | 19 +++++++++++
+ .../canary/hyperion.canary/source/default.py  | 29 ++++++++++++++++
+ .../system.d/hyperion-canary.service          | 12 +++++++
+ 5 files changed, 94 insertions(+), 1 deletion(-)
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/hyperion.canary/package.mk
+ create mode 100755 projects/Amlogic-ce/packages/addons/canary/hyperion.canary/source/bin/hyperiond.start
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/hyperion.canary/source/default.py
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/hyperion.canary/system.d/hyperion-canary.service
+
+diff --git a/projects/Amlogic-ce/devices/Amlogic-no/options b/projects/Amlogic-ce/devices/Amlogic-no/options
+--- a/projects/Amlogic-ce/devices/Amlogic-no/options
++++ b/projects/Amlogic-ce/devices/Amlogic-no/options
+@@ -0,7 +0,7 @@
+   # Space separated list is supported,
+   # e.g. ADDITIONAL_PACKAGES="PACKAGE1 PACKAGE2"
+   # ADDITIONAL_PACKAGES+=""
+-    ADDITIONAL_PACKAGES+=" canary-bdj"
++    ADDITIONAL_PACKAGES+=" canary-bdj hyperion.canary"
+ 
+   # add OOTB support for IR remote
+   # IR_REMOTE_KEYMAPS+=""
+diff --git a/projects/Amlogic-ce/packages/addons/canary/hyperion.canary/package.mk b/projects/Amlogic-ce/packages/addons/canary/hyperion.canary/package.mk
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/hyperion.canary/package.mk
+@@ -0,0 +0,33 @@
++# SPDX-License-Identifier: GPL-2.0-or-later
++# Copyright (C) 2026-present Team CoreELEC (https://coreelec.org)
++
++# hyperion.ng as a dependency would also install its /usr/share/hyperion tree into the image
++. $(get_pkg_directory hyperion.ng)/package.mk
++
++PKG_NAME="hyperion.canary"
++PKG_URL=""
++PKG_DEPENDS_UNPACK+=" hyperion.ng"
++
++PKG_IS_ADDON="embedded"
++PKG_ADDON_IS_STANDALONE="yes"
++PKG_ADDON_NAME="Hyperion.NG (canary)"
++
++unpack() {
++  mkdir -p ${PKG_BUILD}
++  tar --strip-components=1 -xf ${SOURCES}/hyperion.ng/hyperion.ng-${PKG_VERSION}.tar.gz -C ${PKG_BUILD}
++}
++
++makeinstall_target() {
++  local addon_dir="${INSTALL}/usr/share/kodi/addons/${PKG_ADDON_ID}"
++
++  ADDON_BUILD="${INSTALL}/usr/share/kodi/addons" addon
++  PKG_DIR="$(get_pkg_directory hyperion.ng)" install_addon_files "${addon_dir}"
++
++  rm -r "${addon_dir}/system.d"
++  mv "${addon_dir}/default.py" "${addon_dir}/feeder.py"
++  sed -e "s/service\.hyperion\.ng/${PKG_ADDON_ID}/g" \
++      -i "${addon_dir}/feeder.py" \
++         "${addon_dir}/resources/settings.xml" \
++         "${addon_dir}/resources/language/resource.language.en_gb/strings.po"
++  install_addon_source "${addon_dir}"
++}
+diff --git a/projects/Amlogic-ce/packages/addons/canary/hyperion.canary/source/bin/hyperiond.start b/projects/Amlogic-ce/packages/addons/canary/hyperion.canary/source/bin/hyperiond.start
+new file mode 100755
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/hyperion.canary/source/bin/hyperiond.start
+@@ -0,0 +0,19 @@
++#!/bin/sh
++
++# SPDX-License-Identifier: GPL-2.0-or-later
++# Copyright (C) 2026-present Team CoreELEC (https://coreelec.org)
++
++. /etc/profile
++
++ADDON_HOME="/storage/.kodi/userdata/addon_data/service.hyperion.canary"
++STOCK_DB="/storage/.kodi/userdata/addon_data/service.hyperion.ng/db"
++
++mkdir -p "${ADDON_HOME}"
++
++# the unit is ordered after stock's stop, so stock is not writing its database here
++if [ ! -d "${ADDON_HOME}/db" -a -d "${STOCK_DB}" ]; then
++  rm -rf "${ADDON_HOME}/db.tmp"
++  cp -a "${STOCK_DB}" "${ADDON_HOME}/db.tmp" && mv "${ADDON_HOME}/db.tmp" "${ADDON_HOME}/db"
++fi
++
++exec /usr/share/kodi/addons/service.hyperion.canary/bin/hyperiond --userdata "${ADDON_HOME}"
+diff --git a/projects/Amlogic-ce/packages/addons/canary/hyperion.canary/source/default.py b/projects/Amlogic-ce/packages/addons/canary/hyperion.canary/source/default.py
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/hyperion.canary/source/default.py
+@@ -0,0 +0,29 @@
++# SPDX-License-Identifier: GPL-2.0-or-later
++# Copyright (C) 2026-present Team CoreELEC (https://coreelec.org)
++
++import subprocess
++
++import xbmc
++
++from feeder import Feeder
++
++ADDON_ID = 'service.hyperion.canary'
++UNIT = 'hyperion-canary.service'
++
++
++def systemctl(command):
++    try:
++        subprocess.call(['systemctl', command, '--no-block', UNIT],
++                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++    except OSError:
++        pass
++
++
++if __name__ == '__main__':
++    systemctl('start')
++    try:
++        Feeder().run()
++    finally:
++        # Kodi also ends this script when it quits or reinstalls the add-on, the LEDs stay on then
++        if not xbmc.getCondVisibility('System.AddonIsEnabled({})'.format(ADDON_ID)):
++            systemctl('stop')
+diff --git a/projects/Amlogic-ce/packages/addons/canary/hyperion.canary/system.d/hyperion-canary.service b/projects/Amlogic-ce/packages/addons/canary/hyperion.canary/system.d/hyperion-canary.service
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/hyperion.canary/system.d/hyperion-canary.service
+@@ -0,0 +0,12 @@
++[Unit]
++Description=Hyperion.NG canary service
++After=graphical.target service.hyperion.ng.service
++Conflicts=service.hyperion.ng.service
++
++[Service]
++Type=simple
++ExecStart=/bin/sh /usr/share/kodi/addons/service.hyperion.canary/bin/hyperiond.start
++TimeoutStopSec=2
++Restart=always
++RestartSec=10
++StartLimitInterval=0

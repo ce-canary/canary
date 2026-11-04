@@ -1,0 +1,298 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 22 Oct 2026 18:04:51 -0500
+Subject: [PATCH] AMLCapture: hand standard screenshots over as RGB24
+
+A standard screenshot was handed over as BGRA or RGBA, which the encoder
+converted to RGB24 in a second frame before compressing it.
+---
+ xbmc/utils/AMLCapture.cpp                     | 20 ++++---
+ xbmc/utils/AMLCapture.h                       |  2 +-
+ xbmc/utils/AMLCaptureConvert.cpp              | 24 ++++----
+ xbmc/utils/AMLCaptureConvert.h                |  5 +-
+ xbmc/utils/Screenshot.cpp                     |  2 +
+ .../amlogic/ScreenshotSurfaceAML.cpp          | 60 +++++++++++++++----
+ 6 files changed, 80 insertions(+), 33 deletions(-)
+
+diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
+--- a/xbmc/utils/AMLCapture.cpp
++++ b/xbmc/utils/AMLCapture.cpp
+@@ -0,12 +0,12 @@
+ }
+ 
+ // width x height sRGB pixels
+-void DescribeSdr(int width, int height, CaptureResult& result)
++void DescribeSdr(int width, int height, bool rgb, CaptureResult& result)
+ {
+   result.width = static_cast<unsigned int>(width);
+   result.height = static_cast<unsigned int>(height);
+-  result.stride = width * 4;
+-  result.format = AV_PIX_FMT_BGRA;
++  result.stride = width * (rgb ? 3 : 4);
++  result.format = rgb ? AV_PIX_FMT_RGB24 : AV_PIX_FMT_BGRA;
+   result.color.primaries = AVCOL_PRI_BT709;
+   result.color.transfer = AVCOL_TRC_IEC61966_2_1;
+   result.color.range = AVCOL_RANGE_JPEG;
+@@ -0,10 +0,14 @@
+     if (!session)
+       return nullptr;
+ 
++    // a standard screenshot is the rows of an 8-bit PNG
++    const bool rgb = m_spec.shot == CaptureScreenshot::STANDARD;
++    const int pixelBytes = rgb ? 3 : 4;
+     auto buffer = std::make_unique_for_overwrite<uint8_t[]>(static_cast<size_t>(m_spec.width) *
+-                                                            m_spec.height * 4);
+-    const AMLCaptureImage dst = AMLCaptureImage::Packed(
+-        AV_PIX_FMT_BGRA, m_spec.width, m_spec.height, buffer.get(), m_spec.width * 4);
++                                                            m_spec.height * pixelBytes);
++    const AMLCaptureImage dst =
++        AMLCaptureImage::Packed(rgb ? AV_PIX_FMT_RGB24 : AV_PIX_FMT_BGRA, m_spec.width,
++                                m_spec.height, buffer.get(), m_spec.width * pixelBytes);
+     const bool ok =
+         session->ReadVideo(m_spec.shot, m_streamWidth, m_streamHeight,
+                            [this, &dst](const AMLCaptureFrame& frame, CAMLCaptureConvert& convert)
+@@ -0,7 +0,7 @@
+   auto lease = spec.continuous ? Lease(AMLCaptureInput::VIDEO, width, height) : Lease();
+   result.pixels =
+       std::make_shared<CAMLVideoPixels>(weak_from_this(), std::move(lease), spec, width, height);
+-  DescribeSdr(spec.width, spec.height, result);
++  DescribeSdr(spec.width, spec.height, spec.shot == CaptureScreenshot::STANDARD, result);
+   result.content = CaptureContent::VIDEO;
+ }
+ 
+@@ -0,7 +0,7 @@
+   auto lease = session->Lease(AMLCaptureInput::GUI, streamWidth, streamHeight);
+   result.pixels = std::make_shared<CAMLGuiPixels>(session, std::move(lease), width, height,
+                                                   streamWidth, streamHeight);
+-  DescribeSdr(width, height, result);
++  DescribeSdr(width, height, false, result);
+   result.content = CaptureContent::COMPOSITE;
+   result.live = true;
+ }
+diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
+--- a/xbmc/utils/AMLCapture.h
++++ b/xbmc/utils/AMLCapture.h
+@@ -0,7 +0,7 @@
+   //! The crop of an NV12 or full pack image to a normalized rect, on even pixels for the chroma
+   static AMLCaptureImage Crop(const AMLCaptureImage& image, const CRect& rect);
+ 
+-  //! Deferred sRGB BGRA pixels of the visible video in result.
++  //! Deferred sRGB pixels of the visible video in result: BGRA, RGB24 for a STANDARD shot.
+   void CreateVideoPixels(const AMLCaptureVideoSpec& spec,
+                          KODI::RENDERING::CAPTURE::CaptureResult& result);
+ 
+diff --git a/xbmc/utils/AMLCaptureConvert.cpp b/xbmc/utils/AMLCaptureConvert.cpp
+--- a/xbmc/utils/AMLCaptureConvert.cpp
++++ b/xbmc/utils/AMLCaptureConvert.cpp
+@@ -0,19 +0,20 @@
+   return static_cast<uint16_t>(v * 65535 + 0.5f);
+ }
+ 
+-// a row of planes to opaque 8-bit pixels, red at R and blue at B
+-template<int R, int B>
++// a row of planes to 8-bit pixels of STEP bytes, red at R and blue at B, opaque at 4 bytes
++template<int R, int B, int STEP>
+ [[gnu::always_inline]] inline void StoreRow8(const Planes& p, int width, uint8_t* __restrict out)
+ {
+   const float* __restrict red = p[0];
+   const float* __restrict green = p[1];
+   const float* __restrict blue = p[2];
+-  for (int x = 0; x < width; x++, out += 4)
++  for (int x = 0; x < width; x++, out += STEP)
+   {
+     out[R] = To8(std::clamp(red[x], 0.0f, 1.0f));
+     out[1] = To8(std::clamp(green[x], 0.0f, 1.0f));
+     out[B] = To8(std::clamp(blue[x], 0.0f, 1.0f));
+-    out[3] = 255;
++    if constexpr (STEP == 4)
++      out[3] = 255;
+   }
+ }
+ 
+@@ -0,8 +0,9 @@
+                                  const AMLCaptureImage* sdr)
+ {
+   const bool bgra = dst.format == AV_PIX_FMT_BGRA;
++  const bool rgb = dst.format == AV_PIX_FMT_RGB24;
+   if ((src.format != AV_PIX_FMT_NV12 && !src.fullPack) || src.width <= 0 || src.height <= 0 ||
+-      dst.width <= 0 || dst.height <= 0 || (!bgra && dst.format != AV_PIX_FMT_RGBA64LE))
++      dst.width <= 0 || dst.height <= 0 || (!bgra && !rgb && dst.format != AV_PIX_FMT_RGBA64LE))
+     return false;
+ 
+   // a full pack at the output size is unpacked a row at a time, which spares the planes
+@@ -0,8 +0,8 @@
+       const Planes span = {p[0] + x1, p[1] + x1, p[2] + x1};
+       if (overlay && IsClear(overlay + 4 * x1))
+       {
+-        StoreRow8<0, 2>(span, width,
+-                        sdr->data[0] + static_cast<std::ptrdiff_t>(y) * sdr->linesize[0] + x1 * 4);
++        StoreRow8<0, 2, 4>(
++            span, width, sdr->data[0] + static_cast<std::ptrdiff_t>(y) * sdr->linesize[0] + x1 * 4);
+         continue;
+       }
+ 
+@@ -0,7 +0,9 @@
+ 
+       uint8_t* row = dst.data[0] + static_cast<std::ptrdiff_t>(y) * dst.linesize[0];
+       if (bgra)
+-        StoreRow8<2, 0>(span, width, row + x1 * 4);
++        StoreRow8<2, 0, 4>(span, width, row + x1 * 4);
++      else if (rgb)
++        StoreRow8<0, 2, 3>(span, width, row + x1 * 3);
+       else
+       {
+         uint16_t* out = reinterpret_cast<uint16_t*>(row) + x1 * 4;
+@@ -0,8 +0,8 @@
+       for (float* v : span)
+         LookupLogRow(tables.linearToSrgbLog, v, width);
+ 
+-      StoreRow8<0, 2>(span, width,
+-                      dst.data[0] + static_cast<std::ptrdiff_t>(y) * dst.linesize[0] + x1 * 4);
++      StoreRow8<0, 2, 4>(span, width,
++                         dst.data[0] + static_cast<std::ptrdiff_t>(y) * dst.linesize[0] + x1 * 4);
+     }
+   }
+ }
+diff --git a/xbmc/utils/AMLCaptureConvert.h b/xbmc/utils/AMLCaptureConvert.h
+--- a/xbmc/utils/AMLCaptureConvert.h
++++ b/xbmc/utils/AMLCaptureConvert.h
+@@ -0,8 +0,9 @@
+ 
+   //! Copy the NV12 image src out of its mapping, or unpack a full pack src, scale it to the size
+   //! of dst and convert it to SDR, tonemapping HDR, then to coding as the GUI places SDR. dst is
+-  //! AV_PIX_FMT_BGRA or AV_PIX_FMT_RGBA64LE. Where gui, a premultiplied 8-bit overlay of the size
+-  //! of dst, is clear, the pixel goes to sdr, AV_PIX_FMT_RGBA of that size, in SDR instead.
++  //! AV_PIX_FMT_BGRA, AV_PIX_FMT_RGB24 or AV_PIX_FMT_RGBA64LE. Where gui, a premultiplied 8-bit
++  //! overlay of the size of dst, is clear, the pixel goes to sdr, AV_PIX_FMT_RGBA of that size,
++  //! in SDR instead.
+   bool Convert(const AMLCaptureImage& src,
+                const AMLCaptureColor& color,
+                const AMLCaptureCoding& coding,
+diff --git a/xbmc/utils/Screenshot.cpp b/xbmc/utils/Screenshot.cpp
+--- a/xbmc/utils/Screenshot.cpp
++++ b/xbmc/utils/Screenshot.cpp
+@@ -0,6 +0,8 @@
+       return XB_FMT_A8R8G8B8;
+     case AV_PIX_FMT_RGBA:
+       return XB_FMT_RGBA8;
++    case AV_PIX_FMT_RGB24:
++      return XB_FMT_RGB8;
+     case AV_PIX_FMT_RGBA64LE:
+       return XB_FMT_RGBA16;
+     case AV_PIX_FMT_X2BGR10LE:
+diff --git a/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
+--- a/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
++++ b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
+@@ -0,7 +0,6 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <cstddef>
+-#include <cstring>
+ #include <mutex>
+ 
+ using namespace KODI::RENDERING::CAPTURE;
+@@ -0,6 +0,30 @@
+ // the GUI composite peak is PQ-normalized luminance
+ constexpr float PQ_PEAK_NITS = 10000.0f;
+ 
++// 16-bit RGBA codes to 8-bit pixels of STEP bytes
++template<int STEP>
++void Quantize(const uint16_t* in, int pixels, uint8_t* out)
++{
++  for (int i = 0; i < pixels; i++, in += 4, out += STEP)
++  {
++    for (int c = 0; c < STEP; c++)
++      out[c] = static_cast<uint8_t>((in[c] + CODE_SPAN_8_TO_16 / 2) / CODE_SPAN_8_TO_16);
++  }
++}
++
++// 8-bit RGBA pixels repacked in place to STEP bytes
++template<int STEP>
++void Repack(uint8_t* pixels, int count)
++{
++  const uint8_t* in = pixels;
++  uint8_t* out = pixels;
++  for (int i = 0; i < count; i++, in += 4, out += STEP)
++  {
++    for (int c = 0; c < 3; c++)
++      out[c] = in[c];
++  }
++}
++
+ // a normalized coordinate in pixels
+ int Edge(float v, int pixels)
+ {
+@@ -0,7 +0,6 @@
+   {
+     const int width = m_gui.width;
+     const int height = m_gui.height;
+-    const size_t size = static_cast<size_t>(width) * height * 4;
+ 
+     const AMLCaptureCoding& coding = m_gui.coding;
+     const AMLCaptureImage image = convert.GetCompositeImage(width, height);
+@@ -0,29 +0,42 @@
+       }
+     }
+ 
++    const int pixels = width * height;
+     if (!hdr)
+     {
+-      for (size_t i = 0; i < size; i++)
+-        m_buffer[i] =
+-            static_cast<uint8_t>((composite[i] + CODE_SPAN_8_TO_16 / 2) / CODE_SPAN_8_TO_16);
++      if (IsRgb())
++        Quantize<3>(composite, pixels, m_buffer.get());
++      else
++        Quantize<4>(composite, pixels, m_buffer.get());
+       return true;
+     }
+ 
+     convert.MapToSdr(image, coding, dst, &overlay);
++
++    if (IsRgb())
++      Repack<3>(m_buffer.get(), pixels);
+     return true;
+   }
+ 
++  // a standard screenshot is the rows of an 8-bit PNG
++  bool IsRgb() const { return m_gui.shot == CaptureScreenshot::STANDARD; }
++
+   void CopyGui()
+   {
++    const int step = IsRgb() ? 3 : 4;
++    const int r = m_gui.bgra ? 2 : 0;
++    const int b = m_gui.bgra ? 0 : 2;
++    uint8_t* out = m_buffer.get();
+     for (int y = 0; y < m_gui.height; y++)
+     {
+       const uint8_t* gui = m_gui.Row(y);
+-      uint8_t* out = m_buffer.get() + static_cast<size_t>(y) * m_gui.width * 4;
+-      std::memcpy(out, gui, static_cast<size_t>(m_gui.width) * 4);
+-      if (m_gui.bgra)
++      for (int x = 0; x < m_gui.width; x++, gui += 4, out += step)
+       {
+-        for (int x = 0; x < m_gui.width; x++)
+-          std::swap(out[x * 4], out[x * 4 + 2]);
++        out[0] = gui[r];
++        out[1] = gui[1];
++        out[2] = gui[b];
++        if (step == 4)
++          out[3] = gui[3];
+       }
+     }
+   }
+@@ -0,11 +0,12 @@
+   CAMLCapture::GetCaptureSize(gui.streamWidth, gui.streamHeight);
+   gui.shot = spec.screenshot;
+ 
++  const bool rgb = spec.screenshot == CaptureScreenshot::STANDARD;
+   result.pixels = std::make_shared<CAMLCompositePixels>(session, session->Lease(), std::move(gui));
+   result.width = static_cast<unsigned int>(m_width);
+   result.height = static_cast<unsigned int>(m_height);
+-  result.stride = m_width * 4;
+-  result.format = AV_PIX_FMT_RGBA;
++  result.stride = m_width * (rgb ? 3 : 4);
++  result.format = rgb ? AV_PIX_FMT_RGB24 : AV_PIX_FMT_RGBA;
+   result.color.primaries = AVCOL_PRI_BT709;
+   result.color.transfer = AVCOL_TRC_IEC61966_2_1;
+   result.color.range = AVCOL_RANGE_JPEG;

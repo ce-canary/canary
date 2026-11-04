@@ -1,0 +1,148 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 23:58:05 -0500
+Subject: [PATCH] VideoPlayerAudio: move the clock by an exact start in full
+
+---
+ xbmc/cores/AudioEngine/Interfaces/AEStream.h | 2 ++
+ xbmc/cores/VideoPlayer/AudioSinkAE.cpp       | 7 ++++++-
+ xbmc/cores/VideoPlayer/AudioSinkAE.h         | 3 ++-
+ xbmc/cores/VideoPlayer/DVDClock.cpp          | 6 +++---
+ xbmc/cores/VideoPlayer/DVDClock.h            | 3 ++-
+ xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp  | 6 ++++--
+ 6 files changed, 19 insertions(+), 8 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Interfaces/AEStream.h b/xbmc/cores/AudioEngine/Interfaces/AEStream.h
+--- a/xbmc/cores/AudioEngine/Interfaces/AEStream.h
++++ b/xbmc/cores/AudioEngine/Interfaces/AEStream.h
+@@ -0,6 +0,8 @@
+     SYNC_ADJUST
+   };
+   AESyncState state;
++  //! The start error is in whole phase periods, for the clock to move by in full
++  bool exactStart{false};
+ };
+ 
+ /**
+diff --git a/xbmc/cores/VideoPlayer/AudioSinkAE.cpp b/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
+--- a/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
++++ b/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
+@@ -0,6 +0,7 @@
+     if (newTime != m_syncErrorTime)
+     {
+       m_startSyncError = m_syncErrorTime == 0;
++      m_startSyncErrorExact = m_startSyncError && info.exactStart;
+       m_syncErrorTime = info.errortime;
+       m_syncError = info.error / 1000 * DVD_TIME_BASE;
+       m_resampleRatio = info.rr;
+@@ -0,6 +0,7 @@
+     m_syncErrorTime = 0;
+     m_syncError = 0.0;
+     m_startSyncError = false;
++    m_startSyncErrorExact = false;
+   }
+ 
+   // Use wall-clock deadline independent of playback speed (fixes dimensional error
+@@ -0,6 +0,7 @@
+   m_syncError = 0.0;
+   m_syncErrorTime = 0;
+   m_startSyncError = false;
++  m_startSyncErrorExact = false;
+   m_startCut = 0.0;
+ }
+ 
+@@ -0,10 +0,12 @@
+   m_syncError += correction;
+ }
+ 
+-bool CAudioSinkAE::TakeStartSyncError()
++bool CAudioSinkAE::TakeStartSyncError(bool& exact)
+ {
+   const bool startSyncError{m_startSyncError};
++  exact = m_startSyncError && m_startSyncErrorExact;
+   m_startSyncError = false;
++  m_startSyncErrorExact = false;
+   return startSyncError;
+ }
+ 
+diff --git a/xbmc/cores/VideoPlayer/AudioSinkAE.h b/xbmc/cores/VideoPlayer/AudioSinkAE.h
+--- a/xbmc/cores/VideoPlayer/AudioSinkAE.h
++++ b/xbmc/cores/VideoPlayer/AudioSinkAE.h
+@@ -0,7 +0,7 @@
+   double GetDelay(); // returns the time it takes to play a packet if we add one at this time
+   double GetSyncError();
+   void SetSyncErrorCorrection(double correction);
+-  bool TakeStartSyncError();
++  bool TakeStartSyncError(bool& exact);
+   void SetStartCut(double cut);
+ 
+   /*!
+@@ -0,6 +0,7 @@
+   double m_syncError;
+   unsigned int m_syncErrorTime;
+   bool m_startSyncError{false};
++  bool m_startSyncErrorExact{false};
+   std::atomic<double> m_startCut{0.0};
+   double m_resampleRatio = 0.0; // invalid
+   CCriticalSection m_critSection;
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.cpp b/xbmc/cores/VideoPlayer/DVDClock.cpp
+--- a/xbmc/cores/VideoPlayer/DVDClock.cpp
++++ b/xbmc/cores/VideoPlayer/DVDClock.cpp
+@@ -0,7 +0,7 @@
+   return m_speedAdjust;
+ }
+ 
+-double CDVDClock::ErrorAdjust(double error, const char* log)
++double CDVDClock::ErrorAdjust(double error, const char* log, bool exact /* = false */)
+ {
+   std::unique_lock lock(m_critSection);
+ 
+@@ -0,14 +0,14 @@
+ 
+   // skip minor updates while speed adjust is active
+   // -> adjusting buffer levels
+-  if (m_speedAdjust != 0 && error < DVD_MSEC_TO_TIME(100))
++  if (!exact && m_speedAdjust != 0 && error < DVD_MSEC_TO_TIME(100))
+   {
+     return 0;
+   }
+ 
+   adjustment = error;
+ 
+-  if (m_vSyncAdjust != 0)
++  if (!exact && m_vSyncAdjust != 0)
+   {
+     // Audio ahead is more noticeable then audio behind video.
+     // Correct if aufio is more than 20ms ahead or more then
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.h b/xbmc/cores/VideoPlayer/DVDClock.h
+--- a/xbmc/cores/VideoPlayer/DVDClock.h
++++ b/xbmc/cores/VideoPlayer/DVDClock.h
+@@ -0,7 +0,8 @@
+   //! The clock plus the vsync adjust, read together
+   double GetClockWithVsyncAdjust();
+ 
+-  double ErrorAdjust(double error, const char* log);
++  //! An `exact` error is moved by in full, as the audio engine already quantised it
++  double ErrorAdjust(double error, const char* log, bool exact = false);
+   void Discontinuity(double clock, double absolute);
+   void Discontinuity(double clock = 0LL)
+   {
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp b/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
+@@ -0,11 +0,13 @@
+   {
+     double syncerror = m_audioSink.GetSyncError();
+     // the engine hands a late start over as the first error in sync, apply it at any size
+-    const bool startSyncError{m_audioSink.TakeStartSyncError()};
++    bool exactStart{false};
++    const bool startSyncError{m_audioSink.TakeStartSyncError(exactStart)};
+ 
+     if (startSyncError || std::abs(syncerror) > DVD_MSEC_TO_TIME(m_disconAdjustTimeMs))
+     {
+-      double correction = m_pClock->ErrorAdjust(syncerror, "CVideoPlayerAudio::OutputPacket");
++      double correction =
++          m_pClock->ErrorAdjust(syncerror, "CVideoPlayerAudio::OutputPacket", exactStart);
+       if (correction != 0)
+       {
+         m_audioSink.SetSyncErrorCorrection(-correction);

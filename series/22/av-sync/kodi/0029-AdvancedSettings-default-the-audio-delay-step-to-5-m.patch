@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 16:20:26 -0600
+Subject: [PATCH] AdvancedSettings: default the audio delay step to 5 ms
+
+A 25 ms step leaves the offset up to 12.5 ms from the measured one,
+while ATSC IS-191 allows 15 ms of audio lead. Users had to set a
+smaller step through advancedsettings.xml. The delay already applies
+in whole milliseconds, so a 5 ms step lands exactly.
+---
+ xbmc/settings/AdvancedSettings.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/xbmc/settings/AdvancedSettings.cpp b/xbmc/settings/AdvancedSettings.cpp
+--- a/xbmc/settings/AdvancedSettings.cpp
++++ b/xbmc/settings/AdvancedSettings.cpp
+@@ -0,7 +0,7 @@
+   m_videoSubsDelayRange = 60;
+   m_videoSubsDelayStep = 0.1f;
+   m_videoAudioDelayRange = 10;
+-  m_videoAudioDelayStep = 0.025f;
++  m_videoAudioDelayStep = 0.005f;
+   m_videoUseTimeSeeking = true;
+   m_videoSmoothPercentToTimeSeeking = true;
+   m_videoTimeSeekForward = 30;

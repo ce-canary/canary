@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 27 Oct 2026 23:55:16 -0500
+Subject: [PATCH] VideoPlayer: report the presented title time to libbluray
+
+A BD-J application can stop a playlist while its last seconds are
+still queued in the player. libbluray sees only the read position,
+which is past the end, so it reports no playlist stop and the player
+plays out data the disc has left. Kodi's clock runs a display latency
+behind the picture and is known only once the streams are in sync.
+---
+ cmake/modules/FindBluray.cmake                | 14 ++++++++
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 18 +++++++++++
+ .../DVDInputStreams/DVDInputStreamBluray.h    |  3 ++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 32 +++++++++++++++++++
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  2 ++
+ 5 files changed, 69 insertions(+)
+
+diff --git a/cmake/modules/FindBluray.cmake b/cmake/modules/FindBluray.cmake
+--- a/cmake/modules/FindBluray.cmake
++++ b/cmake/modules/FindBluray.cmake
+@@ -0,6 +0,20 @@
+ 
+     set(${${CMAKE_FIND_PACKAGE_NAME}_MODULE}_COMPILE_DEFINITIONS HAVE_LIBBLURAY)
+ 
++    if(NOT TARGET ${${${CMAKE_FIND_PACKAGE_NAME}_MODULE}_BUILD_NAME})
++      include(CheckSymbolExists)
++      set(CMAKE_REQUIRED_INCLUDES ${${${CMAKE_FIND_PACKAGE_NAME}_SEARCH_NAME}_INCLUDE_DIRS})
++      set(CMAKE_REQUIRED_LIBRARIES ${${${CMAKE_FIND_PACKAGE_NAME}_SEARCH_NAME}_LINK_LIBRARIES})
++      foreach(symbol bd_presented)
++        check_symbol_exists(${symbol} libbluray/bluray.h LIBBLURAY_HAS_${symbol})
++        if(NOT LIBBLURAY_HAS_${symbol})
++          message(FATAL_ERROR "libbluray lacks ${symbol} of the CoreELEC presentation hold API")
++        endif()
++      endforeach()
++      unset(CMAKE_REQUIRED_INCLUDES)
++      unset(CMAKE_REQUIRED_LIBRARIES)
++    endif()
++
+     # This is incorrectly applied to all platforms. Requires its own handling in the future
+     if(NOT CORE_PLATFORM_NAME_LC STREQUAL windowsstore)
+       list(APPEND ${${CMAKE_FIND_PACKAGE_NAME}_MODULE}_COMPILE_DEFINITIONS HAVE_LIBBLURAY_BDJ)
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,11 +0,13 @@
+ #include "DVDCodecs/Overlay/DVDOverlay.h"
+ #include "DVDCodecs/Overlay/DVDOverlayImage.h"
+ #include "DVDInputStreamFile.h"
++#include "DVDDemuxers/DVDDemuxUtils.h"
+ #include "DVDDemuxers/DemuxMVC.h"
+ #include "IVideoPlayer.h"
+ #include "LangInfo.h"
+ #include "ServiceBroker.h"
+ #include "URL.h"
++#include "cores/VideoPlayer/Interface/TimingConstants.h"
+ #include "filesystem/BlurayCallback.h"
+ #include "filesystem/SpecialProtocol.h"
+ #include "guilib/StereoscopicsManager.h"
+@@ -0,6 +0,11 @@
+ #include <libbluray/mpls_data.h>
+ #include <libbluray/log_control.h>
+ 
++extern "C"
++{
++#include <libavutil/mathematics.h>
++}
++
+ #define LIBBLURAY_BYTESEEK 0
+ #define EMPTY_QUEUE(x) { while(!x.empty()) x.pop(); }
+ 
+@@ -0,6 +0,17 @@
+   return NEXTSTREAM_OPEN;
+ }
+ 
++void CDVDInputStreamBluray::SetPresentedTime(double time)
++{
++  if (!m_bd || !m_navmode)
++    return;
++
++  bd_presented(m_bd, time == DVD_NOPTS_VALUE
++                         ? -1
++                         : av_rescale_q(static_cast<int64_t>(time), AVRational{1, DVD_TIME_BASE},
++                                        CDVDDemuxUtils::BLURAY_CLIP_TIME_BASE));
++}
++
+ const BLURAY_CLIP_INFO* CDVDInputStreamBluray::GetNextItemClip() const
+ {
+   if (!m_nextClipKnown || m_bMVCPlayback || m_hasMVCExtension)
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,9 @@
+   //! whether a menu action made the disc program leave the item being played out, reset by the call
+   bool TakeItemAbandoned();
+ 
++  //! tell the disc program the title time on screen, DVD_NOPTS_VALUE when not known
++  void SetPresentedTime(double time);
++
+   //! the clip the item opened by the last NextStream starts with, when its events named it
+   const BLURAY_CLIP_INFO* GetNextItemClip() const;
+ 
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,8 @@
+ 
+     HandleDynamicBufferLevel();
+ 
++    ReportBlurayPresented();
++
+     // make sure we run subtitle process here
+     m_VideoPlayerSubtitle->Process(m_clock.GetClock() + m_State.time_offset - m_VideoPlayerVideo->GetSubtitleDelay(), m_State.time_offset);
+ 
+@@ -0,6 +0,36 @@
+ #endif
+ }
+ 
++double CVideoPlayer::GetBlurayPresentedTime()
++{
++  // the frame on the plane holds its title time before the streams are in sync, and the
++  // renderer releases frames a display latency ahead of the clock
++  double presented = m_CurrentVideo.id >= 0 ? m_renderManager.GetDisplayedPts() : DVD_NOPTS_VALUE;
++  if (presented == DVD_NOPTS_VALUE)
++  {
++    // the clock is on title time once every open stream plays in sync
++    const auto inSync = [](const CCurrentStream& current)
++    { return current.id < 0 || current.syncState == IDVDStreamPlayer::SYNC_INSYNC; };
++    const bool known = (m_CurrentAudio.id >= 0 || m_CurrentVideo.id >= 0) &&
++                       inSync(m_CurrentAudio) && inSync(m_CurrentVideo);
++    if (!known)
++      return DVD_NOPTS_VALUE;
++    presented = m_clock.GetClock();
++  }
++  return presented + m_offset_pts;
++}
++
++void CVideoPlayer::ReportBlurayPresented()
++{
++#if defined(HAVE_LIBBLURAY)
++  const auto bluray = GetBlurayInputStream();
++  if (!bluray)
++    return;
++
++  bluray->SetPresentedTime(GetBlurayPresentedTime());
++#endif
++}
++
+ // plays out the old item without blocking, as at the end of file; waits for the players that
+ // CloseStream would wait for, video until its decoder has drained
+ bool CVideoPlayer::PlayNavTail()
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,8 @@
+   bool IsBlurayTitleEnded() const;
+   bool IsBlurayTitleEndWait() const;
+   bool TakeBlurayItemAbandoned();
++  double GetBlurayPresentedTime();
++  void ReportBlurayPresented();
+   bool PlayNavTail();
+   bool DropInNavTail(CDVDMsg& msg);
+   bool OpenStream(CCurrentStream& current, int64_t demuxerId, int iStream, int source, bool reset = true);

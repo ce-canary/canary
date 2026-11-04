@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 4 Nov 2026 07:23:34 -0600
+Subject: [PATCH] CoreELEC-settings: use the canary update channel
+
+A canary box needs four settings before the canary channel can be used.
+A box left on auto takes a nightly if the server offers one.
+Saved settings outlive the image, so these must not be saved.
+A row saves its value even when its dialog is cancelled.
+A custom channel also vanishes when CE's channel list cannot be fetched.
+---
+ .../patches/canary-update-channel.patch       | 34 +++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+ create mode 100644 projects/Amlogic-ce/packages/mediacenter/CoreELEC-settings/patches/canary-update-channel.patch
+
+diff --git a/projects/Amlogic-ce/packages/mediacenter/CoreELEC-settings/patches/canary-update-channel.patch b/projects/Amlogic-ce/packages/mediacenter/CoreELEC-settings/patches/canary-update-channel.patch
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/mediacenter/CoreELEC-settings/patches/canary-update-channel.patch
+@@ -0,0 +0,34 @@
++--- a/src/resources/lib/modules/updates.py
+++++ b/src/resources/lib/modules/updates.py
++@@ -334,6 +334,12 @@
++             if not value is None:
++                 self.struct['update']['settings']['CustomChannel3']['value'] = value
++ 
+++            # canary: not saved, so going back to a nightly keeps the user's settings
+++            self.struct['update']['settings']['AutoUpdate']['value'] = 'manual'
+++            self.struct['update']['settings']['ShowCustomChannels']['value'] = '1'
+++            self.struct['update']['settings']['CustomChannel1']['value'] = 'https://raw.githubusercontent.com/ce-canary/canary/main/update-channel/canary-22.json'
+++            self.struct['update']['settings']['Channel']['value'] = 'Canary-22'
+++
++             self.update_json = self.build_json()
++ 
++             self.struct['update']['settings']['Channel']['values'] = self.get_channels()
++@@ -368,6 +374,9 @@
++     def set_value(self, listItem):
++         try:
++             self.oe.dbg_log('updates::set_value', 'enter_function', self.oe.LOGDEBUG)
+++            # canary: a cancelled dialog must not save a forced value
+++            if listItem.getProperty('value') == str(self.struct[listItem.getProperty('category')]['settings'][listItem.getProperty('entry')]['value']):
+++                return
++             self.struct[listItem.getProperty('category')]['settings'][listItem.getProperty('entry')]['value'] = listItem.getProperty('value')
++             self.oe.write_setting('updates', listItem.getProperty('entry'), str(listItem.getProperty('value')))
++             self.oe.dbg_log('updates::set_value', 'exit_function', self.oe.LOGDEBUG)
++@@ -498,6 +507,8 @@
++             self.oe.dbg_log('updates::build_json', 'enter_function', self.oe.LOGDEBUG)
++             update_json = self.get_json()
++             if self.struct['update']['settings']['ShowCustomChannels']['value'] == '1':
+++                if update_json is None:
+++                    update_json = {}
++                 custom_urls = []
++                 for i in 1,2,3:
++                     custom_urls.append(self.struct['update']['settings']['CustomChannel' + str(i)]['value'])

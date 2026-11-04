@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 2 Nov 2026 00:28:19 -0600
+Subject: [PATCH] ActiveAE: keep sample buffer timestamps in fractional ms
+
+A sample buffer stores its pts in whole milliseconds, and the resampler
+steps it in whole milliseconds, cutting fractions toward zero. The sync
+error then reads off and the start pad falls short: audio plays almost
+1 ms early for TrueHD from the MAT packer, 0.5 ms for 90 kHz pts.
+---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp  |  3 ++-
+ .../Engines/ActiveAE/ActiveAEBuffer.cpp        | 18 ++++++++----------
+ .../Engines/ActiveAE/ActiveAEBuffer.h          |  6 +++---
+ 3 files changed, 13 insertions(+), 14 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,7 +0,8 @@
+       {
+         AEDelayStatus status;
+         m_stats.GetDelay(status);
+-        double pts = buf->timestamp - (buf->pkt_start_offset * 1000 / buf->pkt->config.sample_rate);
++        double pts =
++            buf->timestamp - (buf->pkt_start_offset * 1000.0 / buf->pkt->config.sample_rate);
+         double delay = status.GetDelay() * 1000;
+         double playingPts = pts - delay;
+         double maxError = ((*it)->m_syncState == CAESyncInfo::SYNC_INSYNC) ? 1000 : 5000;
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.cpp
+@@ -0,15 +0,14 @@
+         }
+ 
+         // pts of last sample we added to the buffer
+-        m_lastSamplePts += static_cast<int64_t>(in->pkt->nb_samples - in->pkt_start_offset) * 1000 /
+-                           in->pkt->config.sample_rate;
++        m_lastSamplePts +=
++            (in->pkt->nb_samples - in->pkt_start_offset) * 1000.0 / in->pkt->config.sample_rate;
+       }
+ 
+       // calculate pts for last sample in m_procSample
+       int bufferedSamples = m_resampler->GetBufferedSamples();
+       m_procSample->pkt_start_offset = m_procSample->pkt->nb_samples;
+-      m_procSample->timestamp =
+-          m_lastSamplePts - static_cast<int64_t>(bufferedSamples) * 1000 / m_format.m_sampleRate;
++      m_procSample->timestamp = m_lastSamplePts - bufferedSamples * 1000.0 / m_format.m_sampleRate;
+ 
+       if ((m_drain || m_changeResampler) && m_empty)
+       {
+@@ -0,8 +0,8 @@
+         in->timestamp = m_lastSamplePts;
+       }
+ 
+-      m_lastSamplePts += static_cast<int64_t>(in->pkt->nb_samples - in->pkt_start_offset) * 1000 /
+-                         m_format.m_sampleRate;
++      m_lastSamplePts +=
++          (in->pkt->nb_samples - in->pkt_start_offset) * 1000.0 / m_format.m_sampleRate;
+ 
+       m_outputSamples.push_back(in);
+       busy = true;
+@@ -0,15 +0,14 @@
+           in->pkt_start_offset = 0;
+ 
+         // pts of last sample we added to the buffer
+-        m_lastSamplePts += static_cast<int64_t>(in->pkt->nb_samples - in->pkt_start_offset) * 1000 /
+-                           m_format.m_sampleRate;
++        m_lastSamplePts +=
++            (in->pkt->nb_samples - in->pkt_start_offset) * 1000.0 / m_format.m_sampleRate;
+       }
+ 
+       // calculate pts for last sample in m_procSample
+       int bufferedSamples = m_pTempoFilter->GetBufferedSamples();
+       m_procSample->pkt_start_offset = m_procSample->pkt->nb_samples;
+-      m_procSample->timestamp =
+-          m_lastSamplePts - static_cast<int64_t>(bufferedSamples) * 1000 / m_format.m_sampleRate;
++      m_procSample->timestamp = m_lastSamplePts - bufferedSamples * 1000.0 / m_format.m_sampleRate;
+ 
+       if ((m_drain || m_changeFilter) && m_empty)
+       {
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.h
+@@ -0,7 +0,7 @@
+   void Return();
+   std::unique_ptr<CSoundPacket> pkt;
+   CActiveAEBufferPool *pool = nullptr;
+-  int64_t timestamp = 0;
++  double timestamp = 0;
+   int pkt_start_offset = 0;
+   int refCount = 0;
+   double centerMixLevel;
+@@ -0,7 +0,7 @@
+   uint8_t *m_planes[16];
+   bool m_empty = true;
+   bool m_drain = false;
+-  int64_t m_lastSamplePts = 0;
++  double m_lastSamplePts = 0;
+   bool m_remap = false;
+   CSampleBuffer *m_procSample = nullptr;
+   std::unique_ptr<IAEResample> m_resampler;
+@@ -0,7 +0,7 @@
+   bool m_drain;
+   bool m_changeFilter;
+   float m_tempo;
+-  int64_t m_lastSamplePts = 0;
++  double m_lastSamplePts = 0;
+   bool m_fillPackets;
+ };
+ 

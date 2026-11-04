@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 18 Oct 2026 11:29:16 -0500
+Subject: [PATCH] OverlayRenderer: repaint when one of several image overlays
+ ends
+
+PrepareOverlays marks the GUI dirty for image and SPU overlays only when
+one arrives or when the last one goes. When one image overlay leaves while
+another already on screen stays, the area is never repainted, and a BD-J
+logo stays on the GUI plane until a new image or the GUI draws over it.
+---
+ .../VideoPlayer/VideoRenderers/OverlayRenderer.cpp  | 13 +++++++------
+ .../VideoPlayer/VideoRenderers/OverlayRenderer.h    |  4 ++--
+ 2 files changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
+@@ -0,7 +0,7 @@
+   UpdateSubtitlePosition(resolution);
+ 
+   bool doMarkDirty = false;
+-  bool hasImageSpu = false;
++  int imageSpuCount = 0;
+   for (auto& e : m_buffers[idx])
+   {
+     // Clear last frame's cached output; libass may have invalidated the
+@@ -0,10 +0,10 @@
+     // so finding one means it is on screen now. m_textureid == 0 is the
+     // "new arrival" signal (also true every frame for animated PGS where
+     // each frame is a fresh CDVDOverlay). Disappearance is caught after
+-    // the loop by the hasImageSpu vs m_prevHadImageSpu check.
++    // the loop by the imageSpuCount vs m_prevImageSpuCount check.
+     if (o.IsOverlayType(DVDOVERLAY_TYPE_IMAGE) || o.IsOverlayType(DVDOVERLAY_TYPE_SPU))
+     {
+-      hasImageSpu = true;
++      ++imageSpuCount;
+       if (o.m_textureid == 0)
+         doMarkDirty = true;
+       continue;
+@@ -0,10 +0,11 @@
+ 
+   // PGS/DVB/SPU disappearance: arrival is caught by m_textureid==0 in
+   // the loop above. Without this, a PGS subtitle ending leaves its
+-  // cached bitmap on the GUI plane until something else dirties.
+-  if (hasImageSpu != m_prevHadImageSpu)
++  // cached bitmap on the GUI plane until something else dirties, also
++  // when another image stays on screen.
++  if (imageSpuCount != m_prevImageSpuCount)
+     doMarkDirty = true;
+-  m_prevHadImageSpu = hasImageSpu;
++  m_prevImageSpuCount = imageSpuCount;
+ 
+   if (doMarkDirty)
+     MarkDirty();
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
+@@ -0,9 +0,9 @@
+ 
+     std::shared_ptr<struct KODI::SUBTITLES::STYLE::style> m_overlayStyle;
+     std::atomic<bool> m_isSettingsChanged{false};
+-    // Whether last frame had any image/SPU overlay. Used by PrepareOverlays
++    // How many image/SPU overlays the last frame had. Used by PrepareOverlays
+     // to detect arrival/disappearance transitions (image/SPU have no
+     // per-frame change signal of their own, unlike libass detect_change).
+-    bool m_prevHadImageSpu{false};
++    int m_prevImageSpuCount{0};
+   };
+ }

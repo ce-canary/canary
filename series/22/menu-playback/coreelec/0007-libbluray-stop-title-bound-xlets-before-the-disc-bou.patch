@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 10:33:03 -0600
+Subject: [PATCH] libbluray: stop title-bound xlets before the disc-bound ones
+
+On a title stop or disc close all xlets are stopped at once. A
+title-bound xlet that hands its work to a disc-bound xlet over IXC in
+destroyXlet then waits for an xlet that is being destroyed too. It is
+killed after 5 s and the work is lost, for example a resume point
+saved to persistent storage.
+---
+ ...und-xlets-before-the-disc-bound-ones.patch | 36 +++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+ create mode 100644 packages/multimedia/libbluray/patches/libbluray-11-bdj-stop-title-bound-xlets-before-the-disc-bound-ones.patch
+
+diff --git a/packages/multimedia/libbluray/patches/libbluray-11-bdj-stop-title-bound-xlets-before-the-disc-bound-ones.patch b/packages/multimedia/libbluray/patches/libbluray-11-bdj-stop-title-bound-xlets-before-the-disc-bound-ones.patch
+new file mode 100644
+--- /dev/null
++++ b/packages/multimedia/libbluray/patches/libbluray-11-bdj-stop-title-bound-xlets-before-the-disc-bound-ones.patch
+@@ -0,0 +0,36 @@
++From a8ca9907e0f64ddacb906cebd5961b661238b9c6 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Wed, 28 Oct 2026 10:42:37 -0500
++Subject: [PATCH] bdj: stop title-bound xlets before the disc-bound ones
++
++On a title stop or disc close all xlets are stopped at once. A
++title-bound xlet that hands its work to a disc-bound xlet over IXC in
++destroyXlet then waits for an xlet that is being destroyed too. It is
++killed after 5 s and the work is lost, for example a resume point
++saved to persistent storage.
++---
++ src/libbluray/bdj/java/org/videolan/BDJLoader.java | 11 +++++++++++
++ 1 file changed, 11 insertions(+)
++
++diff --git a/src/libbluray/bdj/java/org/videolan/BDJLoader.java b/src/libbluray/bdj/java/org/videolan/BDJLoader.java
++index 2a12607533..0050adb449 100644
++--- a/src/libbluray/bdj/java/org/videolan/BDJLoader.java
+++++ b/src/libbluray/bdj/java/org/videolan/BDJLoader.java
++@@ -320,6 +320,17 @@ public class BDJLoader {
++ 
++             AppsDatabase db = AppsDatabase.getAppsDatabase();
++ 
+++            /* title-bound xlets may still call disc-bound xlets while they are destroyed */
+++            Enumeration titleIds = db.getAppIDs(new CurrentServiceFilter());
+++            while (titleIds.hasMoreElements()) {
+++                AppID id = (AppID)titleIds.nextElement();
+++                BDJAppProxy proxy = (BDJAppProxy)db.getAppProxy(id);
+++                AppEntry entry = (AppEntry)db.getAppAttributes(id);
+++                if (proxy != null && entry != null && entry.getIsServiceBound()) {
+++                    proxy.stop(true, 5000);
+++                }
+++            }
+++
++             /* stop xlets first */
++             Enumeration ids = db.getAppIDs(new CurrentServiceFilter());
++             while (ids.hasMoreElements()) {

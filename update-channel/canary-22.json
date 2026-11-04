@@ -1,0 +1,19 @@
+{
+  "Canary-22": {
+    "url": "https://github.com/ce-canary/canary/releases/download/",
+    "prettyname_regex": "(^.*)\\/.*",
+    "project": {
+      "Amlogic-no.aarch64": {
+        "displayName": "Amlogic-no.aarch64",
+        "releases": {
+          "0": {
+            "file": {
+              "name": "22-20261104/CoreELEC-Amlogic-no.aarch64-22.0-Piers_canary_20261104.tar",
+              "size": 462551040
+            }
+          }
+        }
+      }
+    }
+  }
+}

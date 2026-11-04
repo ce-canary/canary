@@ -1,0 +1,122 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 17 Oct 2026 22:13:49 -0500
+Subject: [PATCH] VideoPlayer: flush at a Blu-ray playlist stop when it is
+ taken
+
+A Blu-ray playlist stop posts a flush message to the player. Taken with
+the next stream, it is handled only after the stopped streams have
+played out, so it resets the start of the next stream. The flush also
+ran before the demuxer handed back its open packets, and one of them
+restarted the video player, so the next item waited for a stall.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 42 +++++++++++++++++++++-----
+ xbmc/cores/VideoPlayer/VideoPlayer.h   |  2 ++
+ 2 files changed, 37 insertions(+), 7 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,11 @@
+     m_pInputStream->SetReadRate(static_cast<uint32_t>(len * 1000 / tim));
+ 
+   m_offset_pts = 0;
++  // a playlist stop taken while no demuxer was open left no packets to drop
++  if (m_navStop)
++    FlushBuffers(DVD_NOPTS_VALUE, true, true);
++  m_navStop = false;
++  m_navStopped = false;
+ 
+   if (m_updateStreamDetails)
+   {
+@@ -0,6 +0,8 @@
+   m_CurrentAudioID3.hint.Clear();
+   m_SpeedState.Reset(DVD_NOPTS_VALUE);
+   m_navTail = false;
++  m_navStop = false;
++  m_navStopped = false;
+   m_offset_pts = 0;
+   m_CurrentAudio.lastdts = DVD_NOPTS_VALUE;
+   m_CurrentVideo.lastdts = DVD_NOPTS_VALUE;
+@@ -0,6 +0,15 @@
+     if (m_bAbortRequest)
+       break;
+ 
++    // a playlist stop flushes the old item once it is taken, by a message or by the read, and a
++    // packet read with it belongs to that item
++    if (m_navStop)
++    {
++      FlushBuffers(DVD_NOPTS_VALUE, true, true);
++      m_navStop = false;
++      m_navStopped = true;
++    }
++
+     // should we open a new input stream?
+     if (!m_pInputStream)
+     {
+@@ -0,6 +0,8 @@
+     {
+       if (m_pInputStream->NextStream() == CDVDInputStream::NEXTSTREAM_NONE)
+         break;
++      m_navStop = false;
++      m_navStopped = false;
+ 
+       if (m_pInputStream->IsEOF())
+         break;
+@@ -0,6 +0,20 @@
+     DemuxPacket* pPacket = NULL;
+     CDemuxStream *pStream = NULL;
+     ReadPacket(pPacket, pStream);
++
++    // after a playlist stop the demuxer still hands back the packets it had open at the end of
++    // the input, of the item that was flushed
++    if (m_navStop || (m_navStopped && pPacket))
++    {
++      CDVDDemuxUtils::FreeDemuxPacket(pPacket);
++      if (m_navStop)
++        FlushBuffers(DVD_NOPTS_VALUE, true, true);
++      m_navStop = false;
++      m_navStopped = true;
++      continue;
++    }
++    m_navStopped = false;
++
+     if (pPacket && !pStream)
+     {
+       /* probably a empty packet, just free it and move on */
+@@ -0,6 +0,8 @@
+         CloseStream(m_CurrentVideo, true);
+ 
+         m_syncStartPtsWait.reset();
++        m_navStop = false;
++        m_navStopped = false;
+         m_CurrentAudio.Clear();
+         m_CurrentVideo.Clear();
+         m_CurrentSubtitle.Clear();
+@@ -0,13 +0,7 @@
+     case BD_EVENT_PLAYLIST_STOP:
+       m_dvd.state = DVDSTATE_NORMAL;
+       m_dvd.iDVDStillTime = 0ms;
+-      // while the demuxer is being opened no streams are open yet, and a queued flush would only
+-      // discard the first packets of the streams opened next. The subtitle player isn't closed
+-      // on a stream change, so its overlays are flushed now.
+-      if (m_CurrentAudio.id >= 0 || m_CurrentVideo.id >= 0)
+-        m_messenger.Put(std::make_shared<CDVDMsg>(CDVDMsg::GENERAL_FLUSH));
+-      else
+-        m_VideoPlayerSubtitle->Flush();
++      m_navStop = true;
+       // the disc program may start another playlist, so only the kept picture goes
+       aml_drop_kept_picture(true);
+       break;
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,8 @@
+ 
+   std::optional<std::chrono::steady_clock::time_point> m_syncWait;
+   bool m_navTail{false};
++  bool m_navStop{false};
++  bool m_navStopped{false};
+ 
+   CEdl m_Edl;
+   bool m_SkipCommercials;

@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 28 Oct 2026 14:38:37 -0500
+Subject: [PATCH] ActiveAE: restart the stream sync when the sink is reopened
+
+A sink reopen during playback, such as the display reset after a
+refresh rate switch, drops the queued sink audio and flushes the
+streams' processing buffers but leaves their sync state alone. The sync
+then measures across the lost audio, and an error under the player's
+threshold stays until a seek.
+---
+ xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,6 +0,7 @@
+         m_discardBufferPools.push_back((*it)->m_processingBuffers->GetResampleBuffers());
+         m_discardBufferPools.push_back((*it)->m_processingBuffers->GetAtempoBuffers());
+         (*it)->m_processingBuffers.reset();
++        (*it)->m_syncState = CAESyncInfo::AESyncState::SYNC_START;
+       }
+       if (!(*it)->m_processingBuffers)
+       {

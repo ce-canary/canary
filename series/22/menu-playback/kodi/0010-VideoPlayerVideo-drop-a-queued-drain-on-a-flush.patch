@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 30 Oct 2026 20:24:54 -0500
+Subject: [PATCH] VideoPlayerVideo: drop a queued drain on a flush
+
+An end-of-data drain is queued behind the packets read ahead. A seek's
+flush drops only the packets, so the drain survives and runs on the
+reset decoder. A decoder that answers end of output there starts video
+without its first picture.
+---
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+@@ -0,6 +0,7 @@
+ 
+ inline void CVideoPlayerVideo::FlushMessages()
+ {
++  m_messageQueue.Flush(CDVDMsg::VIDEO_DRAIN);
+   m_messageQueue.Flush();
+   m_processInfo.SetLevelVQ(m_messageQueue.GetLevel());
+ }

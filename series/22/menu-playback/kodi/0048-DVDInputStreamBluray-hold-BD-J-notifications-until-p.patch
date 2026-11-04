@@ -1,0 +1,354 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 28 Oct 2026 00:39:34 -0500
+Subject: [PATCH] DVDInputStreamBluray: hold BD-J notifications until presented
+
+libbluray tells a BD-J application of marks, play items, the playlist
+end and playback start at the read, over a second before the picture
+shows. A seek it makes at a held mark must drop the data read past it,
+but only key-driven seeks did.
+---
+ cmake/modules/FindBluray.cmake                |  4 +-
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 83 ++++++++++++++++---
+ .../DVDInputStreams/DVDInputStreamBluray.h    | 21 ++++-
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 35 ++++++++
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  2 +
+ 5 files changed, 133 insertions(+), 12 deletions(-)
+
+diff --git a/cmake/modules/FindBluray.cmake b/cmake/modules/FindBluray.cmake
+--- a/cmake/modules/FindBluray.cmake
++++ b/cmake/modules/FindBluray.cmake
+@@ -0,7 +0,9 @@
+       include(CheckSymbolExists)
+       set(CMAKE_REQUIRED_INCLUDES ${${${CMAKE_FIND_PACKAGE_NAME}_SEARCH_NAME}_INCLUDE_DIRS})
+       set(CMAKE_REQUIRED_LIBRARIES ${${${CMAKE_FIND_PACKAGE_NAME}_SEARCH_NAME}_LINK_LIBRARIES})
+-      foreach(symbol bd_presented)
++      foreach(symbol bd_presented
++                     bd_set_presentation_hold
++                     BD_PRESENTED_ALL)
+         check_symbol_exists(${symbol} libbluray/bluray.h LIBBLURAY_HAS_${symbol})
+         if(NOT LIBBLURAY_HAS_${symbol})
+           message(FATAL_ERROR "libbluray lacks ${symbol} of the CoreELEC presentation hold API")
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,6 +0,7 @@
+ #ifdef HAVE_LIBBLURAY_BDJ
+     bd_register_argb_overlay_proc (m_bd, this, bluray_overlay_argb_cb, nullptr);
+ #endif
++    bd_set_presentation_hold(m_bd, 1);
+ 
+     if(bd_play(m_bd) <= 0)
+     {
+@@ -0,12 +0,14 @@
+         return -1;
+ 
+       result = bd_read_ext (m_bd, buf, buf_size, &m_event);
++      m_readSinceReport = true;
+ 
+       if(result < 0)
+       {
+         m_hold = HOLD_ERROR;
+         return result;
+       }
++      CheckPresentedLeft();
+ 
+       const bool menuJump = TakeMenuJump(joinsInLine());
+ 
+@@ -0,11 +0,12 @@
+         case BD_EVENT_DISCONTINUITY:
+           if(m_hold != HOLD_DATA)
+           {
++            const bool fromStill = m_hold == HOLD_STILL;
+             m_hold = HOLD_HELD;
+             // a hold without data keeps the time the demuxer being closed already has
+             if (result == 0)
+               m_dispTimeBeforeRead = dispTimeHeld;
+-            if (result == 0 && AbandonsItem(menuJump))
++            if (result == 0 && AbandonsItem(menuJump, fromStill))
+               m_itemAbandoned = true;
+             // the read starts the new play item, which the demuxer being closed must not consume
+             if ((m_event.event == BD_EVENT_PLAYITEM || m_event.event == BD_EVENT_DISCONTINUITY) &&
+@@ -0,6 +0,7 @@
+       // a clip open can queue its play item behind other events of the same read
+       while(result > 0 && queued && m_hold == HOLD_NONE && bd_get_event(m_bd, &m_event))
+       {
++        CheckPresentedLeft();
+         switch(m_event.event) {
+           case BD_EVENT_PLAYITEM:
+             if (joinsInLine())
+@@ -0,6 +0,7 @@
+     }
+     if (m_event.event == BD_EVENT_NONE)
+       break;
++    CheckPresentedLeft();
+ 
+     switch (m_event.event)
+     {
+@@ -0,6 +0,7 @@
+       default:
+         break;
+     }
++    CheckPresentedLeft();
+     ProcessEvent();
+   };
+ 
+@@ -0,6 +0,7 @@
+   {
+     std::vector<uint8_t> buf(GetBlockSize());
+     const int result = bd_read_ext(m_bd, buf.data(), static_cast<int>(buf.size()), &m_event);
++    m_readSinceReport = true;
+     if (result < 0)
+     {
+       m_hold = HOLD_ERROR;
+@@ -0,6 +0,10 @@
+     m_nextItemSeekTime = static_cast<int>(bd_tell_time(m_bd) / 90);
+   m_playlistLeft = false;
+   m_itemSeeked = false;
++  // a join within the title plays the old item out to the start of the new one
++  m_playedItemEnd =
++      !m_presentedLeft && m_nextClipKnown ? static_cast<int64_t>(m_clip->start_time) - 1 : -1;
++  m_presentedLeft = false;
+   // the next demuxer reads on from m_readPos, so no lookup reaches the spans before its first one
+   const auto span = std::ranges::upper_bound(m_clipSpans, m_readPos, {}, &ClipSpan::readPos);
+   if (span != m_clipSpans.begin())
+@@ -0,15 +0,64 @@
+   return NEXTSTREAM_OPEN;
+ }
+ 
++// libbluray settles the BD-J notifications it holds when the disc program leaves the data read;
++// an angle change keeps them
++void CDVDInputStreamBluray::CheckPresentedLeft()
++{
++  switch (m_event.event)
++  {
++    case BD_EVENT_SEEK:
++    case BD_EVENT_PLAYLIST:
++    case BD_EVENT_TITLE:
++    case BD_EVENT_PLAYLIST_STOP:
++      if (m_hold != HOLD_DATA)
++        m_presentedLeft = true;
++      break;
++    default:
++      break;
++  }
++}
++
+ void CDVDInputStreamBluray::SetPresentedTime(double time)
++{
++  ReportPresented(time == DVD_NOPTS_VALUE || m_presentedLeft
++                      ? -1
++                      : av_rescale_q(static_cast<int64_t>(time), AVRational{1, DVD_TIME_BASE},
++                                     CDVDDemuxUtils::BLURAY_CLIP_TIME_BASE));
++}
++
++void CDVDInputStreamBluray::SetReadPresented()
++{
++  if (!m_presentedLeft)
++    ReportPresented(BD_PRESENTED_ALL);
++}
++
++void CDVDInputStreamBluray::ReportItemPlayedOut()
++{
++  if (m_playedItemEnd >= 0)
++    ReportPresented(m_playedItemEnd);
++  m_playedItemEnd = -1;
++}
++
++void CDVDInputStreamBluray::ReportPresented(int64_t titleTime)
+ {
+   if (!m_bd || !m_navmode)
+     return;
+ 
+-  bd_presented(m_bd, time == DVD_NOPTS_VALUE
+-                         ? -1
+-                         : av_rescale_q(static_cast<int64_t>(time), AVRational{1, DVD_TIME_BASE},
+-                                        CDVDDemuxUtils::BLURAY_CLIP_TIME_BASE));
++  // with notifications held, libbluray is asked again when one is due, after a read or when the
++  // time becomes unknown; a pending start is released only after a read or once all data read
++  // is presented
++  const bool known = titleTime >= 0;
++  if (m_heldDue != -2 && known == (m_reportedTime >= 0) &&
++      (!known || (!m_readSinceReport &&
++                  (m_heldDue < 0 || titleTime < m_heldDue ||
++                   (m_heldDue == 0 && titleTime != BD_PRESENTED_ALL)))))
++    return;
++
++  m_heldDue = bd_presented(m_bd, titleTime);
++  m_notificationsHeld = m_heldDue != -2;
++  m_readSinceReport = false;
++  m_reportedTime = titleTime;
+ }
+ 
+ void CDVDInputStreamBluray::PollEvents()
+@@ -0,7 +0,7 @@
+     if (!m_clipStart.empty() && bd_tell(m_bd) != m_clipStartEnd)
+     {
+       m_clipStart.clear();
+-      if (m_menuInput && m_title && m_title->bdj)
++      if ((m_menuInput || m_notificationsHeld) && m_title && m_title->bdj)
+       {
+         m_menuInput = false;
+         m_itemAbandoned = true;
+@@ -0,6 +0,7 @@
+ 
+     if (m_event.event == BD_EVENT_NONE)
+       return;
++    CheckPresentedLeft();
+ 
+     // a read without data joins no play item in line
+     const bool menuJump = TakeMenuJump(false);
+@@ -0,7 +0,7 @@
+       case BD_EVENT_DISCONTINUITY:
+         if (m_hold != HOLD_DATA)
+         {
+-          if (AbandonsItem(menuJump))
++          if (AbandonsItem(menuJump, false))
+             m_itemAbandoned = true;
+           m_hold = HOLD_HELD;
+           return;
+@@ -0,10 +0,11 @@
+   return menuJump;
+ }
+ 
+-// a BD-J play item or seek with no data answers the key and leaves the item unplayed
+-bool CDVDInputStreamBluray::AbandonsItem(bool menuJump) const
++// a BD-J play item or seek with no data answers the key, or a notification that came with its
++// picture, and leaves the item unplayed; a still has nothing read past it
++bool CDVDInputStreamBluray::AbandonsItem(bool menuJump, bool fromStill) const
+ {
+-  return menuJump && m_title && m_title->bdj &&
++  return (menuJump || (m_notificationsHeld && !fromStill)) && m_title && m_title->bdj &&
+          (m_event.event == BD_EVENT_PLAYITEM || m_event.event == BD_EVENT_SEEK);
+ }
+ 
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,15 @@
+   //! tell the disc program the title time on screen, DVD_NOPTS_VALUE when not known
+   void SetPresentedTime(double time);
+ 
++  //! tell the disc program that everything read is on screen or will not be shown
++  void SetReadPresented();
++
++  //! tell the disc program that the item before the last NextStream has played out
++  void ReportItemPlayedOut();
++
++  //! forget that the data being played belongs to a position the disc program has left
++  void ResetPresentedLeft() { m_presentedLeft = false; }
++
+   //! whether the read returns no data until the next stream
+   bool IsReadHeld() const
+   {
+@@ -0,6 +0,9 @@
+   static void OverlayInit (SPlane& plane, int w, int h);
+   bool ProcessItem(int playitem);
+ 
++  void CheckPresentedLeft();
++  void ReportPresented(int64_t titleTime);
++
+   bool OpenMVCDemux(int playItem);
+   bool CloseMVCDemux();
+   void SeekMVCDemux(int64_t time);
+@@ -0,7 +0,7 @@
+     void HoldClipStart(const uint8_t* buf, int size);
+     void DropClipStartOnJump();
+     bool TakeMenuJump(bool joinsInLine);
+-    bool AbandonsItem(bool menuJump) const;
++    bool AbandonsItem(bool menuJump, bool fromStill) const;
+ 
+     /*!
+      * \brief Read the clip information of a play item of the playlist being played.
+@@ -0,6 +0,13 @@
+     bool m_titleEndWait{false};
+     bool m_menuInput{false};
+     bool m_itemAbandoned{false};
++    //! libbluray holds the BD-J notifications of the read until their picture is presented
++    bool m_notificationsHeld{false};
++    bool m_presentedLeft{false};
++    bool m_readSinceReport{false};
++    int64_t m_heldDue{-2};
++    int64_t m_reportedTime{-1};
++    int64_t m_playedItemEnd{-1};
+     bool m_nextClipKnown{false};
+     bool m_playlistLeft{false};
+     bool m_nextItemInPlaylist{false};
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,8 @@
+         continue;
+       }
+ 
++      ReportBlurayReadPresented();
++
+       // if there is another stream available, reopen demuxer
+       CDVDInputStream::ENextStream next = m_pInputStream->NextStream();
+       if(next == CDVDInputStream::NEXTSTREAM_OPEN)
+@@ -0,6 +0,7 @@
+               std::static_pointer_cast<CDVDInputStreamBluray>(m_pInputStream)->GetNextItemClip());
+ #endif
+         CloseStream(m_CurrentVideo, true);
++        ReportBlurayItemPlayedOut();
+ 
+         m_syncStartPtsWait.reset();
+         m_navStop = false;
+@@ -0,6 +0,34 @@
+ #endif
+ }
+ 
++// at the end of the data with no stream in sync the clock tells nothing
++void CVideoPlayer::ReportBlurayReadPresented()
++{
++#if defined(HAVE_LIBBLURAY)
++  const auto bluray = GetBlurayInputStream();
++  const auto inSync = [](const CCurrentStream& current)
++  { return current.id >= 0 && current.syncState == IDVDStreamPlayer::SYNC_INSYNC; };
++  // a decoder that still holds pictures shows them once the clock starts, which an audio player
++  // still starting with nothing left to feed its sink never does
++  const bool clockCanStart = m_CurrentAudio.id < 0 ||
++                             m_CurrentAudio.syncState != IDVDStreamPlayer::SYNC_STARTING ||
++                             m_VideoPlayerAudio->HasData();
++  const bool videoLeft = m_CurrentVideo.id >= 0 && m_CurrentVideo.packets > 0 && clockCanStart &&
++                         (m_VideoPlayerVideo->HasData() || !m_VideoPlayerVideo->IsEOS());
++  if (bluray && !inSync(m_CurrentAudio) && !inSync(m_CurrentVideo) &&
++      !m_VideoPlayerAudio->HasData() && !videoLeft)
++    bluray->SetReadPresented();
++#endif
++}
++
++void CVideoPlayer::ReportBlurayItemPlayedOut()
++{
++#if defined(HAVE_LIBBLURAY)
++  if (const auto bluray = GetBlurayInputStream())
++    bluray->ReportItemPlayedOut();
++#endif
++}
++
+ // true once the read is held
+ bool CVideoPlayer::PollBlurayEvents()
+ {
+@@ -0,6 +0,10 @@
+ {
+   m_syncStartPtsWait.reset();
+   m_navTail = false;
++#if defined(HAVE_LIBBLURAY)
++  if (const auto bluray = GetBlurayInputStream())
++    bluray->ResetPresentedLeft();
++#endif
+   CLog::Log(LOGDEBUG, "CVideoPlayer::FlushBuffers - flushing buffers");
+ 
+   double startpts;
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,8 @@
+   bool PollBlurayEvents();
+   double GetBlurayPresentedTime();
+   void ReportBlurayPresented();
++  void ReportBlurayReadPresented();
++  void ReportBlurayItemPlayedOut();
+   void CloseSubtitleForNextStream();
+   bool PlayNavTail();
+   bool DropInNavTail(CDVDMsg& msg);

@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 2 Nov 2026 14:09:28 -0600
+Subject: [PATCH] AMLCodec: keep negative pts through the decoder
+
+The packet pts went into an unsigned 64-bit field unchanged. A negative
+pts, as on a live TV start, became 0, which the decoder treats as no
+pts. Those pictures got invented timestamps from 0 and the clock synced
+to them, leaving a lasting A/V offset.
+---
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  | 20 +++++++++++++++++--
+ .../DVDCodecs/Video/DVDVideoCodecAmlogic.cpp  |  2 +-
+ 2 files changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,6 +0,19 @@
+ 
+ static const uint64_t UINT64_0 = 0x8000000000000000ULL;
+ 
++namespace
++{
++// the decoder takes 0 as no pts and keeps a 32-bit 90 kHz copy; this base is nine full wraps of
++// that copy, so it lifts negative pts above 0 and leaves the 32-bit value unchanged
++constexpr uint64_t PTS_US64_BASE = 100ULL << 32;
++
++uint64_t PtsToDecoder(double pts)
++{
++  pts += PTS_US64_BASE;
++  return pts >= 1.0 ? static_cast<uint64_t>(pts) : UINT64_0;
++}
++} // namespace
++
+ #define EXTERNAL_PTS    (1)
+ #define SYNC_OUTSIDE    (2)
+ #define KEYFRAME_PTS_ONLY 0x100
+@@ -0,7 +0,7 @@
+     am_private->am_pkt.avpts = UINT64_0;
+   else
+   {
+-    am_private->am_pkt.avpts = pts;
++    am_private->am_pkt.avpts = PtsToDecoder(pts);
+     m_state |= STATE_HASPTS;
+   }
+ 
+@@ -0,7 +0,7 @@
+     am_private->am_pkt.avdts = am_private->am_pkt.avpts;
+   else
+   {
+-    am_private->am_pkt.avdts = dts;
++    am_private->am_pkt.avdts = PtsToDecoder(dts);
+ 
+     // For VC1 AML decoder uses PTS only on I-Frames
+     if (am_private->am_pkt.avpts == UINT64_0 && (((size_t)am_private->gcodec.param) & KEYFRAME_PTS_ONLY))
+@@ -0,6 +0,9 @@
+ 
+     pVideoPicture->dts = DVD_NOPTS_VALUE;
+     pVideoPicture->pts = static_cast<double>(m_cur_pts);
++    // a pts the decoder counted up from 0 for a missed lookup sits far below the base
++    if (m_cur_pts >= PTS_US64_BASE / 2)
++      pVideoPicture->pts -= PTS_US64_BASE;
+ 
+     CLog::Log(LOGDEBUG, LOGVIDEO, "CAMLCodec::GetPicture: index: {:d}, pts: {:.3f}, dur:{:.3f}ms elf:{:d}ms",
+       m_bufferIndex, pVideoPicture->pts / DVD_TIME_BASE, pVideoPicture->iDuration / 1000, elapsed_since_last_frame.count());
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+@@ -0,7 +0,7 @@
+         pVideoPicture->iFlags |= DVP_FLAG_DROPPED;
+     }
+ 
+-    m_metadataSequencer.Consume(static_cast<double>(m_Codec->GetOMXPts()), m_frameMeta);
++    m_metadataSequencer.Consume(pVideoPicture->pts, m_frameMeta);
+     pVideoPicture->videoBuffer = m_videoBufferPool->Get();
+     static_cast<CAMLVideoBuffer*>(pVideoPicture->videoBuffer)->Set(this, m_Codec,
+      m_Codec->GetOMXPts(), m_Codec->GetAmlDuration(), m_Codec->GetBufferIndex(), m_metadataToken,

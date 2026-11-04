@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 28 Oct 2026 15:24:47 -0500
+Subject: [PATCH] VideoPlayerAudio: pause the stream while the display is lost
+
+On display loss the player pauses its clock and stops feeding audio, but
+the audio stream keeps playing. Only a sink the engine closes with the
+display stops with it. Any other sink plays its buffered audio against
+the stopped clock, so audio is ahead once the display is back and the
+player moves its clock to catch up.
+---
+ xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp b/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
+@@ -0,7 +0,14 @@
+     }
+     else if (pMsg->IsType(CDVDMsg::GENERAL_PAUSE))
+     {
+-      m_paused = std::static_pointer_cast<CDVDMsgBool>(pMsg)->m_value;
++      const bool paused{std::static_pointer_cast<CDVDMsgBool>(pMsg)->m_value};
++      // the clock stands while paused, a sink that survives must not play on
++      if (paused && !m_paused)
++        m_audioSink.Pause();
++      else if (!paused && m_paused && m_syncState == IDVDStreamPlayer::SYNC_INSYNC &&
++               m_processInfo.IsTempoAllowed(static_cast<float>(m_speed) / DVD_PLAYSPEED_NORMAL))
++        m_audioSink.Resume();
++      m_paused = paused;
+       CLog::Log(LOGDEBUG, "CVideoPlayerAudio - CDVDMsg::GENERAL_PAUSE: {}", m_paused);
+     }
+     else if (pMsg->IsType(CDVDMsg::PLAYER_REQUEST_STATE))

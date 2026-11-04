@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 20:20:00 -0500
+Subject: [PATCH] ActiveAE: keep TrueHD passthrough to the buffer water level
+
+TrueHD bypassed the water level because its frames reached the engine
+unevenly and were only evened out by the IEC packer. The passthrough
+codec packs MAT frames of 20 ms each, and the bypass makes the engine
+pull TrueHD as fast as the sink takes it, ahead of the level every
+other format keeps.
+---
+ xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 6 +-----
+ 1 file changed, 1 insertion(+), 5 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,10 +0,6 @@
+     }
+   }
+ 
+-  // TrueHD is very jumpy, meaning the frames don't come in equidistantly. They are only smoothed
+-  // at the end when the IEC packing happens. Therefore adjust earlier.
+-  const bool isTrueHDPassthrough{IsTrueHDPassthrough()};
+-
+   if (m_settings.lowLatencyMode)
+   {
+     // m_targetBufferLevel grows progressively from ~20ms (virtual zero buffer and zero latency)
+@@ -0,7 +0,7 @@
+   // The buffer level "GetWaterLevel()" always tries to follow m_targetBufferLevel because when it
+   // is lower, audio samples are added, and when it is higher, audio samples stop being added
+   // and the level goes down.
+-  if ((m_stats.GetWaterLevel() < m_targetBufferLevel || isTrueHDPassthrough) &&
++  if (m_stats.GetWaterLevel() < m_targetBufferLevel &&
+       (m_mode != MODE_TRANSCODE || (m_encoderBuffers && !m_encoderBuffers->m_freeSamples.empty())))
+   {
+     // calculate sync error

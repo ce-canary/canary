@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 14 Oct 2026 10:14:58 -0500
+Subject: [PATCH] AMLCodec: let a drain dequeue before the prebuffer fills
+
+A drain delivers the pictures the decoder holds without new input. A
+still frame or a short item never fills the start prebuffer, and below
+the buffer level cushion a drain dequeued only while the renderer held
+a picture, so decoded frames were never shown. In stream mode the
+decoder start threshold also held back a tenth of the stream buffer.
+---
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  | 27 ++++++++++++++++++-
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.h    |  1 +
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,6 +0,7 @@
+   m_last_pts = DVD_NOPTS_VALUE;
+   m_state = 0;
+   m_buffer_level_ready = false;
++  m_drainPrebuffer = false;
+ 
+   SetSpeed(m_speed);
+ 
+@@ -0,9 +0,12 @@
+   if (m_drain)
+     queued_frames = m_amlVideoFile->IOControl(AMLVIDEO_IOC_GET_VFQ, &queued_frames) == 0 ? queued_frames : 0;
+ 
+-  if (m_buffer_level_ready && (buffer_level > m_minimum_buffer_level || (queued_frames > 0)) && (ret = DequeueBuffer()) == 0)
++  // queued_frames counts the pictures handed out and not yet returned, a drain dequeues
++  // whatever the decoder has ready
++  if (m_buffer_level_ready && (buffer_level > m_minimum_buffer_level || m_drain) && (ret = DequeueBuffer()) == 0)
+   {
+     pVideoPicture->iFlags = 0;
++    m_drainPrebuffer = false;
+ 
+     m_minimum_buffer_level = (streambuffer ? m_minimum_buffer_level : 0.0f);
+ 
+@@ -0,6 +0,27 @@
+   else if (!drain && m_drain)
+     m_tp_last_frame += now - std::max(m_tp_drain, m_tp_last_frame);
+ 
++  // a drain hands out what the decoder holds, the start prebuffer must not hold it back; input
++  // after a drain that handed out nothing prebuffers again
++  if (drain && !m_buffer_level_ready && m_opened)
++  {
++    bool streambuffer(am_private->gcodec.dec_mode == STREAM_TYPE_STREAM);
++    m_buffer_level_ready = true;
++    m_drainPrebuffer = true;
++    m_minimum_buffer_level = (streambuffer ? 10.0f : 5.0f);
++    if (streambuffer)
++    {
++      CSysfsPath pre_decode_buf_level{"/sys/module/amvdec_h265/parameters/pre_decode_buf_level"};
++      if (pre_decode_buf_level.Exists())
++        pre_decode_buf_level.Set(static_cast<uint32_t>(0x1000));
++    }
++  }
++  else if (!drain && m_drainPrebuffer)
++  {
++    m_buffer_level_ready = false;
++    m_drainPrebuffer = false;
++  }
++
+   m_drain = drain;
+ }
+ 
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+@@ -0,6 +0,7 @@
+   std::atomic<bool> m_handback{false};
+   bool             m_handbackFrame{false};
+   bool             m_handbackOff{false};
++  bool             m_drainPrebuffer{false};
+   am_private_t    *am_private;
+   CDVDStreamInfo   m_hints;
+   int              m_speed;

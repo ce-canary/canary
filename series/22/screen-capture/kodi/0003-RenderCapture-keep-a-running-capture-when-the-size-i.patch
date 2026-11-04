@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 22 Oct 2026 18:04:50 -0500
+Subject: [PATCH] RenderCapture: keep a running capture when the size is
+ unchanged
+
+capture() cancelled and resubmitted its request on every call. Capture
+add-ons call it before each getImage, so a continuous capture was torn
+down and set up again for every frame they read.
+---
+ xbmc/interfaces/legacy/RenderCapture.h | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/xbmc/interfaces/legacy/RenderCapture.h b/xbmc/interfaces/legacy/RenderCapture.h
+--- a/xbmc/interfaces/legacy/RenderCapture.h
++++ b/xbmc/interfaces/legacy/RenderCapture.h
+@@ -0,6 +0,7 @@
+ #include "commons/Buffer.h"
+ #include "rendering/capture/CaptureConvert.h"
+ #include "rendering/capture/CaptureHandle.h"
++#include "rendering/capture/CaptureRequest.h"
+ #include "rendering/capture/CaptureService.h"
+ 
+ #include <chrono>
+@@ -0,6 +0,14 @@
+       std::unique_ptr<uint8_t[]> m_buffer;
+ 
+ #ifndef SWIG
++      //! a continuous capture that has not ended
++      bool IsRunning() const
++      {
++        const KODI::RENDERING::CAPTURE::CaptureState state = m_handle->GetState();
++        return state == KODI::RENDERING::CAPTURE::CaptureState::PENDING ||
++               state == KODI::RENDERING::CAPTURE::CaptureState::LATCHED;
++      }
++
+       //! waits for the next frame without holding the interpreter lock
+       bool WaitFrame(unsigned int msec)
+       {
+@@ -0,6 +0,11 @@
+       inline void capture(int width, int height)
+ #endif
+       {
++        // a running continuous capture already delivers fresh frames at this size
++        if (m_handle && static_cast<unsigned int>(width) == m_width &&
++            static_cast<unsigned int>(height) == m_height && IsRunning())
++          return;
++
+         // cancel any previous request before its buffer goes away
+         m_handle.reset();
+ 

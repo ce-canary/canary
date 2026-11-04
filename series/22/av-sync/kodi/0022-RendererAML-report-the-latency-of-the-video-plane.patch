@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 23:23:51 -0500
+Subject: [PATCH] RendererAML: report the latency of the video plane
+
+The release lead uses the swap-chain estimate of the display latency,
+(noofbuffers + 1) vsyncs. A frame the vsync presenter queues is live
+two vsyncs later, and the deinterlacer holds a field until the next
+one is queued.
+---
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  |  5 +++++
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.h    |  2 ++
+ .../VideoPlayer/VideoRenderers/BaseRenderer.h |  4 ++++
+ .../HwDecRender/RendererAML.cpp               | 21 +++++++++++++++++++
+ .../VideoRenderers/HwDecRender/RendererAML.h  |  4 ++++
+ .../VideoRenderers/RenderManager.cpp          | 11 +++++++++-
+ 6 files changed, 46 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,6 +0,9 @@
+     }
+   }
+ 
++  // the deinterlacer outputs a field once the next one is queued
++  m_presentHold = hints.interlaced ? am_private->video_rate * 1000.0 / UNIT_FREQ / 2 : 0.0;
++
+   // DEC_CONTROL_FLAG_DISABLE_FAST_POC
+   CSysfsPath("/sys/module/amvdec_h264/parameters/dec_control", 4);
+ 
+@@ -0,6 +0,8 @@
+   {
+     CLog::Log(LOGDEBUG, "CAMLCodec::SetVideoRect: decoder fps has changed, video_rate adjusted from {:d} to {:d}", am_private->video_rate, video_rate);
+     am_private->video_rate = video_rate;
++    if (m_hints.interlaced)
++      m_presentHold = am_private->video_rate * 1000.0 / UNIT_FREQ / 2;
+   }
+ 
+   // video view mode
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+@@ -0,6 +0,7 @@
+   int           ReleaseFrame(const uint32_t index, bool bDrop = false);
+   bool          IsOpen() const { return m_opened; }
+   bool          IsRealtimeStream() const { return m_processInfo.IsRealtimeStream(); }
++  double        GetPresentHold() const { return m_presentHold; }
+ 
+   static int    PollFrame();
+   static void   SetPollDevice(int device);
+@@ -0,6 +0,7 @@
+   bool             m_handbackFrame{false};
+   bool             m_handbackOff{false};
+   bool             m_drainPrebuffer{false};
++  std::atomic<double> m_presentHold{0.0};
+   am_private_t    *am_private;
+   CDVDStreamInfo   m_hints;
+   int              m_speed;
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h b/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
+@@ -0,6 +0,10 @@
+   virtual bool PresentFrame(int index) { return false; }
+   //! Makes the vsync thread run a step now instead of at the next vsync
+   virtual void WakeVsyncPresent() {}
++  //! Vsyncs from the release of a frame to its scan-out, -1 when unknown
++  virtual int GetPresentLatency() const { return -1; }
++  //! Milliseconds a stage after the release holds a frame for its successor (a deinterlacer)
++  virtual double GetPresentHold() const { return 0.0; }
+   // Render info, can be called before configure
+   virtual CRenderInfo GetRenderInfo() { return CRenderInfo(); }
+   virtual void Update() = 0;
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+@@ -0,6 +0,12 @@
+ #include "windowing/WinSystem.h"
+ #include "windowing/amlogic/WinSystemAmlogic.h"
+ 
++namespace
++{
++// queued in one vsync, picked at the next and live one later
++constexpr int PLANE_PRESENT_VSYNCS = 2;
++} // namespace
++
+ CRendererAML::CRendererAML()
+  : m_prevVPts(DVD_NOPTS_VALUE)
+  , m_bConfigured(false)
+@@ -0,6 +0,9 @@
+   SetViewMode(m_videoSettings.m_ViewMode);
+   ManageRenderArea();
+ 
++  CAMLVideoBuffer* amli = dynamic_cast<CAMLVideoBuffer*>(picture.videoBuffer);
++  m_presentHold = amli && amli->m_amlCodec ? amli->m_amlCodec->GetPresentHold() : 0.0;
++
+   int color_transfer = 0;
+   const bool dv_graphics =
+       picture.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && aml_dolby_vision_enabled();
+@@ -0,6 +0,7 @@
+       }
+       if (setVideoRect)
+         amli->m_amlCodec->SetVideoRect(m_sourceRect, m_destRect);
++      m_presentHold = amli->m_amlCodec->GetPresentHold();
+       m_prevCodec = amli->m_amlCodec;
+       std::shared_ptr<CAMLCodec> codec = std::move(amli->m_amlCodec); //Mark frame as processed
+       m_prevVPts = pts;
+@@ -0,6 +0,17 @@
+   CAMLCodec::RequestVsyncStep();
+ }
+ 
++int CRendererAML::GetPresentLatency() const
++{
++  // only the vsync presenter releases frames at the vsync
++  return m_vsyncPresent ? PLANE_PRESENT_VSYNCS : -1;
++}
++
++double CRendererAML::GetPresentHold() const
++{
++  return m_vsyncPresent ? m_presentHold.load() : 0.0;
++}
++
+ bool CRendererAML::PresentFrame(int index)
+ {
+   // the first frame after a reset is queued as a drop on live stream and never shows
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
+@@ -0,6 +0,8 @@
+   virtual bool WaitVsync() override;
+   virtual bool PresentFrame(int index) override;
+   virtual void WakeVsyncPresent() override;
++  virtual int GetPresentLatency() const override;
++  virtual double GetPresentHold() const override;
+ 
+   // Feature support
+   virtual bool Supports(ESCALINGMETHOD method) const override { return false; };
+@@ -0,6 +0,8 @@
+   bool m_bConfigured;
+ 
+   std::atomic<bool> m_vsyncPresent{false};
++  //! Deinterlacer hold of the decoder whose frame was configured or released last
++  std::atomic<double> m_presentHold{0.0};
+   //! Vsync thread only: whether its last wake was a real vsync (what the GUI may pace on)
+   bool m_lastWakeVsync{false};
+   //! Codec of the frame last queued from the vsync thread, for the render loop to apply geometry
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,9 +0,18 @@
+       1.0 / static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()) *
+       DVD_TIME_BASE;
+ 
++  const int presentLatency = m_pRenderer->GetPresentLatency();
++  const double displayLatency =
++      presentLatency >= 0
++          ? presentLatency * 1000.0 /
++                    static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()) +
++                m_pRenderer->GetPresentHold()
++          : static_cast<double>(
++                CServiceBroker::GetWinSystem()->GetGfxContext().GetDisplayLatency());
++
+   m_displayLatency = DVD_MSEC_TO_TIME(
+       m_latencyTweak +
+-      static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetDisplayLatency()) -
++      displayLatency -
+       m_videoDelay -
+       static_cast<double>(CServiceBroker::GetWinSystem()->GetFrameLatencyAdjustment()));
+ 

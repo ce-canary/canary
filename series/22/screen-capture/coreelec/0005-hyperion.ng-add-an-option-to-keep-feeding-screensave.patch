@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 24 Oct 2026 23:28:15 -0500
+Subject: [PATCH] hyperion.ng: add an option to keep feeding screensavers
+
+The Kodi feeder stops while a screensaver runs, so hyperiond falls back
+to its next source. Users with an animated screensaver may want the
+LEDs to follow it instead.
+---
+ .../packages/addons/service/hyperion.ng/changelog.txt  |  1 +
+ .../addons/service/hyperion.ng/source/default.py       | 10 ++++++++--
+ .../language/resource.language.en_gb/strings.po        |  8 ++++++++
+ .../service/hyperion.ng/source/resources/settings.xml  |  8 ++++++++
+ 4 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt
+--- a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt
++++ b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt
+@@ -0,6 +0,7 @@
+ - Drop platform script
+ - Feed the Kodi picture, video and menus, to Hyperion by itself over hyperiond's flatbuffer server, on by default (screen capture used to be opt-in)
+ - Build without the DRM and framebuffer screen grabbers
++- Add an option to keep feeding Hyperion while a screensaver runs
+ 122
+ - Add platform script
+ 121
+diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/default.py b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/default.py
+--- a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/default.py
++++ b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/default.py
+@@ -0,6 +0,7 @@
+         self.player = xbmc.Player()
+         self.screensaver = xbmc.getCondVisibility('System.ScreenSaverActive')
+         self.feed = xbmcaddon.Addon().getSettingInt('KODI_FEED')
++        self.feed_screensaver = xbmcaddon.Addon().getSettingBool('KODI_SCREENSAVER')
+         self.video_only = False
+         self.retry_at = 0
+         self.empty = 0
+@@ -0,6 +0,7 @@
+ 
+     def onSettingsChanged(self):
+         self.feed = xbmcaddon.Addon().getSettingInt('KODI_FEED')
++        self.feed_screensaver = xbmcaddon.Addon().getSettingBool('KODI_SCREENSAVER')
+ 
+     def onScreensaverActivated(self):
+         self.screensaver = True
+@@ -0,9 +0,13 @@
+ 
+     def target(self):
+         # what to capture, None while nothing may be fed
+-        if self.feed == FEED_OFF or self.screensaver:
++        if self.feed == FEED_OFF:
+             return None
+-        if self.player.isPlayingVideo():
++        if self.screensaver:
++            # a screensaver covers the video, so only the composite shows it
++            if self.feed != FEED_ALL or not self.feed_screensaver:
++                return None
++        elif self.player.isPlayingVideo():
+             return FEED_VIDEO
+         if self.feed == FEED_ALL and not self.video_only and time.monotonic() >= self.retry_at:
+             return FEED_ALL
+diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/resources/language/resource.language.en_gb/strings.po b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/resources/language/resource.language.en_gb/strings.po
+--- a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/resources/language/resource.language.en_gb/strings.po
++++ b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/resources/language/resource.language.en_gb/strings.po
+@@ -0,3 +0,11 @@
+ msgctxt "#30005"
+ msgid "Disable the Hyperion Ambilight add-on if it is installed. Only one add-on can capture Kodi at a time."
+ msgstr ""
++
++msgctxt "#30006"
++msgid "Include screensavers"
++msgstr ""
++
++msgctxt "#30007"
++msgid "Keep sending the picture while a screensaver runs. With the black or dim screensaver the LEDs go dark or dim instead of showing what Hyperion shows without Kodi."
++msgstr ""
+diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/resources/settings.xml b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/resources/settings.xml
+--- a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/resources/settings.xml
++++ b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/resources/settings.xml
+@@ -0,6 +0,14 @@
+           </constraints>
+           <control type="spinner" format="string"/>
+         </setting>
++        <setting id="KODI_SCREENSAVER" type="boolean" label="30006" help="30007" parent="KODI_FEED">
++          <level>0</level>
++          <default>false</default>
++          <dependencies>
++            <dependency type="visible" setting="KODI_FEED">2</dependency>
++          </dependencies>
++          <control type="toggle"/>
++        </setting>
+       </group>
+     </category>
+   </section>

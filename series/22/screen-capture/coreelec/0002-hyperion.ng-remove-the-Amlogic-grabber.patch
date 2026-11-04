@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 16 Oct 2026 16:19:41 -0500
+Subject: [PATCH] hyperion.ng: remove the Amlogic grabber
+
+The Amlogic grabber reads /dev/amvideocap0, which the kernel no
+longer provides. The double write mode switch only served the Amlogic
+grabber.
+---
+ .../addons/service/hyperion.ng/changelog.txt  |  3 ++
+ .../addons/service/hyperion.ng/package.mk     |  4 +--
+ .../hyperion.ng/source/bin/platform.sh        | 28 -------------------
+ .../system.d/service.hyperion.ng.service      |  2 --
+ 4 files changed, 5 insertions(+), 32 deletions(-)
+ delete mode 100755 projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/bin/platform.sh
+
+diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt
+--- a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt
++++ b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt
+@@ -0,3 +0,6 @@
++123
++- Remove Amlogic grabber
++- Drop platform script
+ 122
+ - Add platform script
+ 121
+diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/package.mk b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/package.mk
+--- a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/package.mk
++++ b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/package.mk
+@@ -0,7 +0,7 @@
+ PKG_NAME="hyperion.ng"
+ PKG_VERSION="2.2.1"
+ PKG_SHA256="4402c7a7e6a755ea2824c09d5d88e0fa39288b810a3cbf16c5104a0cb9160a78"
+-PKG_REV="122"
++PKG_REV="123"
+ PKG_LICENSE="GPL"
+ PKG_SITE="https://github.com/hyperion-project/hyperion.ng"
+ PKG_URL="https://github.com/hyperion-project/hyperion.ng/archive/${PKG_VERSION}.tar.gz"
+@@ -0,7 +0,7 @@
+                          -DUSE_SYSTEM_MBEDTLS_LIBS=ON \
+                          -DUSE_SYSTEM_LIBUSB_LIBS=ON \
+                          -DPLATFORM=amlogic \
+-                         -DENABLE_AMLOGIC=ON \
++                         -DENABLE_AMLOGIC=OFF \
+                          -DENABLE_DISPMANX=OFF \
+                          -DENABLE_CEC=OFF \
+                          -DENABLE_FB=ON \
+diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/bin/platform.sh b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/bin/platform.sh
+deleted file mode 100755
+--- a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/bin/platform.sh
++++ /dev/null
+@@ -0,28 +0,0 @@
+-#!/bin/sh
+-
+-DECODERS="
+-  amvdec_h265
+-  amvdec_h265_fb
+-  amvdec_h266
+-  amvdec_vp9
+-  amvdec_vp9_fb
+-  amvdec_av1
+-  amvdec_av1_fb
+-  amvdec_avs2
+-  amvdec_avs2_fb"
+-
+-case "$1" in
+-    start)
+-        double_write_mode=3
+-    ;;
+-    stop)
+-        double_write_mode=0
+-    ;;
+-    *)
+-        exit 0
+-    ;;
+-esac
+-
+-for DECODER in ${DECODERS}; do
+-    [ -d "/sys/module/${DECODER}"  ] && echo ${double_write_mode} > /sys/module/${DECODER}/parameters/double_write_mode || :
+-done
+diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/system.d/service.hyperion.ng.service b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/system.d/service.hyperion.ng.service
+--- a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/system.d/service.hyperion.ng.service
++++ b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/system.d/service.hyperion.ng.service
+@@ -0,10 +0,8 @@
+ 
+ [Service]
+ Type=forking
+-ExecStartPre=/bin/sh -c "exec sh /storage/.kodi/addons/service.hyperion.ng/bin/platform.sh start"
+ ExecStart=/bin/sh -c "exec sh /storage/.kodi/addons/service.hyperion.ng/bin/hyperiond.start"
+ ExecReload=/bin/kill -HUP $MAINPID
+-ExecStopPost=/bin/sh -c "exec sh /storage/.kodi/addons/service.hyperion.ng/bin/platform.sh stop"
+ PIDFile=/run/hyperiond.pid
+ TimeoutStopSec=2
+ Restart=always

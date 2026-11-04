@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 22 Oct 2026 18:38:09 -0500
+Subject: [PATCH] CaptureService: keep continuous captures alive between files
+
+FrameComplete fails any latched request that no tap served in a drawn
+frame. Between files the GUI draws with no video renderer, so a
+continuous RenderCapture fails at the first title change.
+---
+ xbmc/rendering/capture/CaptureService.cpp          |  2 +-
+ xbmc/rendering/capture/CaptureService.h            | 14 ++++++++------
+ xbmc/rendering/capture/test/TestCaptureService.cpp | 10 +++++-----
+ 3 files changed, 14 insertions(+), 12 deletions(-)
+
+diff --git a/xbmc/rendering/capture/CaptureService.cpp b/xbmc/rendering/capture/CaptureService.cpp
+--- a/xbmc/rendering/capture/CaptureService.cpp
++++ b/xbmc/rendering/capture/CaptureService.cpp
+@@ -0,7 +0,7 @@
+     {
+       if (request->state != CaptureState::LATCHED)
+         continue;
+-      if (!request->served)
++      if (!request->served && request->spec.cadence == CaptureCadence::ONESHOT)
+         unserved = request;
+       break; // at most one request is latched per frame
+     }
+diff --git a/xbmc/rendering/capture/CaptureService.h b/xbmc/rendering/capture/CaptureService.h
+--- a/xbmc/rendering/capture/CaptureService.h
++++ b/xbmc/rendering/capture/CaptureService.h
+@@ -0,9 +0,10 @@
+  exactly ONE consumer is serviced per render loop, the most recent one (pure
+  LIFO). A one-shot submitted just before a continuous can be buried under it
+  and waits until the continuous is gone (a rare late/lost screenshot,
+- accepted). FrameComplete() fails any request left unserved, so an unservable
+- one cannot force frames or hold the stack top forever. Effectively one
+- continuous capture at a time.
++ accepted). FrameComplete() fails a one-shot left unserved, so an unservable
++ one cannot force frames or hold the stack top forever; a continuous one
++ stays until cancelled, served or not. Effectively one continuous capture at
++ a time.
+ 
+  Threading contract:
+  - Submit()/Cancel(): any thread; they never touch the graphics context.
+@@ -0,9 +0,10 @@
+   //! readback): those are fixed properties, so retrying cannot help.
+   void Fail(const std::shared_ptr<CaptureRequest>& request);
+ 
+-  //! Render thread: the frame is drawn and every tap has run. A request still
+-  //! latched and unserved is failed, whatever its cadence: a whole frame went
+-  //! by without any tap serving it, so none will in this configuration. Call
++  //! Render thread: the frame is drawn and every tap has run. A one-shot still
++  //! latched and unserved is failed: a whole frame went by without any tap
++  //! serving it, so none will in this configuration. A CONTINUOUS request
++  //! survives, since video can come and go under it (between files). Call
+   //! this only on a frame that really drew, otherwise an idle GUI would fail
+   //! requests that are working.
+   void FrameComplete();
+diff --git a/xbmc/rendering/capture/test/TestCaptureService.cpp b/xbmc/rendering/capture/test/TestCaptureService.cpp
+--- a/xbmc/rendering/capture/test/TestCaptureService.cpp
++++ b/xbmc/rendering/capture/test/TestCaptureService.cpp
+@@ -0,20 +0,20 @@
+   EXPECT_FALSE(m_service.LatchFrame()); // and it no longer forces frames
+ }
+ 
+-TEST_F(TestCaptureService, UnservedContinuousFailsAtFrameEnd)
++TEST_F(TestCaptureService, UnservedContinuousSurvivesFrameEnd)
+ {
+   CaptureSpec spec;
+   spec.content = CaptureContent::VIDEO;
+   spec.cadence = CaptureCadence::CONTINUOUS;
+   auto handle = m_service.Submit(spec);
+ 
+-  // a CONTINUOUS request gets the same judgement as a one-shot: without it the
+-  // request would be re-latched every frame forever, starving everything below
++  // a frame with no video (between files) leaves a continuous capture waiting
+   m_service.LatchFrame();
+   m_service.FrameComplete();
+ 
+-  EXPECT_EQ(handle->GetState(), CaptureState::FAILED);
+-  EXPECT_TRUE(m_service.TakeActive(CaptureContent::VIDEO).empty());
++  EXPECT_NE(handle->GetState(), CaptureState::FAILED);
++  m_service.LatchFrame();
++  EXPECT_EQ(m_service.TakeActive(CaptureContent::VIDEO).size(), 1u);
+ }
+ 
+ TEST_F(TestCaptureService, ServedContinuousSurvivesFrameEnd)

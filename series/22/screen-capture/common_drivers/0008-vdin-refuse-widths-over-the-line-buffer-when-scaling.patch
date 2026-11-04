@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 21 Oct 2026 18:22:10 -0500
+Subject: [PATCH] vdin: refuse widths over the line buffer when scaling
+ vertically
+
+Under vertical scaling vdin1 clamps its output width to the line buffer
+without telling the client. A 3840 wide request that also scaled
+vertically got frames written 1920 wide, which the client read as 3840
+wide, and STREAMON reported success.
+---
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,6 +0,8 @@
+ 	int ret;
+ 	struct vdin_parm_s vdin_cap_param;
+ 	const struct tvin_format_s *fmt_info_p;
++	struct tvin_cutwin_s *cutwin = &devp->debug.cutwin;
++	unsigned int v_active;
+ 
+ 	/* TODO:get vd1/osd loopback source fmt */
+ 	if (devp->index)
+@@ -0,6 +0,20 @@
+ 		return -EINVAL;
+ 	}
+ 
++	/* vdin1 lines are no wider than its line buffer under vertical scaling */
++	v_active = vdin_cap_param.v_active;
++	if (vdin_cap_param.h_active > cutwin->hs + cutwin->he &&
++	    v_active > cutwin->vs + cutwin->ve)
++		v_active -= cutwin->vs + cutwin->ve;
++	if (devp->index && devp->v4l2_fmt.fmt.pix_mp.height != v_active &&
++	    devp->v4l2_fmt.fmt.pix_mp.width > devp->dtdata->vdin1_line_buff_size) {
++		dprintk(0, "%s,out of line buffer!v4l2_fmt:%dx%d active height:%d line_buff:%d\n",
++			__func__, devp->v4l2_fmt.fmt.pix_mp.width,
++			devp->v4l2_fmt.fmt.pix_mp.height, v_active,
++			devp->dtdata->vdin1_line_buff_size);
++		return -EINVAL;
++	}
++
+ 	if (devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21 ||
+ 		devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21M)
+ 		vdin_cap_param.dfmt = TVIN_NV21;

@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 15 Oct 2026 17:14:30 -0500
+Subject: [PATCH] DT: enable vdin1 v4l2 capture on all supported SoCs
+
+vdin1 had no capture node /dev/video71 on g12a, g12b, sm1, sc2, s4 and
+t7. sc2, s4 and t7 already set v4l_support_en, but CoreELEC disabled
+the node. g12a and g12b were disabled and lacked v4l_support_en, sm1
+lacked only that. The g12a node also used the generic compatible, whose
+line buffer is twice the g12a one.
+---
+ arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi | 6 ++++++
+ arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi | 2 +-
+ arch/arm64/boot/dts/amlogic/coreelec_s4_common.dtsi   | 4 ----
+ arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi  | 4 ----
+ arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi  | 4 ++++
+ arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi   | 4 ----
+ 6 files changed, 11 insertions(+), 13 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi
+@@ -0,6 +0,12 @@
+ 	wifi_static_buf = <1>;
+ };
+ 
++&vdin1 {
++	compatible = "amlogic, vdin-g12a";
++	status = "okay";
++	v4l_support_en;
++};
++
+ &dwc2_a {
+ 	controller-type = <3>;
+ };
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi
+@@ -0,7 +0,7 @@
+ };
+ 
+ &vdin1 {
+-	status = "disabled";
++	v4l_support_en;
+ };
+ 
+ &pinctrl_periphs {
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_s4_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_s4_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_s4_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_s4_common.dtsi
+@@ -0,10 +0,6 @@
+ 	status = "disabled";
+ };
+ 
+-&vdin1 {
+-	status = "disabled";
+-};
+-
+ &audiobus {
+ 	/delete-node/ tdmc;
+ 	/delete-node/ tdm@2;
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi
+@@ -0,10 +0,6 @@
+ 	status = "disabled";
+ };
+ 
+-&vdin1 {
+-	status = "disabled";
+-};
+-
+ &audiobus {
+ 	/delete-node/ tdmc;
+ 	/delete-node/ tdm@2;
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi
+@@ -0,6 +0,10 @@
+ 	wifi_static_buf = <1>;
+ };
+ 
++&vdin1 {
++	v4l_support_en;
++};
++
+ &i2c0 {
+ 	status = "disabled";
+ };
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi
+@@ -0,10 +0,6 @@
+ 	status = "disabled";
+ };
+ 
+-&vdin1 {
+-	status = "disabled";
+-};
+-
+ &i2c2 {
+ 	/delete-node/ sensor1@1a;
+ 	/delete-node/ sensor2@36;

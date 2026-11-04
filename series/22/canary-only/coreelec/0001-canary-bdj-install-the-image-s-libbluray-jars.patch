@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 16:12:35 -0600
+Subject: [PATCH] canary-bdj: install the image's libbluray jars
+
+Canary only, never headed upstream. Stock tools.jre.zulu carries jars
+built without the menu playback patches, and nothing checks that they
+match the libbluray in the image.
+---
+ projects/Amlogic-ce/devices/Amlogic-no/options |  1 +
+ .../addons/canary/canary-bdj/package.mk        | 18 ++++++++++++++++++
+ .../canary-bdj/profile.d/01-canary-bdj.conf    |  5 +++++
+ 3 files changed, 24 insertions(+)
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/canary-bdj/package.mk
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/canary-bdj/profile.d/01-canary-bdj.conf
+
+diff --git a/projects/Amlogic-ce/devices/Amlogic-no/options b/projects/Amlogic-ce/devices/Amlogic-no/options
+--- a/projects/Amlogic-ce/devices/Amlogic-no/options
++++ b/projects/Amlogic-ce/devices/Amlogic-no/options
+@@ -0,6 +0,7 @@
+   # Space separated list is supported,
+   # e.g. ADDITIONAL_PACKAGES="PACKAGE1 PACKAGE2"
+   # ADDITIONAL_PACKAGES+=""
++    ADDITIONAL_PACKAGES+=" canary-bdj"
+ 
+   # add OOTB support for IR remote
+   # IR_REMOTE_KEYMAPS+=""
+diff --git a/projects/Amlogic-ce/packages/addons/canary/canary-bdj/package.mk b/projects/Amlogic-ce/packages/addons/canary/canary-bdj/package.mk
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/canary-bdj/package.mk
+@@ -0,0 +0,18 @@
++# SPDX-License-Identifier: GPL-2.0-or-later
++# Copyright (C) 2026-present Team CoreELEC (https://coreelec.org)
++
++# jre-libbluray as a dependency would also install its libbluray.so into the image
++. $(get_pkg_directory jre-libbluray)/package.mk
++
++PKG_NAME="canary-bdj"
++PKG_NEED_UNPACK+=" $(get_pkg_directory jre-libbluray)"
++PKG_LONGDESC="libbluray jars of this image for the BD-J menus, run by the stock tools.jre.zulu"
++
++unpack() {
++  mkdir -p ${PKG_BUILD}
++  tar --strip-components=1 -xf ${SOURCES}/libbluray/libbluray-${PKG_VERSION}.tar.xz -C ${PKG_BUILD}
++}
++
++post_makeinstall_target() {
++  rm -rf ${INSTALL}/usr/lib ${INSTALL}/usr/include
++}
+diff --git a/projects/Amlogic-ce/packages/addons/canary/canary-bdj/profile.d/01-canary-bdj.conf b/projects/Amlogic-ce/packages/addons/canary/canary-bdj/profile.d/01-canary-bdj.conf
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/canary-bdj/profile.d/01-canary-bdj.conf
+@@ -0,0 +0,5 @@
++# SPDX-License-Identifier: GPL-2.0-or-later
++# Copyright (C) 2026-present Team CoreELEC (https://coreelec.org)
++
++# after 00-addons.conf: the jars must match the image's libbluray, not stock tools.jre.zulu
++export LIBBLURAY_CP="/usr/share/java/"

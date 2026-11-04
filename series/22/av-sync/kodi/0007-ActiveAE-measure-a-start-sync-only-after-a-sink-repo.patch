@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 19:21:36 -0600
+Subject: [PATCH] ActiveAE: measure a start sync only after a sink report
+
+An idle sink writes a burst of silence, one frame long, before the first
+sample of a start. The engine counts it only once the sink reports after
+writing it, so a start measured before that reads one frame early. A
+passthrough start padded on that measurement plays one frame late.
+---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp    | 16 ++++++++++++++++
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.h      |  3 +++
+ .../Engines/ActiveAE/ActiveAEStream.h            |  2 ++
+ 3 files changed, 21 insertions(+)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,6 +0,8 @@
+ {
+   std::unique_lock lock(m_lock);
+   m_sinkDelay = status;
++  if (samples > 0 || pauseMs > 0)
++    m_sinkReports++;
+   if (samples > m_bufferedSamples || pauseMs > m_bufferedPauseMs)
+   {
+     CLog::Log(LOGERROR, "CEngineStats::UpdateSinkDelay - inconsistency in buffer time");
+@@ -0,6 +0,11 @@
+         static_cast<double>(m_bufferedPauseMs) / 1000;
+ }
+ 
++unsigned int CEngineStats::GetSinkReports()
++{
++  return m_sinkReports;
++}
++
+ void CEngineStats::AddStream(unsigned int streamid)
+ {
+   StreamStats stream;
+@@ -0,6 +0,14 @@
+       if ((*it)->m_processingBuffers->m_outputSamples.empty())
+         continue;
+ 
++      // the silence an idle sink writes ahead of a start counts from its next buffer report
++      if ((*it)->m_syncState != CAESyncInfo::SYNC_INSYNC &&
++          m_stats.GetSinkReports() == (*it)->m_syncSinkReports)
++      {
++        (*it)->m_syncError.Flush(100ms);
++        continue;
++      }
++
+       CSampleBuffer *buf = (*it)->m_processingBuffers->m_outputSamples.front();
+       if (buf->timestamp)
+       {
+@@ -0,6 +0,7 @@
+     stream->m_lateStartHandedOver = false;
+     stream->m_pauseBurstCarry = 0.0;
+     stream->m_silentSinceSyncStart = true;
++    stream->m_syncSinkReports = m_stats.GetSinkReports();
+     CLog::Log(LOGDEBUG,"ActiveAE - start sync of audio stream");
+   }
+ 
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
+@@ -0,6 +0,7 @@
+ #include "threads/SystemClock.h"
+ #include "threads/Thread.h"
+ 
++#include <atomic>
+ #include <list>
+ #include <memory>
+ #include <queue>
+@@ -0,6 +0,7 @@
+   void UpdateSinkDelay(const AEDelayStatus& status, int samples, int pauseMs = 0);
+   void AddSamples(int samples, const std::list<CActiveAEStream*>& streams, int pauseMs = 0);
+   void GetDelay(AEDelayStatus& status);
++  unsigned int GetSinkReports();
+   void AddStream(unsigned int streamid);
+   void RemoveStream(unsigned int streamid);
+   void UpdateStream(CActiveAEStream *stream);
+@@ -0,6 +0,7 @@
+   int m_bufferedPauseMs{0};
+   unsigned int m_sinkSampleRate;
+   AEDelayStatus m_sinkDelay;
++  std::atomic<unsigned int> m_sinkReports{0};
+   bool m_suspended;
+   AEAudioFormat m_sinkFormat;
+   bool m_pcmOutput;
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+@@ -0,6 +0,8 @@
+   bool m_silentSinceSyncStart{false};
+   // whether m_lastSyncError holds an error measured since adjusting started
+   bool m_syncErrorBooked{false};
++  // the sink reports counted when the start sync began
++  unsigned int m_syncSinkReports{0};
+ };
+ }
+ 

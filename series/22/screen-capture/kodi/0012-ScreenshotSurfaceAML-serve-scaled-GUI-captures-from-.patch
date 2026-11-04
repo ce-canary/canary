@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 22 Oct 2026 18:04:50 -0500
+Subject: [PATCH] ScreenshotSurfaceAML: serve scaled GUI captures from vdin1
+
+The Amlogic screenshot surface serves every composite capture with a
+framebuffer readback, though the capture session can already take the
+GUI from vdin1.
+---
+ xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp | 16 ++++++++++++++++
+ xbmc/windowing/amlogic/ScreenshotSurfaceAML.h   |  3 +++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
+--- a/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
++++ b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
+@@ -0,6 +0,7 @@
+ 
+ #include "ServiceBroker.h"
+ #include "rendering/capture/CapturePixels.h"
++#include "rendering/capture/CaptureTypes.h"
+ #include "utils/AMLCapture.h"
+ #include "utils/Screenshot.h"
+ #include "windowing/amlogic/WinSystemAmlogicGLESContext.h"
+@@ -0,6 +0,21 @@
+   return std::make_unique<CScreenshotSurfaceAML>();
+ }
+ 
++bool CScreenshotSurfaceAML::CaptureDirect(const CaptureSpec& spec, CaptureResult& result)
++{
++  if (spec.content != CaptureContent::COMPOSITE || spec.cadence != CaptureCadence::CONTINUOUS ||
++      spec.format != CaptureFormat::BGRA8 || spec.width == 0 || spec.height == 0)
++    return false;
++
++  const auto session = CAMLCapture::GetActive();
++  if (session && session->IsPresented())
++    return false;
++
++  // without vdin1 the fallback is a full-size readback on every drawn frame, so the request fails
++  CAMLCapture::CreateGuiPixels(static_cast<int>(spec.width), static_cast<int>(spec.height), result);
++  return true;
++}
++
+ void CScreenshotSurfaceAML::TakePixels(const CaptureSpec& spec, CaptureResult& result)
+ {
+   using KODI::WINDOWING::AML::CWinSystemAmlogicGLESContext;
+diff --git a/xbmc/windowing/amlogic/ScreenshotSurfaceAML.h b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.h
+--- a/xbmc/windowing/amlogic/ScreenshotSurfaceAML.h
++++ b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.h
+@@ -0,6 +0,9 @@
+   static void Register();
+   static std::unique_ptr<IScreenshotSurface> CreateSurface();
+ 
++  //! a scaled continuous composite while no video is presented comes from vdin1, or fails
++  bool CaptureDirect(const KODI::RENDERING::CAPTURE::CaptureSpec& spec,
++                     KODI::RENDERING::CAPTURE::CaptureResult& result) override;
+   void TakePixels(const KODI::RENDERING::CAPTURE::CaptureSpec& spec,
+                   KODI::RENDERING::CAPTURE::CaptureResult& result) override;
+ };

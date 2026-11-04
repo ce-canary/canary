@@ -1,0 +1,318 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 17 Oct 2026 10:31:28 -0500
+Subject: [PATCH] VideoPlayer: play out a navigation-mode item without blocking
+
+In Blu-ray navigation mode every play item or playlist change blocks
+the player thread for up to tens of seconds while the old queues play
+out. Stop, pause and menu jumps wait, and a queue past the 40 s sync
+cap is cut. A held read moves the display time on early. Chapter and
+stream picks late in a non-seamless item are dropped, as the item ends.
+---
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  |  8 ++-
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 72 +++++++++++++++++--
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  3 +
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp   | 13 ++++
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.h     |  2 +
+ .../cores/VideoPlayer/VideoPlayerVideoWebOS.h |  2 +
+ 6 files changed, 95 insertions(+), 5 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,7 +0,10 @@
+       m_clipStart.clear();
+     return result;
+   }
+-  m_dispTimeBeforeRead = static_cast<int>((bd_tell_time(m_bd) / 90));
++  // the packets a held demuxer plays out keep the time of the item they came from
++  const int dispTimeHeld = m_dispTimeBeforeRead;
++  if (!m_navmode || m_hold != HOLD_HELD)
++    m_dispTimeBeforeRead = static_cast<int>((bd_tell_time(m_bd) / 90));
+   if(m_navmode)
+   {
+     // the running demuxer plays on into the next play item of the title, a discontinuity holds it
+@@ -0,6 +0,9 @@
+           if(m_hold != HOLD_DATA)
+           {
+             m_hold = HOLD_HELD;
++            // a hold without data keeps the time the demuxer being closed already has
++            if (result == 0)
++              m_dispTimeBeforeRead = dispTimeHeld;
+             // the read starts the new play item, which the demuxer being closed must not consume
+             if ((m_event.event == BD_EVENT_PLAYITEM || m_event.event == BD_EVENT_DISCONTINUITY) &&
+                 result > 0 && !m_hasMVCExtension)
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,7 @@
+ #include "VideoPlayerRadioRDS.h"
+ #include "VideoPlayerVideo.h"
+ #include "application/Application.h"
++#include "cores/AudioEngine/Interfaces/AE.h"
+ #include "cores/DataCacheCore.h"
+ #include "cores/EdlEdit.h"
+ #include "cores/FFmpeg.h"
+@@ -0,6 +0,7 @@
+   m_CurrentRadioRDS.hint.Clear();
+   m_CurrentAudioID3.hint.Clear();
+   m_SpeedState.Reset(DVD_NOPTS_VALUE);
++  m_navTail = false;
+   m_offset_pts = 0;
+   m_CurrentAudio.lastdts = DVD_NOPTS_VALUE;
+   m_CurrentVideo.lastdts = DVD_NOPTS_VALUE;
+@@ -0,7 +0,11 @@
+     {
+       // when paused, demuxer could be be returning empty
+       if (m_playSpeed == DVD_PLAYSPEED_PAUSE)
++      {
++        if (m_navTail)
++          CThread::Sleep(10ms);
+         continue;
++      }
+ 
+       // check for a still frame state
+       if (std::shared_ptr<CDVDInputStream::IMenus> pStream = std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream))
+@@ -0,10 +0,11 @@
+         }
+       }
+ 
+-      // closing the old streams drops the queue of a player that is not in sync
++      // closing the old streams drops the queue of a player that is not in sync and blocks the
++      // player thread until the others play out
+       if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY) &&
+           m_State.menuType == MenuType::NATIVE &&
+-          ShouldWaitForSync(std::chrono::steady_clock::now()))
++          (ShouldWaitForSync(std::chrono::steady_clock::now()) || PlayNavTail()))
+       {
+         CThread::Sleep(10ms);
+         continue;
+@@ -0,7 +0,10 @@
+     }
+ 
+     if (STREAM_SOURCE_MASK(pStream->source) != STREAM_SOURCE_DEMUX_SUB)
++    {
+       m_syncWait.reset();
++      m_navTail = false;
++    }
+ 
+     // see if we can find something better to play
+     CheckBetterStream(m_CurrentAudio,    pStream);
+@@ -0,6 +0,55 @@
+ #endif
+ }
+ 
++// plays out the old item without blocking, as at the end of file; waits for the players that
++// CloseStream would wait for, video until its decoder has drained
++bool CVideoPlayer::PlayNavTail()
++{
++  const bool audio = m_CurrentAudio.id >= 0 &&
++                     m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_INSYNC &&
++                     m_VideoPlayerAudio->HasData() && !CServiceBroker::GetActiveAE()->IsSuspended();
++  const bool video = m_CurrentVideo.id >= 0 &&
++                     m_CurrentVideo.syncState == IDVDStreamPlayer::SYNC_INSYNC &&
++                     (m_VideoPlayerVideo->HasData() || !m_VideoPlayerVideo->IsEOS());
++  if (m_playSpeed <= 0 || (!audio && !video))
++  {
++    m_navTail = false;
++    return false;
++  }
++
++  if (!m_navTail)
++  {
++    if (m_CurrentVideo.id >= 0)
++      m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
++
++    m_CurrentAudio.inited = false;
++    m_CurrentVideo.inited = false;
++    m_CurrentSubtitle.inited = false;
++    m_CurrentTeletext.inited = false;
++    m_CurrentRadioRDS.inited = false;
++    m_CurrentAudioID3.inited = false;
++    SetCaching(CACHESTATE_DONE);
++    m_navTail = true;
++  }
++  return true;
++}
++
++// picks and seeks in the tail are dropped, as they are once the demuxer closes for the reopen
++bool CVideoPlayer::DropInNavTail(CDVDMsg& msg)
++{
++  if (!m_navTail)
++    return false;
++
++  if (msg.IsType(CDVDMsg::PLAYER_SEEK))
++  {
++    m_processInfo->SetStateSeeking(false);
++    return true;
++  }
++  return msg.IsType(CDVDMsg::PLAYER_SEEK_CHAPTER) || msg.IsType(CDVDMsg::PLAYER_SET_AUDIOSTREAM) ||
++         msg.IsType(CDVDMsg::PLAYER_SET_VIDEOSTREAM) ||
++         msg.IsType(CDVDMsg::PLAYER_SET_SUBTITLESTREAM) || msg.IsType(CDVDMsg::PLAYER_SET_PROGRAM);
++}
++
+ void CVideoPlayer::HandlePlaySpeed()
+ {
+   const bool isInMenu = IsInMenuInternal();
+@@ -0,6 +0,9 @@
+ 
+   while (m_messenger.Get(pMsg, 0ms) == MSGQ_OK)
+   {
++    if (DropInNavTail(*pMsg))
++      continue;
++
+     if (pMsg->IsType(CDVDMsg::PLAYER_OPENFILE) &&
+         m_messenger.GetPacketCount(CDVDMsg::PLAYER_OPENFILE) == 0)
+     {
+@@ -0,6 +0,7 @@
+ void CVideoPlayer::FlushBuffers(double pts, bool accurate, bool sync)
+ {
+   m_syncStartPtsWait.reset();
++  m_navTail = false;
+   CLog::Log(LOGDEBUG, "CVideoPlayer::FlushBuffers - flushing buffers");
+ 
+   double startpts;
+@@ -0,8 +0,9 @@
+     state.canpause = true;
+   }
+ 
+-  // the ended title keeps its duration for pause, a seek would act on the next title
+-  if (IsBlurayTitleEnded())
++  // the ended title keeps its duration for pause, a seek after it or in the tail would act on the
++  // next item
++  if (IsBlurayTitleEnded() || m_navTail)
+     state.canseek = false;
+ 
+   m_processInfo->SetPlayTimes(state.startTime, state.time, state.timeMin, state.timeMax);
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,8 @@
+   bool ShouldWaitForSync(std::chrono::steady_clock::time_point now);
+   std::shared_ptr<CDVDInputStreamBluray> GetBlurayInputStream() const;
+   bool IsBlurayTitleEnded() const;
++  bool PlayNavTail();
++  bool DropInNavTail(CDVDMsg& msg);
+   bool OpenStream(CCurrentStream& current, int64_t demuxerId, int iStream, int source, bool reset = true);
+   bool OpenAudioStream(CDVDStreamInfo& hint, bool reset = true);
+   bool OpenVideoStream(CDVDStreamInfo& hint, bool reset = true);
+@@ -0,6 +0,7 @@
+   std::optional<std::chrono::steady_clock::time_point> m_syncStartPtsWait;
+ 
+   std::optional<std::chrono::steady_clock::time_point> m_syncWait;
++  bool m_navTail{false};
+ 
+   CEdl m_Edl;
+   bool m_SkipCommercials;
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+@@ -0,6 +0,7 @@
+   m_hints = hint;
+   m_stalled = m_messageQueue.GetPacketCount(CDVDMsg::DEMUXER_PACKET) == 0;
+   m_rewindStalled = false;
++  m_eos = false;
+   m_packets.clear();
+   m_syncState = IDVDStreamPlayer::SYNC_STARTING;
+   ResetSeekDrop();
+@@ -0,6 +0,9 @@
+ 
+ inline void CVideoPlayerVideo::SendMessage(std::shared_ptr<CDVDMsg> pMsg, int priority)
+ {
++  // a queued packet is data the last drain did not cover
++  if (pMsg->IsType(CDVDMsg::DEMUXER_PACKET))
++    m_eos = false;
+   m_messageQueue.Put(pMsg, priority);
+   m_processInfo.SetLevelVQ(m_messageQueue.GetLevel());
+ }
+@@ -0,6 +0,7 @@
+         CLog::Log(LOGDEBUG, "CVideoPlayerVideo - Stillframe detected, switching to forced {:f} fps",
+                   m_fFrameRate);
+         m_stalled = true;
++        m_eos = !drainWait;
+         pts += frametime * 4;
+       }
+ 
+@@ -0,6 +0,7 @@
+       m_syncState = IDVDStreamPlayer::SYNC_STARTING;
+       m_renderManager.ShowVideo(false);
+       m_rewindStalled = false;
++      m_eos = false;
+     }
+     else if (pMsg->IsType(CDVDMsg::GENERAL_FLUSH)) // private message sent by (CVideoPlayerVideo::Flush())
+     {
+@@ -0,6 +0,8 @@
+       pts = 0;
+       m_rewindStalled = false;
+       ResetSeekDrop();
++      // the flush drops a queued drain with the packets it was for, the reset decoder is drained
++      m_eos = m_messageQueue.GetPacketCount(CDVDMsg::VIDEO_DRAIN) > 0;
+ 
+       m_ptsTracker.Flush();
+       //we need to recalculate the framerate
+@@ -0,6 +0,7 @@
+           break;
+         }
+       }
++      m_eos = !drainWait;
+     }
+     else if (pMsg->IsType(CDVDMsg::GENERAL_PAUSE))
+     {
+@@ -0,6 +0,7 @@
+         }
+       }
+ 
++      m_eos = false;
+       if (m_stalled)
+       {
+         CLog::Log(LOGDEBUG, "CVideoPlayerVideo - Stillframe left, switching to normal playback");
+@@ -0,8 +0,10 @@
+     return false;
+   }
+ 
++  // the decoder is drained while its last answer is the end of its output
+   if (decoderState == CDVDVideoCodec::VC_EOF)
+   {
++    m_eos = true;
+     if (m_syncState == IDVDStreamPlayer::SYNC_STARTING)
+     {
+       SStartMsg msg;
+@@ -0,6 +0,7 @@
+   // check for a new picture
+   if (decoderState == CDVDVideoCodec::VC_PICTURE)
+   {
++    m_eos = false;
+     bool hasTimestamp = true;
+ 
+     // Detect progressive content misidentified as interlaced: if picture
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.h b/xbmc/cores/VideoPlayer/VideoPlayerVideo.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.h
+@@ -0,6 +0,7 @@
+   void SetSubtitleDelay(double delay) override { m_iSubtitleDelay = delay; }
+   bool IsStalled() const override { return m_stalled; }
+   bool IsRewindStalled() const override { return m_rewindStalled; }
++  bool IsEOS() override { return m_eos; }
+   double GetCurrentPts() override;
+   double GetOutputDelay() override; /* returns the expected delay, from that a packet is put in queue */
+   std::string GetPlayerInfo() override;
+@@ -0,6 +0,7 @@
+   int m_speed;
+   std::atomic_bool m_stalled = false;
+   std::atomic_bool m_rewindStalled;
++  std::atomic_bool m_eos{false};
+   bool m_paused;
+   IDVDStreamPlayer::ESyncState m_syncState;
+   std::atomic_bool m_bAbortOutput;
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideoWebOS.h b/xbmc/cores/VideoPlayer/VideoPlayerVideoWebOS.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideoWebOS.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideoWebOS.h
+@@ -0,6 +0,8 @@
+   void Flush(const bool sync) override;
+   [[nodiscard]] bool AcceptsData() const override;
+   [[nodiscard]] bool HasData() const override;
++  // the media pipeline has no drained report, so a navigation tail ends with the queue
++  bool IsEOS() override { return true; }
+   [[nodiscard]] bool IsInited() const override;
+   void SendMessage(const std::shared_ptr<CDVDMsg> msg, const int priority) override;
+   void EnableSubtitle(const bool enable) override;

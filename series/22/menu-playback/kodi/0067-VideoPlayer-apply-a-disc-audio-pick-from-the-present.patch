@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 30 Oct 2026 22:05:33 -0500
+Subject: [PATCH] VideoPlayer: apply a disc audio pick from the presented time
+
+A Blu-ray program that picks an audio stream only changes the stream
+forwarded at the read position. The audio already queued plays out
+first, so the new language starts seconds late. An OSD pick drops the
+queue and seeks to the presented time, so it is heard at once.
+---
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  |  4 +++
+ .../DVDInputStreams/DVDInputStreamBluray.h    |  6 ++++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 35 +++++++++++++++++++
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  2 ++
+ 4 files changed, 47 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,6 +0,10 @@
+     if (m_titleInfo && m_clip && static_cast<uint32_t>(m_clip->audio_stream_count) > (m_event.param - 1))
+       pid = m_clip->audio_streams[m_event.param - 1].pid;
+     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - BD_EVENT_AUDIO_STREAM {} {}", m_event.param, pid);
++    m_audioStreamPick = pid >= 0 && m_event.param != m_audioStreamNumber && m_titleInfo && m_clip &&
++                        m_audioStreamNumber > 0 &&
++                        m_audioStreamNumber <= static_cast<uint32_t>(m_clip->audio_stream_count);
++    m_audioStreamNumber = m_event.param;
+     m_player->OnDiscNavResult(static_cast<void*>(&pid), BD_EVENT_AUDIO_STREAM);
+     break;
+ 
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,10 @@
+   //! the presentation graphic display flag libbluray last reported
+   bool IsPgEnabled() const { return m_pgEnabled; }
+ 
++  //! whether the audio stream libbluray last reported changed from a stream of the playing clip, as
++  //! a pick by the disc program or the user does; not set for a play item that lacks the stream
++  bool IsAudioStreamPick() const { return m_audioStreamPick; }
++
+   struct ClipTime
+   {
+     uint64_t inTime{0};
+@@ -0,6 +0,8 @@
+     uint64_t m_clipStartEnd{0};
+     const BLURAY_CLIP_INFO* m_heldClip{nullptr};
+     uint32_t m_pgStreamNumber{0};
++    uint32_t m_audioStreamNumber{0};
++    bool m_audioStreamPick{false};
+     uint32_t m_uoMask{0};
+     bool m_pgEnabled{false};
+     std::optional<int> m_audioPidPending;
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,10 +0,30 @@
+   if (!IsValidStream(current) && (player == NULL || player->IsStalled()))
+     CloseStream(current, true);
+ 
++  if (&current == &m_CurrentAudio && TakeDiscAudioPick(stream))
++    return;
++
+   if (IsBetterStream(current, stream))
+     OpenStream(current, stream->demuxerId, stream->uniqueId, stream->source);
+ }
+ 
++// a disc program pick of the playing audio starts from the presented picture, like an OSD pick,
++// unless the title cannot seek there
++bool CVideoPlayer::TakeDiscAudioPick(CDemuxStream* stream)
++{
++  if (!m_discAudioPick || stream->type != StreamType::AUDIO ||
++      stream->dvdNavId != m_dvd.iSelectedAudioStream)
++    return false;
++
++  m_discAudioPick = false;
++  if (m_CurrentAudio.id < 0 || !m_State.canseek || IsBlurayTitleEnded() ||
++      (m_navTail && !IsBlurayTailInTitle()) || !IsBetterStream(m_CurrentAudio, stream))
++    return false;
++
++  SwitchAudioStream(stream->demuxerId, stream->uniqueId, stream->source);
++  return true;
++}
++
+ void CVideoPlayer::Prepare()
+ {
+   CFFmpegLog::SetLogLevel(1);
+@@ -0,6 +0,7 @@
+   m_navTail = false;
+   m_navStop = false;
+   m_navStopped = false;
++  m_discAudioPick = false;
+   m_offset_pts = 0;
+   m_CurrentAudio.lastdts = DVD_NOPTS_VALUE;
+   m_CurrentVideo.lastdts = DVD_NOPTS_VALUE;
+@@ -0,6 +0,16 @@
+     if (m_bAbortRequest)
+       break;
+ 
++    // the read may not reach the picked stream before the item ends
++    if (m_discAudioPick && m_pDemuxer)
++    {
++      for (auto stream : m_pDemuxer->GetStreams())
++      {
++        if (TakeDiscAudioPick(stream))
++          break;
++      }
++    }
++
+     // a playlist stop flushes the old item once it is taken, by a message or by the read, and a
+     // packet read with it belongs to that item
+     if (m_navStop)
+@@ -0,8 +0,12 @@
+       aml_drop_kept_picture(true);
+       break;
+     case BD_EVENT_AUDIO_STREAM:
++    {
+       m_dvd.iSelectedAudioStream = *static_cast<int*>(pData);
++      const auto bluray = GetBlurayInputStream();
++      m_discAudioPick = bluray && bluray->IsAudioStreamPick();
+       break;
++    }
+ 
+     case BD_EVENT_PG_TEXTST_STREAM:
+       m_dvd.iSelectedSPUStream = *static_cast<int*>(pData);
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+   bool PlayNavTail();
+   bool DropInNavTail(CDVDMsg& msg);
+   bool SelectDiscStream(const SelectionStream& st);
++  bool TakeDiscAudioPick(CDemuxStream* stream);
+   bool OpenStream(CCurrentStream& current, int64_t demuxerId, int iStream, int source, bool reset = true);
+   bool OpenAudioStream(CDVDStreamInfo& hint, bool reset = true);
+   bool OpenVideoStream(CDVDStreamInfo& hint, bool reset = true);
+@@ -0,6 +0,7 @@
+   double m_lastVideoTitleTime{DVD_NOPTS_VALUE};
+   bool m_navStop{false};
+   bool m_navStopped{false};
++  bool m_discAudioPick{false};
+ 
+   CEdl m_Edl;
+   bool m_SkipCommercials;

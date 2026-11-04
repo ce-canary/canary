@@ -1,0 +1,159 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 29 Oct 2026 12:48:17 -0500
+Subject: [PATCH] AMLUtils: pass the next Blu-ray item's format to the decoder
+
+The Amlogic decoder can keep the last picture over a join only when it
+knows the next item plays the same format. The player arms it at a
+Blu-ray join without that format, though the clip info of the next
+item can name it before the close.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp |  5 +-
+ xbmc/utils/AMLUtils.cpp                | 87 +++++++++++++++++++++++++-
+ xbmc/utils/AMLUtils.h                  |  6 +-
+ 3 files changed, 94 insertions(+), 4 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,8 +0,11 @@
+         SetCaching(CACHESTATE_DONE);
+         CLog::Log(LOGINFO, "VideoPlayer: next stream, wait for old streams to be finished");
+         CloseStream(m_CurrentAudio, true);
++#if defined(HAVE_LIBBLURAY)
+         if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY) && !m_bAbortRequest)
+-          aml_continue_presentation();
++          aml_continue_presentation(
++              std::static_pointer_cast<CDVDInputStreamBluray>(m_pInputStream)->GetNextItemClip());
++#endif
+         CloseStream(m_CurrentVideo, true);
+ 
+         m_syncStartPtsWait.reset();
+diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
+--- a/xbmc/utils/AMLUtils.cpp
++++ b/xbmc/utils/AMLUtils.cpp
+@@ -0,6 +0,9 @@
+ #include "windowing/WinSystem.h"
+ 
+ #include <amcodec/codec.h>
++#if defined(HAVE_LIBBLURAY)
++#include <libbluray/bluray.h>
++#endif
+ 
+ int aml_get_cpufamily_id()
+ {
+@@ -0,9 +0,89 @@
+   return (StringUtils::EqualsNoCase(videostarted.Get<std::string>().value_or("0x0"), "0x1"));
+ }
+ 
+-void aml_continue_presentation()
++#if defined(HAVE_LIBBLURAY)
++namespace
+ {
+-  CAMLCodec::ContinuePresentation(std::nullopt);
++AVCodecID GetClipVideoCodec(uint8_t codingType)
++{
++  switch (codingType)
++  {
++    case BLURAY_STREAM_TYPE_VIDEO_MPEG1:
++    case BLURAY_STREAM_TYPE_VIDEO_MPEG2:
++      return AV_CODEC_ID_MPEG2VIDEO;
++    case BLURAY_STREAM_TYPE_VIDEO_VC1:
++      return AV_CODEC_ID_VC1;
++    case BLURAY_STREAM_TYPE_VIDEO_H264:
++      return AV_CODEC_ID_H264;
++    case BLURAY_STREAM_TYPE_VIDEO_HEVC:
++      return AV_CODEC_ID_HEVC;
++    default:
++      return AV_CODEC_ID_NONE;
++  }
++}
++
++bool IsInterlacedClipVideo(uint8_t format)
++{
++  return format == BLURAY_VIDEO_FORMAT_480I || format == BLURAY_VIDEO_FORMAT_576I ||
++         format == BLURAY_VIDEO_FORMAT_1080I;
++}
++
++// the hdr type OpenStream converts a demuxer hdr type to before it opens the decoder
++StreamHdrType GetOpenedHdrType(StreamHdrType hdrType)
++{
++  if (aml_convert_to_dv_by_vs_engine(hdrType))
++    return StreamHdrType::HDR_TYPE_DOLBYVISION;
++  if (aml_convert_to_sdr(hdrType))
++    return StreamHdrType::HDR_TYPE_NONE;
++  if (aml_convert_to_hdr(hdrType))
++    return StreamHdrType::HDR_TYPE_HDR10;
++  return hdrType;
++}
++
++// the format the decoder will be opened with for the video of `clip`
++std::optional<NextVideoFormat> GetClipVideoFormat(const BLURAY_CLIP_INFO& clip)
++{
++  NextVideoFormat next;
++  if (clip.video_stream_count == 0)
++    return next;
++
++  const BLURAY_STREAM_INFO& video = clip.video_streams[0];
++  next.codec = GetClipVideoCodec(video.coding_type);
++  next.interlaced = IsInterlacedClipVideo(video.format);
++  // the demuxer shows a dual layer item as Dolby Vision only while Dolby Vision is enabled
++  if (clip.dv_stream_count > 0 && aml_dolby_vision_enabled())
++  {
++    next.hdrType = GetOpenedHdrType(StreamHdrType::HDR_TYPE_DOLBYVISION);
++    return next;
++  }
++
++  switch (video.dynamic_range_type)
++  {
++    case BLURAY_DYNAMIC_RANGE_SDR:
++      break;
++    case BLURAY_DYNAMIC_RANGE_HDR10:
++      next.hdrType = StreamHdrType::HDR_TYPE_HDR10;
++      break;
++    case BLURAY_DYNAMIC_RANGE_DOLBY_VISION:
++      next.hdrType = StreamHdrType::HDR_TYPE_DOLBYVISION;
++      break;
++    default:
++      return std::nullopt;
++  }
++  next.hdrType = GetOpenedHdrType(next.hdrType);
++  return next;
++}
++} // namespace
++#endif
++
++void aml_continue_presentation(const BLURAY_CLIP_INFO* next)
++{
++  std::optional<NextVideoFormat> format;
++#if defined(HAVE_LIBBLURAY)
++  if (next)
++    format = GetClipVideoFormat(*next);
++#endif
++  CAMLCodec::ContinuePresentation(format);
+ }
+ 
+ void aml_end_presentation(bool stop)
+diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
+--- a/xbmc/utils/AMLUtils.h
++++ b/xbmc/utils/AMLUtils.h
+@@ -0,6 +0,9 @@
+ 
+ #include "utils/StreamDetails.h"
+ 
++struct bd_clip;
++using BLURAY_CLIP_INFO = bd_clip;
++
+ enum AML_SUPPORT_H264_4K2K
+ {
+   AML_SUPPORT_H264_4K2K_UNINIT = -1,
+@@ -0,7 +0,8 @@
+ bool aml_convert_to_hdr_by_vs_engine(StreamHdrType hdrType);
+ bool aml_convert_to_dv_by_vs_engine(StreamHdrType hdrType);
+ bool aml_video_started();
+-void aml_continue_presentation();
++// `next` is the clip of the next item, nullptr when unknown
++void aml_continue_presentation(const BLURAY_CLIP_INFO* next);
+ void aml_end_presentation(bool stop);
+ // `taken` also drops a picture a next decoder took before its first frame
+ void aml_drop_kept_picture(bool taken);

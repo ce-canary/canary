@@ -1,0 +1,262 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 09:24:29 -0600
+Subject: [PATCH] PlayerController: tell the player when an audio delay change
+ ends
+
+A player may apply part of an audio delay change only once the user
+has settled on a value, when doing it per step would interrupt the
+sound. It has no way to learn that a slider, a dialog or a
+Player.SetAudioDelay change has ended.
+---
+ xbmc/application/ApplicationPlayer.cpp        |  7 +++++
+ xbmc/application/ApplicationPlayer.h          |  6 ++++
+ xbmc/cores/IPlayer.h                          |  5 ++++
+ xbmc/dialogs/GUIDialogSlider.cpp              |  2 ++
+ xbmc/guilib/ISliderCallback.h                 |  7 +++++
+ xbmc/interfaces/json-rpc/PlayerOperations.cpp |  2 ++
+ xbmc/video/PlayerController.cpp               | 30 +++++++++++++++++++
+ xbmc/video/PlayerController.h                 |  6 ++++
+ xbmc/video/dialogs/GUIDialogAudioSettings.cpp | 15 ++++++++++
+ xbmc/video/dialogs/GUIDialogAudioSettings.h   |  2 ++
+ 10 files changed, 82 insertions(+)
+
+diff --git a/xbmc/application/ApplicationPlayer.cpp b/xbmc/application/ApplicationPlayer.cpp
+--- a/xbmc/application/ApplicationPlayer.cpp
++++ b/xbmc/application/ApplicationPlayer.cpp
+@@ -0,6 +0,13 @@
+     player->SetAVDelay(fValue);
+ }
+ 
++void CApplicationPlayer::CommitAVDelay()
++{
++  std::shared_ptr<IPlayer> player = GetInternal();
++  if (player)
++    player->CommitAVDelay();
++}
++
+ void CApplicationPlayer::SetDynamicRangeCompression(long drc)
+ {
+   std::shared_ptr<IPlayer> player = GetInternal();
+diff --git a/xbmc/application/ApplicationPlayer.h b/xbmc/application/ApplicationPlayer.h
+--- a/xbmc/application/ApplicationPlayer.h
++++ b/xbmc/application/ApplicationPlayer.h
+@@ -0,6 +0,12 @@
+   void SeekTimeRelative(int64_t iTime = 0);
+   void SetAudioStream(int iStream);
+   void SetAVDelay(float fValue = 0.0f);
++
++  /*!
++   * \brief Ends an interactive change of the audio delay: the player applies it
++   */
++  void CommitAVDelay();
++
+   void SetBookmarks(const std::vector<std::chrono::milliseconds>& bookmarks);
+   void SetDynamicRangeCompression(long drc);
+   void SetMute(bool bOnOff);
+diff --git a/xbmc/cores/IPlayer.h b/xbmc/cores/IPlayer.h
+--- a/xbmc/cores/IPlayer.h
++++ b/xbmc/cores/IPlayer.h
+@@ -0,6 +0,11 @@
+   virtual void SetAVDelay(float fValue = 0.0f) {}
+   virtual float GetAVDelay() { return 0.0f; }
+ 
++  /*!
++   * \brief The interactive change of the audio delay has finished, at the value last set
++   */
++  virtual void CommitAVDelay() {}
++
+   virtual void SetSubTitleDelay(float fValue = 0.0f) {}
+   virtual float GetSubTitleDelay()    { return 0.0f; }
+   virtual int GetSubtitleCount() const { return 0; }
+diff --git a/xbmc/dialogs/GUIDialogSlider.cpp b/xbmc/dialogs/GUIDialogSlider.cpp
+--- a/xbmc/dialogs/GUIDialogSlider.cpp
++++ b/xbmc/dialogs/GUIDialogSlider.cpp
+@@ -0,6 +0,8 @@
+     }
+     break;
+   case GUI_MSG_WINDOW_DEINIT:
++    if (m_callback)
++      m_callback->OnSliderClose(m_callbackData);
+     m_callback = NULL;
+     m_callbackData = NULL;
+     break;
+diff --git a/xbmc/guilib/ISliderCallback.h b/xbmc/guilib/ISliderCallback.h
+--- a/xbmc/guilib/ISliderCallback.h
++++ b/xbmc/guilib/ISliderCallback.h
+@@ -0,4 +0,11 @@
+    \param slider pointer to the slider control
+    */
+   virtual void OnSliderChange(void *data, CGUISliderControl *slider) = 0;
++
++  /*!
++   \brief Callback function called when the slider dialog closes
++
++   \param data pointer of callbackData
++   */
++  virtual void OnSliderClose(void* data) {}
+ };
+diff --git a/xbmc/interfaces/json-rpc/PlayerOperations.cpp b/xbmc/interfaces/json-rpc/PlayerOperations.cpp
+--- a/xbmc/interfaces/json-rpc/PlayerOperations.cpp
++++ b/xbmc/interfaces/json-rpc/PlayerOperations.cpp
+@@ -0,6 +0,7 @@
+           offset = -videoAudioDelayRange;
+ 
+         appPlayer->SetAVDelay(offset);
++        appPlayer->CommitAVDelay();
+       }
+       else if (parameterObject["offset"].isString())
+       {
+@@ -0,6 +0,7 @@
+             vs.m_AudioDelay = -videoAudioDelayRange;
+           appPlayer->SetAVDelay(vs.m_AudioDelay);
+         }
++        appPlayer->CommitAVDelay();
+       }
+       else
+         return InvalidParams;
+diff --git a/xbmc/video/PlayerController.cpp b/xbmc/video/PlayerController.cpp
+--- a/xbmc/video/PlayerController.cpp
++++ b/xbmc/video/PlayerController.cpp
+@@ -0,6 +0,15 @@
+ using namespace KODI;
+ using namespace UTILS;
+ 
++namespace
++{
++bool IsAudioDelayAction(int action)
++{
++  return action == ACTION_AUDIO_DELAY || action == ACTION_AUDIO_DELAY_MIN ||
++         action == ACTION_AUDIO_DELAY_PLUS;
++}
++} // namespace
++
+ CPlayerController::CPlayerController()
+ {
+   MOVING_SPEED::EventCfg eventCfg{100.0f, 300.0f, 200};
+@@ -0,6 +0,8 @@
+         vs.m_AudioDelay -= videoAudioDelayStep;
+         if (vs.m_AudioDelay < -videoAudioDelayRange)
+           vs.m_AudioDelay = -videoAudioDelayRange;
++        if (vs.m_AudioDelay != appPlayer->GetVideoSettings().m_AudioDelay)
++          m_audioDelayChanged = true;
+         appPlayer->SetAVDelay(vs.m_AudioDelay);
+ 
+         ShowSlider(action.GetID(), 297, appPlayer->GetVideoSettings().m_AudioDelay,
+@@ -0,6 +0,8 @@
+         vs.m_AudioDelay += videoAudioDelayStep;
+         if (vs.m_AudioDelay > videoAudioDelayRange)
+           vs.m_AudioDelay = videoAudioDelayRange;
++        if (vs.m_AudioDelay != appPlayer->GetVideoSettings().m_AudioDelay)
++          m_audioDelayChanged = true;
+         appPlayer->SetAVDelay(vs.m_AudioDelay);
+ 
+         ShowSlider(action.GetID(), 297, appPlayer->GetVideoSettings().m_AudioDelay,
+@@ -0,6 +0,9 @@
+ 
+ void CPlayerController::ShowSlider(int action, int label, float value, float min, float delta, float max, bool modal)
+ {
++  // the open dialog takes the new slider without a close, which ends the change of the old one
++  if (IsAudioDelayAction(action) != IsAudioDelayAction(m_sliderAction))
++    OnSliderClose(nullptr);
+   m_sliderAction = action;
+   if (modal)
+     CGUIDialogSlider::ShowAndGetInput(
+@@ -0,6 +0,8 @@
+   {
+     if (m_sliderAction == ACTION_AUDIO_DELAY)
+     {
++      if (slider->GetFloatValue() != appPlayer->GetVideoSettings().m_AudioDelay)
++        m_audioDelayChanged = true;
+       appPlayer->SetAVDelay(slider->GetFloatValue());
+     }
+     else if (m_sliderAction == ACTION_SUBTITLE_DELAY)
+@@ -0,3 +0,15 @@
+     }
+   }
+ }
++
++void CPlayerController::OnSliderClose(void* data)
++{
++  auto& components = CServiceBroker::GetAppComponents();
++  const auto appPlayer = components.GetComponent<CApplicationPlayer>();
++
++  if (IsAudioDelayAction(m_sliderAction) && m_audioDelayChanged)
++  {
++    m_audioDelayChanged = false;
++    appPlayer->CommitAVDelay();
++  }
++}
+diff --git a/xbmc/video/PlayerController.h b/xbmc/video/PlayerController.h
+--- a/xbmc/video/PlayerController.h
++++ b/xbmc/video/PlayerController.h
+@@ -0,6 +0,11 @@
+    */
+   void OnSliderChange(void *data, CGUISliderControl *slider) override;
+ 
++  /*! \brief Callback from the slider dialog when it closes.
++   \sa CGUIDialogSlider
++   */
++  void OnSliderClose(void* data) override;
++
+ protected:
+   CPlayerController();
+   CPlayerController(const CPlayerController&) = delete;
+@@ -0,5 +0,6 @@
+   bool NextAudioStream();
+ 
+   int m_sliderAction = 0; ///< \brief set to the action id for a slider being displayed \sa ShowSlider
++  bool m_audioDelayChanged{false};
+   KODI::UTILS::MOVING_SPEED::CMovingSpeed m_movingSpeed;
+ };
+diff --git a/xbmc/video/dialogs/GUIDialogAudioSettings.cpp b/xbmc/video/dialogs/GUIDialogAudioSettings.cpp
+--- a/xbmc/video/dialogs/GUIDialogAudioSettings.cpp
++++ b/xbmc/video/dialogs/GUIDialogAudioSettings.cpp
+@@ -0,6 +0,19 @@
+   CGUIDialogSettingsManualBase::FrameMove();
+ }
+ 
++void CGUIDialogAudioSettings::OnDeinitWindow(int nextWindowID)
++{
++  if (m_audioDelayChanged)
++  {
++    auto& components = CServiceBroker::GetAppComponents();
++    const auto appPlayer = components.GetComponent<CApplicationPlayer>();
++    appPlayer->CommitAVDelay();
++    m_audioDelayChanged = false;
++  }
++
++  CGUIDialogSettingsManualBase::OnDeinitWindow(nextWindowID);
++}
++
+ std::string CGUIDialogAudioSettings::FormatDelay(float value, float interval)
+ {
+   if (fabs(value) < 0.5f * interval)
+@@ -0,6 +0,8 @@
+   else if (settingId == SETTING_AUDIO_DELAY)
+   {
+     float value = static_cast<float>(std::static_pointer_cast<const CSettingNumber>(setting)->GetValue());
++    if (value != appPlayer->GetVideoSettings().m_AudioDelay)
++      m_audioDelayChanged = true;
+     appPlayer->SetAVDelay(value);
+   }
+   else if (settingId == SETTING_AUDIO_STREAM)
+diff --git a/xbmc/video/dialogs/GUIDialogAudioSettings.h b/xbmc/video/dialogs/GUIDialogAudioSettings.h
+--- a/xbmc/video/dialogs/GUIDialogAudioSettings.h
++++ b/xbmc/video/dialogs/GUIDialogAudioSettings.h
+@@ -0,6 +0,7 @@
+ 
+   // specialization of CGUIWindow
+   void FrameMove() override;
++  void OnDeinitWindow(int nextWindowID) override;
+ 
+   static std::string FormatDelay(float value, float interval);
+   static std::string FormatDecibel(float value);
+@@ -0,6 +0,7 @@
+   float m_volume;
+   int m_audioStream;
+   bool m_passthrough = false;
++  bool m_audioDelayChanged{false};
+ 
+   std::vector<IPlayerAudioCaps> m_audioCaps;
+ 

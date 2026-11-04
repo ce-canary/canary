@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 16 Oct 2026 16:18:32 -0500
+Subject: [PATCH] Amlogic-ce: drop the amvideocap driver from the linux config
+
+The amvideocap driver is removed from common_drivers. Its config
+option no longer exists.
+---
+ projects/Amlogic-ce/devices/Amlogic-no/linux/linux.aarch64.conf | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/projects/Amlogic-ce/devices/Amlogic-no/linux/linux.aarch64.conf b/projects/Amlogic-ce/devices/Amlogic-no/linux/linux.aarch64.conf
+--- a/projects/Amlogic-ce/devices/Amlogic-no/linux/linux.aarch64.conf
++++ b/projects/Amlogic-ce/devices/Amlogic-no/linux/linux.aarch64.conf
+@@ -0,7 +0,6 @@
+ # Amlogic Video Sink Driver Support
+ #
+ CONFIG_AMLOGIC_MEDIA_VIDEO=y
+-CONFIG_AMLOGIC_MEDIA_VIDEOCAPTURE=y
+ # CONFIG_AMLOGIC_MEDIA_DUMMY_PROVIDER is not set
+ # end of Amlogic Video Sink Driver Support
+ 

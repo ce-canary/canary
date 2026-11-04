@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 20:16:45 -0500
+Subject: [PATCH] ActiveAE: keep the sink delay across an engine flush
+
+A pause or a seek flushes the engine. The flush set the sink delay to
+0 until the next write, while the device still reported audio to
+play, so the start of a seek read the audio delay 150 to 200 ms short.
+---
+ xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp   |  8 +++++---
+ xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h     |  2 +-
+ .../AudioEngine/Engines/ActiveAE/ActiveAESink.cpp      | 10 ++++++++++
+ 3 files changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,10 +0,11 @@
+ }
+ } // unnamed namespace
+ 
+-void CEngineStats::Reset(unsigned int sampleRate, bool pcm)
++void CEngineStats::Reset(unsigned int sampleRate, bool pcm, bool keepSinkDelay)
+ {
+   std::unique_lock lock(m_lock);
+-  m_sinkDelay.SetDelay(0.0);
++  if (!keepSinkDelay)
++    m_sinkDelay.SetDelay(0.0);
+   m_sinkSampleRate = sampleRate;
+   m_bufferedSamples = 0;
+   m_bufferedPauseMs = 0;
+@@ -0,7 +0,8 @@
+     CLog::Log(LOGERROR, "ActiveAE::{} - failed to flush", __FUNCTION__);
+     m_extError = true;
+   }
+-  m_stats.Reset(m_sinkFormat.m_sampleRate, m_mode == MODE_PCM);
++  // the sink stored the delay of its device at the flush
++  m_stats.Reset(m_sinkFormat.m_sampleRate, m_mode == MODE_PCM, true);
+ }
+ 
+ void CActiveAE::ClearDiscardedBuffers()
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
+@@ -0,7 +0,7 @@
+ class CEngineStats
+ {
+ public:
+-  void Reset(unsigned int sampleRate, bool pcm);
++  void Reset(unsigned int sampleRate, bool pcm, bool keepSinkDelay = false);
+   void UpdateSinkDelay(const AEDelayStatus& status, int samples, int pauseMs = 0);
+   void AddSamples(int samples, const std::list<CActiveAEStream*>& streams, int pauseMs = 0);
+   void GetDelay(AEDelayStatus& status);
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
+@@ -0,12 +0,22 @@
+           return;
+ 
+         case CSinkControlProtocol::FLUSH:
++        {
+           ReturnBuffers();
+           // Pause also clears AE queues: only explicit stream flush discards device audio.
+           if (m_sink && *reinterpret_cast<const bool*>(msg->data))
+             m_sink->Flush();
++          // the engine keeps counting what the device still plays
++          if (m_stats)
++          {
++            AEDelayStatus status;
++            if (m_sink)
++              m_sink->GetDelay(status);
++            m_stats->UpdateSinkDelay(status, 0);
++          }
+           msg->Reply(CSinkControlProtocol::ACC);
+           return;
++        }
+ 
+         case CSinkControlProtocol::APPFOCUSED:
+           m_extAppFocused = *(bool*)msg->data;

@@ -1,0 +1,254 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 10:33:03 -0600
+Subject: [PATCH] libbluray: split out helpers for the presentation hold
+
+The graphics controller call, the title time of the read position, IG
+queueing and the HDMV run loop each sit inside one caller. The
+presentation hold needs each of them from a second place. No behaviour
+change.
+---
+ ...ut-helpers-for-the-presentation-hold.patch | 235 ++++++++++++++++++
+ 1 file changed, 235 insertions(+)
+ create mode 100644 packages/multimedia/libbluray/patches/libbluray-17-bluray-split-out-helpers-for-the-presentation-hold.patch
+
+diff --git a/packages/multimedia/libbluray/patches/libbluray-17-bluray-split-out-helpers-for-the-presentation-hold.patch b/packages/multimedia/libbluray/patches/libbluray-17-bluray-split-out-helpers-for-the-presentation-hold.patch
+new file mode 100644
+--- /dev/null
++++ b/packages/multimedia/libbluray/patches/libbluray-17-bluray-split-out-helpers-for-the-presentation-hold.patch
+@@ -0,0 +0,235 @@
++From 0f3224fd762d9f2e5323db20d46d8b05995d91b7 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Tue, 3 Nov 2026 09:32:44 -0600
++Subject: [PATCH] bluray: split out helpers for the presentation hold
++
++The graphics controller call, the title time of the read position, IG
++queueing and the HDMV run loop each sit inside one caller. The
++presentation hold needs each of them from a second place. No behaviour
++change.
++---
++ src/libbluray/bluray.c                      | 95 ++++++++++++++-------
++ src/libbluray/decoders/graphics_processor.c | 21 +++--
++ src/libbluray/decoders/graphics_processor.h | 14 +++
++ 3 files changed, 93 insertions(+), 37 deletions(-)
++
++diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
++index d69ddf35b0..504d8026f6 100644
++--- a/src/libbluray/bluray.c
+++++ b/src/libbluray/bluray.c
++@@ -312,6 +312,22 @@ static uint32_t _update_time_psr_from_stream(BLURAY *bd)
++     return 0;
++ }
++ 
+++/* title time (45 kHz) of the read position */
+++static uint32_t _title_time(BLURAY *bd)
+++{
+++    uint32_t clip_pkt = 0, out_pkt = 0, out_time = 0;
+++    const NAV_CLIP *clip;
+++
+++    if (bd->title) {
+++        clip = nav_packet_search(bd->title, SPN(bd->s_pos), &clip_pkt, &out_pkt, &out_time);
+++        if (clip) {
+++            out_time += clip->title_time;
+++        }
+++    }
+++
+++    return out_time;
+++}
+++
++ static void _update_stream_psr_by_lang(BD_REGISTERS *regs,
++                                        uint32_t psr_lang, uint32_t psr_stream,
++                                        uint32_t enable_flag,
++@@ -965,7 +981,8 @@ static int64_t _seek_stream(BLURAY *bd, BD_STREAM *st,
++  * Graphics controller interface
++  */
++ 
++-static int _run_gc(BLURAY *bd, gc_ctrl_e msg, uint32_t param)
+++/* nav is set when the graphics controller replaced the HDMV object */
+++static int _run_gc_cmds(BLURAY *bd, gc_ctrl_e msg, uint32_t param, int *nav)
++ {
++     int result = -1;
++ 
++@@ -981,6 +998,9 @@ static int _run_gc(BLURAY *bd, gc_ctrl_e msg, uint32_t param)
++         if (cmds.num_nav_cmds > 0) {
++             hdmv_vm_set_object(bd->hdmv_vm, cmds.num_nav_cmds, cmds.nav_cmds);
++             bd->hdmv_suspended = !hdmv_vm_running(bd->hdmv_vm);
+++            if (nav) {
+++                *nav = 1;
+++            }
++         }
++ 
++         if (cmds.status != bd->gc_status) {
++@@ -1014,6 +1034,11 @@ static int _run_gc(BLURAY *bd, gc_ctrl_e msg, uint32_t param)
++     return result;
++ }
++ 
+++static int _run_gc(BLURAY *bd, gc_ctrl_e msg, uint32_t param)
+++{
+++    return _run_gc_cmds(bd, msg, param, NULL);
+++}
+++
++ /*
++  * disc info
++  */
++@@ -1843,22 +1868,14 @@ int64_t bd_seek_time(BLURAY *bd, uint64_t tick)
++ 
++ uint64_t bd_tell_time(BLURAY *bd)
++ {
++-    uint32_t clip_pkt = 0, out_pkt = 0, out_time = 0;
++-    const NAV_CLIP *clip;
+++    uint32_t out_time;
++ 
++     if (!bd) {
++         return 0;
++     }
++ 
++     bd_mutex_lock(&bd->mutex);
++-
++-    if (bd->title) {
++-        clip = nav_packet_search(bd->title, SPN(bd->s_pos), &clip_pkt, &out_pkt, &out_time);
++-        if (clip) {
++-            out_time += clip->title_time;
++-        }
++-    }
++-
+++    out_time = _title_time(bd);
++     bd_mutex_unlock(&bd->mutex);
++ 
++     return ((uint64_t)out_time) * 2;
++@@ -3901,6 +3918,33 @@ static int _run_hdmv(BLURAY *bd)
++     return 0;
++ }
++ 
+++/* run the HDMV VM until it suspends. returns -1 on VM error, 1 when an event is ready */
+++static int _run_hdmv_loop(BLURAY *bd, BD_EVENT *event)
+++{
+++    int loops = 0;
+++    while (!bd->hdmv_suspended) {
+++
+++        if (_run_hdmv(bd) < 0) {
+++            return -1;
+++        }
+++        if (loops++ > 100) {
+++            /* Detect infinite loops.
+++             * Broken disc may cause infinite loop between graphics controller and HDMV VM.
+++             * This happens ex. with "Butterfly on a Wheel":
+++             * Triggering unmasked "Menu Call" UO in language selection menu skips
+++             * menu system initialization code, resulting in infinite loop in root menu.
+++             */
+++            BD_DEBUG(DBG_BLURAY | DBG_CRIT, "bd_read_ext(): detected possible HDMV mode live lock (%d loops)\n", loops);
+++            _queue_event(bd, BD_EVENT_ERROR, BD_ERROR_HDMV);
+++        }
+++        if (_get_event(bd, event)) {
+++            return 1;
+++        }
+++    }
+++
+++    return 0;
+++}
+++
++ static int _read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
++ {
++     if (_get_event(bd, event)) {
++@@ -3910,27 +3954,14 @@ static int _read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
++     /* run HDMV VM ? */
++     if (bd->title_type == title_hdmv) {
++ 
++-        int loops = 0;
++-        while (!bd->hdmv_suspended) {
++-
++-            if (_run_hdmv(bd) < 0) {
++-                BD_DEBUG(DBG_BLURAY|DBG_CRIT, "bd_read_ext(): HDMV VM error\n");
++-                bd->title_type = title_undef;
++-                return -1;
++-            }
++-            if (loops++ > 100) {
++-                /* Detect infinite loops.
++-                 * Broken disc may cause infinite loop between graphics controller and HDMV VM.
++-                 * This happens ex. with "Butterfly on a Wheel":
++-                 * Triggering unmasked "Menu Call" UO in language selection menu skips
++-                 * menu system initialization code, resulting in infinite loop in root menu.
++-                 */
++-                BD_DEBUG(DBG_BLURAY | DBG_CRIT, "bd_read_ext(): detected possible HDMV mode live lock (%d loops)\n", loops);
++-                _queue_event(bd, BD_EVENT_ERROR, BD_ERROR_HDMV);
++-            }
++-            if (_get_event(bd, event)) {
++-                return 0;
++-            }
+++        int r = _run_hdmv_loop(bd, event);
+++        if (r < 0) {
+++            BD_DEBUG(DBG_BLURAY|DBG_CRIT, "bd_read_ext(): HDMV VM error\n");
+++            bd->title_type = title_undef;
+++            return -1;
+++        }
+++        if (r > 0) {
+++            return 0;
++         }
++ 
++         if (bd->gc_status & GC_STATUS_ANIMATE) {
++diff --git a/src/libbluray/decoders/graphics_processor.c b/src/libbluray/decoders/graphics_processor.c
++index 3638a6da57..4445b31b39 100644
++--- a/src/libbluray/decoders/graphics_processor.c
+++++ b/src/libbluray/decoders/graphics_processor.c
++@@ -605,13 +605,10 @@ void graphics_processor_free(GRAPHICS_PROCESSOR **p)
++     }
++ }
++ 
++-int graphics_processor_decode_ts(GRAPHICS_PROCESSOR *p,
++-                                 PG_DISPLAY_SET **s,
++-                                 uint16_t pid, uint8_t *unit, unsigned num_units,
++-                                 int64_t stc)
+++int graphics_processor_queue_ts(GRAPHICS_PROCESSOR *p,
+++                                uint16_t pid, uint8_t *unit, unsigned num_units)
++ {
++     unsigned ii;
++-    int result = 0;
++ 
++     if (pid != p->pid) {
++         m2ts_demux_free(&p->demux);
++@@ -630,6 +627,20 @@ int graphics_processor_decode_ts(GRAPHICS_PROCESSOR *p,
++         unit += 6144;
++     }
++ 
+++    return 1;
+++}
+++
+++int graphics_processor_decode_ts(GRAPHICS_PROCESSOR *p,
+++                                 PG_DISPLAY_SET **s,
+++                                 uint16_t pid, uint8_t *unit, unsigned num_units,
+++                                 int64_t stc)
+++{
+++    int result = 0;
+++
+++    if (!graphics_processor_queue_ts(p, pid, unit, num_units)) {
+++        return 0;
+++    }
+++
++     if (p->queue) {
++         result = graphics_processor_decode_pes(s, &p->queue, stc);
++     }
++diff --git a/src/libbluray/decoders/graphics_processor.h b/src/libbluray/decoders/graphics_processor.h
++index 643483a0cd..0957906cbc 100644
++--- a/src/libbluray/decoders/graphics_processor.h
+++++ b/src/libbluray/decoders/graphics_processor.h
++@@ -68,6 +68,20 @@ BD_PRIVATE void pg_display_set_free(PG_DISPLAY_SET **s);
++ BD_PRIVATE GRAPHICS_PROCESSOR *graphics_processor_init(void);
++ BD_PRIVATE void                graphics_processor_free(GRAPHICS_PROCESSOR **p);
++ 
+++/**
+++ *
+++ *  Queue data from MPEG-TS input stream for a later graphics_processor_decode_ts()
+++ *
+++ * @param p  GRAPHICS_PROCESSOR object
+++ * @param pid  mpeg-ts PID (HDMV IG/PG stream)
+++ * @param unit  mpeg-ts data
+++ * @param num_units  number of aligned units in data
+++ * @return 0 on error
+++ */
+++BD_PRIVATE int
+++graphics_processor_queue_ts(GRAPHICS_PROCESSOR *p,
+++                            uint16_t pid, uint8_t *unit, unsigned num_units);
+++
++ /**
++  *
++  *  Decode data from MPEG-TS input stream

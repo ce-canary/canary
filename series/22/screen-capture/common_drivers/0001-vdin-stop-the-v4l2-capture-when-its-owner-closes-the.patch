@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 15 Oct 2026 17:11:53 -0500
+Subject: [PATCH] vdin: stop the v4l2 capture when its owner closes the device
+
+Release returned early while vdin was started, so the vb2 queue was
+never released and stop_streaming left the hardware running. A capture
+killed while streaming left vdin1 busy until reboot.
+---
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 47 ++++++++++++++--------
+ 1 file changed, 31 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,8 +0,6 @@
+ 		return -EFAULT;
+ 
+ 	ret = vb2_ioctl_streamon(file, priv, i);
+-	vdin_v4l2_start_tvin(devp);
+-	memset(&devp->vdin_v4l2.stats, 0, sizeof(devp->vdin_v4l2.stats));
+ 	dprintk(2, "%s\n", __func__);
+ 	return 0;
+ }
+@@ -0,10 +0,6 @@
+ 	if (ret < 0)
+ 		dprintk(0, "%s vb2_ioctl_streamoff failed with %d\n", __func__, ret);
+ 
+-	ret |= vdin_v4l2_stop_tvin(devp);
+-	if (ret < 0)
+-		dprintk(0, "%s vdin_v4l2_stop_tvin failed with %d\n", __func__, ret);
+-
+ 	return ret;
+ }
+ 
+@@ -0,9 +0,12 @@
+ 
+ 	dprintk(0, "%s\n", __func__);
+ 	/*dump_stack();*/
+-	devp->afbce_flag_backup = devp->afbce_flag;
+ 
++	mutex_lock(&devp->lock);
+ 	v4l2_fh_open(file);
++	if (v4l2_fh_is_singular_file(file))
++		devp->afbce_flag_backup = devp->afbce_flag;
++	mutex_unlock(&devp->lock);
+ 
+ 	INIT_LIST_HEAD(&devp->buf_list);
+ 
+@@ -0,21 +0,21 @@
+ 	int plane_idx = 0;
+ 	struct vdin_dev_s *devp = video_drvdata(file);
+ 	struct vdin_set_canvas_addr_s *p_addr = NULL;
++	bool owner, last;
+ 
+ 	dprintk(0, "%s\n", __func__);
+ 
+ 	if (IS_ERR_OR_NULL(devp))
+ 		return -EFAULT;
+ 
+-	if (devp->flags & VDIN_FLAG_DEC_STARTED) {
+-		dprintk(0, "%s error VDIN_FLAG_DEC_STARTED\n", __func__);
+-		return -EPERM;
+-	}
++	mutex_lock(&devp->lock);
++	owner = devp->vb_queue.owner == file->private_data;
++	last = v4l2_fh_is_singular_file(file);
+ 
+ 	/*release que*/
+-	ret = vb2_fop_release(file);
++	ret = _vb2_fop_release(file, NULL);
+ 
+-	if (devp->work_mode == VDIN_WORK_MD_V4L) {
++	if (!devp->vb_queue.owner && devp->work_mode == VDIN_WORK_MD_V4L) {
+ 		for (i = 0; i < VDIN_CANVAS_MAX_CNT; i++) {
+ 			for (plane_idx = 0;
+ 				plane_idx < devp->v4l2_fmt.fmt.pix_mp.num_planes;
+@@ -0,14 +0,19 @@
+ 			}
+ 		}
+ 		memset(devp->st_vdin_set_canvas_addr, 0, sizeof(devp->st_vdin_set_canvas_addr));
++	}
++	if (!owner && !last)
++		goto unlock;
+ 
++	if (devp->work_mode == VDIN_WORK_MD_V4L)
+ 		devp->afbce_flag = devp->afbce_flag_backup;
+-	}
+ 	devp->work_mode = VDIN_WORK_MD_NORMAL;
+ #ifdef CONFIG_AMLOGIC_MEDIA_TVIN_HDMI
+ 	if (IS_HDMI_SRC(devp->v4l2_port_cur))
+ 		rx_update_edid_callback(devp->v4l2_port_cur, RX_EDID_DEFAULT);
+ #endif
++unlock:
++	mutex_unlock(&devp->lock);
+ 	return ret;
+ }
+ 
+@@ -0,7 +0,20 @@
+ 
+ static int vdin_v4l2_start_streaming(struct vdin_dev_s *devp)
+ {
+-	return 0;
++	int ret;
++
++	memset(&devp->vdin_v4l2.stats, 0, sizeof(devp->vdin_v4l2.stats));
++
++	ret = vdin_v4l2_start_tvin(devp);
++	if (ret) {
++		/* vb2 skips stop_streaming after a failed start */
++		mutex_lock(&devp->fe_lock);
++		if (!(devp->flags & VDIN_FLAG_DEC_STARTED))
++			vdin_close_fe(devp);
++		mutex_unlock(&devp->fe_lock);
++	}
++
++	return ret;
+ }
+ 
+ /*
+@@ -0,7 +0,7 @@
+ 	struct vdin_dev_s *devp = vb2_get_drv_priv(vq);
+ 
+ 	dprintk(2, "%s\n", __func__);
+-	/* TODO: stop DMA */
++	vdin_v4l2_stop_tvin(devp);
+ 
+ 	devp->vb_queue.streaming = false;
+ 

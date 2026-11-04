@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 30 Oct 2026 09:38:39 -0500
+Subject: [PATCH] AMLCodec: end a drain that gets no frame in the decoder
+ timeout
+
+A drain waits until every picture handed to the renderer comes back
+and has no bound of its own. A picture that does not return keeps the
+drain, and the player waiting on it, going until the 40 s synchronize
+timeout. The decoder also idles while a drained picture is held, so
+input after a long still was reset as a decoder timeout.
+---
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  | 21 +++++++++++++++++++
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.h    |  3 ++-
+ 2 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,6 +0,15 @@
+   }
+   else if (m_drain && m_buffer_level_ready && (queued_frames == 0))
+     return CDVDVideoCodec::VC_EOF;
++  else if (m_drain && m_buffer_level_ready && m_speed != DVD_PLAYSPEED_PAUSE &&
++           std::chrono::system_clock::now() - std::max(m_tp_drain, m_tp_last_frame) >
++               std::chrono::seconds(m_decoder_timeout))
++  {
++    CLog::Log(LOGWARNING, "CAMLCodec::GetPicture: drain ends without frame, {} queued",
++              queued_frames);
++    m_tp_drain = std::chrono::system_clock::now();
++    return CDVDVideoCodec::VC_EOF;
++  }
+   else if ((m_drain && m_buffer_level_ready) || (buffer_level > (streambuffer ? 100.0f : 10.0f)))
+     return CDVDVideoCodec::VC_NONE;
+   else if (ret != EAGAIN || elapsed_since_last_frame > std::chrono::seconds(m_decoder_timeout))
+@@ -0,6 +0,18 @@
+   return CDVDVideoCodec::VC_BUFFER;
+ }
+ 
++void CAMLCodec::SetDrain(bool drain)
++{
++  // a held picture is not decoder silence, but a drain that times out counts up to its timeout
++  const auto now = std::chrono::system_clock::now();
++  if (drain && !m_drain)
++    m_tp_drain = now;
++  else if (!drain && m_drain)
++    m_tp_last_frame += now - std::max(m_tp_drain, m_tp_last_frame);
++
++  m_drain = drain;
++}
++
+ void CAMLCodec::SetSpeed(int speed)
+ {
+   if (m_speed == speed)
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+@@ -0,7 +0,7 @@
+   CDVDVideoCodec::VCReturn GetPicture(VideoPicture* pVideoPicture);
+ 
+   void          SetSpeed(int speed);
+-  void          SetDrain(bool drain){m_drain = drain;};
++  void          SetDrain(bool drain);
+   void          SetDoviZeroLevel5(bool value);
+   void          SetVideoRect(const CRect &SrcRect, const CRect &DestRect);
+   void          SetVideoRate(int videoRate);
+@@ -0,6 +0,7 @@
+   CProcessInfo &m_processInfo;
+   int m_decoder_timeout;
+   std::chrono::time_point<std::chrono::system_clock> m_tp_last_frame;
++  std::chrono::time_point<std::chrono::system_clock> m_tp_drain;
+ 
+   bool            m_buffer_level_ready;
+   float           m_minimum_buffer_level;

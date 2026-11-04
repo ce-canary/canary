@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 00:28:49 -0500
+Subject: [PATCH] RenderManager: release no frame early to the vsync presenter
+
+With more than one vsync per frame, the next picture is released up to
+one vsync before its time so the renderer can blend it over the past
+frame. The vsync presenter hands that picture straight to the video
+plane, which shows it a vsync early. No renderer behind the vsync
+presenter draws the past frame.
+---
+ xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,7 +0,7 @@
+ 
+     m_playerPort->UpdateRenderBuffers(m_queued.size(), m_discard.size(), m_free.size());
+   }
+-  else if (!combined && renderPts > (nextFramePts - frametime))
++  else if (!combined && !m_presenting && renderPts > (nextFramePts - frametime))
+   {
+     m_lateframes = 0;
+     m_presentstep = PRESENT_FLIP;

@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 2 Nov 2026 13:53:53 -0600
+Subject: [PATCH] ActiveAESink: read the device delay when a buffer writes
+ nothing
+
+A PCM buffer emptied by a sync skip or a skipped passthrough packet
+writes no frames, and the sink reported a delay of zero for it. The
+play timeout then fired at once and wrote one period of keep-alive
+silence into the running stream. The audio stayed late by that period,
+below every correction threshold.
+---
+ xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
+@@ -0,6 +0,10 @@
+       m_stats->UpdateSinkDelay(status, samples->pool ? written : 0);
+   }
+ 
++  // a skipped packet or an emptied buffer writes nothing, the device still holds what it had
++  if (totalFrames == 0)
++    m_sink->GetDelay(status);
++
+   if (m_requestedFormat.m_dataFormat == AE_FMT_RAW)
+     m_stats->UpdateSinkDelay(status, rawPackets, rawPauseMs);
+ 

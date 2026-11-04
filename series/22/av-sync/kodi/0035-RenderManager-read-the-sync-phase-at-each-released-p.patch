@@ -1,0 +1,361 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 00:02:03 -0500
+Subject: [PATCH] RenderManager: read the sync phase at each released picture
+
+The vsync presenter publishes the clock sync phase from an average of
+31 wakes, steps and timeouts included. A seek, pause or display reset
+keeps the old phase until the next average, and audio starts against
+it.
+---
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  |  3 +
+ .../VideoRenderers/RenderManager.cpp          | 82 +++++++++++++++++--
+ .../VideoRenderers/RenderManager.h            |  8 ++
+ xbmc/cores/VideoPlayer/VsyncPhase.cpp         | 39 +++++++--
+ xbmc/cores/VideoPlayer/VsyncPhase.h           | 17 +++-
+ 5 files changed, 130 insertions(+), 19 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,6 +0,9 @@
+   }
+ 
+   SetPollDevice(-1);
++  // the vsync presenter reads no clock sync phase until a picture is queued or released again
++  if (m_hints.pClock)
++    m_hints.pClock->GetVsyncPhase().EndVsyncPhase();
+ 
+   // never leave vcodec ff/rw or paused.
+   if (m_speed != DVD_PLAYSPEED_NORMAL)
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,6 +0,7 @@
+   m_errCount = 0;
+   m_syncOffset = 0;
+   m_enabled = false;
++  m_phasePeriod = 0;
+ }
+ 
+ CRenderManager::CRenderManager(CDVDClock &clock, IRenderMsg *player) :
+@@ -0,8 +0,12 @@
+ void CRenderManager::StartPresentThread()
+ {
+   if (m_presentThread || !m_pRenderer || !m_pRenderer->StartVsyncPresent())
++  {
++    m_dvdClock.SetVsyncAdjust(0);
+     return;
++  }
+ 
++  m_dvdClock.GetVsyncPhase().SetVsyncPhasePending();
+   m_presentThread = std::make_unique<CPresentThread>(*this);
+   m_presenting = true;
+   m_presentThread->Create();
+@@ -0,6 +0,7 @@
+   m_pRenderer->StopVsyncPresent();
+   m_presentThread->StopThread(true);
+   m_presentThread.reset();
++  m_dvdClock.SetVsyncAdjust(0);
+ }
+ 
+ void CRenderManager::PresentFromVsync()
+@@ -0,7 +0,9 @@
+   const int planeSource = m_planeSource;
+   // by vsync RDMA a frame queued now goes live a vsync after a GUI flip made now
+   m_planeSource = m_presentsource;
++  m_releaseClockTaken = false;
+   PrepareNextStep();
++  const bool released = m_presentstep == PRESENT_FRAME;
+ 
+   // frames go back to the plane in the order it handed them out, so skipped ones go first
+   for (int idx : m_discard)
+@@ -0,10 +0,51 @@
+       ++it;
+   }
+ 
++  ReadVsyncPhase(released);
++
+   m_playerPort->UpdateRenderBuffers(m_queued.size(), m_discard.size(), m_free.size());
+   m_presentevent.notifyAll();
+ }
+ 
++void CRenderManager::ReadVsyncPhase(bool released)
++{
++  // a step is followed by a vsync or a timeout within the liveness bound
++  const CBaseRenderer::VsyncPresentWake wake = m_pRenderer->GetVsyncPresentWake();
++  if (!m_clockSync.m_enabled || wake == CBaseRenderer::VsyncPresentWake::STEP)
++    return;
++
++  // a picture of the lattice gives the same phase at any vsync, so a vsync that releases nothing
++  // reads it only to restart
++  const int phaseId = m_dvdClock.GetVsyncPhase().GetVsyncPhaseId();
++  const bool restart = released || !m_queued.empty();
++  if (!released && phaseId != -1 && (phaseId != 0 || !restart))
++    return;
++
++  int epoch = m_releaseClockEpoch;
++  double clock = m_releaseClock;
++  double latency = m_displayLatency;
++  if (!m_releaseClockTaken)
++  {
++    clock = m_dvdClock.GetClock(epoch);
++    latency = DVD_MSEC_TO_TIME(CalcReleaseLead() - m_videoDelay);
++  }
++
++  // only a vsync wake knows the picture on screen
++  double pts = DVD_NOPTS_VALUE;
++  if (wake == CBaseRenderer::VsyncPresentWake::VSYNC)
++  {
++    if (released)
++      pts = m_Queue[m_presentsource].pts;
++    else if (!m_queued.empty())
++      pts = m_Queue[m_queued.front()].pts;
++    else if (m_planeSource >= 0 && m_planeSource != m_offTimelineSource)
++      pts = m_Queue[m_planeSource].pts;
++  }
++
++  m_clockSync.m_syncOffset = m_dvdClock.GetVsyncPhase().ApplyVsyncPhaseReading(
++      pts != DVD_NOPTS_VALUE ? clock + latency - pts : DVD_NOPTS_VALUE, epoch, restart);
++}
++
+ void CRenderManager::PreInit()
+ {
+   {
+@@ -0,7 +0,9 @@
+   if (!m_showVideo && !m_forceNext)
+     return;
+ 
+-  const double frameOnScreen = m_dvdClock.GetClock();
++  const double frameOnScreen = m_dvdClock.GetClock(m_releaseClockEpoch);
++  m_releaseClock = frameOnScreen;
++  m_releaseClockTaken = true;
+   const double frametime =
+       1.0 / static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()) *
+       DVD_TIME_BASE;
+@@ -0,7 +0,7 @@
+   const double nextFramePts =
+       m_dvdClock.GetClockSpeed() < 0 ? renderPts : m_Queue[m_queued.front()].pts;
+ 
+-  if (m_clockSync.m_enabled)
++  if (m_clockSync.m_enabled && !m_presenting)
+   {
+     double err = fmod(renderPts - nextFramePts, frametime);
+     m_clockSync.m_error += err;
+@@ -0,6 +0,12 @@
+     if (!isPaused)
+       renderPts += frametime / 2 - m_clockSync.m_syncOffset;
+   }
++  else if (m_clockSync.m_enabled)
++  {
++    // the vsync thread reads the phase at the vsync that releases a picture
++    if (!isPaused)
++      renderPts += m_clockSync.m_phasePeriod / 2 - m_clockSync.m_syncOffset;
++  }
+   else
+   {
+     m_dvdClock.SetVsyncAdjust(0);
+@@ -0,6 +0,7 @@
+ {
+   // refresh rate can be a multiple of video fps
+   double diff = 1.0;
++  double framePeriod = 0;
+ 
+   if (m_fps != 0)
+   {
+@@ -0,6 +0,7 @@
+     {
+       fps *= clockspeed;
+     }
++    framePeriod = DVD_TIME_BASE / fps;
+ 
+     diff = static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()) / fps;
+     if (diff < 1.0)
+@@ -0,13 +0,20 @@
+ 
+   if (diff < 0.0005)
+   {
+-    m_clockSync.m_enabled = true;
++    double phasePeriod =
++        DVD_TIME_BASE /
++        static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS());
+     if (m_presenting)
+-      m_dvdClock.GetVsyncPhase().SetPhasePeriod(
+-          DVD_TIME_BASE /
+-          static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()));
+-    else
+-      m_dvdClock.GetVsyncPhase().SetPhasePeriod(0);
++      phasePeriod = std::min(phasePeriod, framePeriod);
++    // a phase read on another grid or before clock sync was on does not hold
++    if (m_presenting && (!m_clockSync.m_enabled || phasePeriod != m_clockSync.m_phasePeriod))
++    {
++      m_clockSync.m_syncOffset = 0;
++      m_dvdClock.GetVsyncPhase().SetVsyncPhasePending();
++    }
++    m_clockSync.m_enabled = true;
++    m_clockSync.m_phasePeriod = phasePeriod;
++    m_dvdClock.GetVsyncPhase().SetPhasePeriod(m_presenting ? phasePeriod : 0);
+   }
+   else
+   {
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -0,6 +0,8 @@
+   void StartPresentThread();
+   void StopPresentThread();
+   void PresentFromVsync();
++  //! Vsync thread: reads the clock sync phase once the vsync step decided its release
++  void ReadVsyncPhase(bool released);
+   int GuiSource() const { return m_presenting ? m_guiPresentSource : m_presentsource; }
+ 
+   CBaseRenderer *m_pRenderer = nullptr;
+@@ -0,6 +0,7 @@
+     int m_errCount;
+     double m_syncOffset;
+     bool m_enabled;
++    double m_phasePeriod;
+   };
+   CClockSync m_clockSync;
+ 
+@@ -0,4 +0,9 @@
+   //! Vsync thread, under m_presentlock: the pts of m_planeSource once it is a new frame
+   double m_displayedPts{DVD_NOPTS_VALUE};
+   int m_offTimelineSource{-1};
++  //! Under m_presentlock: the clock and its epoch of the last release decision, and whether
++  //! the current vsync step made one
++  double m_releaseClock{0.0};
++  int m_releaseClockEpoch{0};
++  bool m_releaseClockTaken{false};
+ };
+diff --git a/xbmc/cores/VideoPlayer/VsyncPhase.cpp b/xbmc/cores/VideoPlayer/VsyncPhase.cpp
+--- a/xbmc/cores/VideoPlayer/VsyncPhase.cpp
++++ b/xbmc/cores/VideoPlayer/VsyncPhase.cpp
+@@ -0,6 +0,7 @@
+ #include "cores/VideoPlayer/Interface/TimingConstants.h"
+ #include "utils/log.h"
+ 
++#include <algorithm>
+ #include <cmath>
+ #include <mutex>
+ 
+@@ -0,7 +0,9 @@
+ double CVsyncPhase::GetPhasePeriod() const
+ {
+   std::unique_lock lock(m_clock.m_critSection);
+-  return m_clock.m_speedAdjust != 0 ? 0.0 : m_phasePeriod;
++  if (m_state == State::NONE || m_clock.m_speedAdjust != 0)
++    return 0.0;
++  return m_phasePeriod;
+ }
+ 
+ void CVsyncPhase::SetVsyncPhasePending()
+@@ -0,6 +0,18 @@
+   m_state = State::PENDING;
+ }
+ 
++void CVsyncPhase::EndVsyncPhase()
++{
++  std::unique_lock lock(m_clock.m_critSection);
++
++  m_phasePeriod = 0;
++  if (m_state == State::NONE)
++    return;
++
++  m_clock.m_vSyncAdjust = 0;
++  m_state = State::NONE;
++}
++
+ double CVsyncPhase::ApplyVsyncPhaseReading(double reading, int epoch, bool restart)
+ {
+   std::unique_lock lock(m_clock.m_critSection);
+@@ -0,6 +0,9 @@
+   if (reading == DVD_NOPTS_VALUE || m_clock.m_speedAdjust != 0 ||
+       m_clock.m_systemUsed != m_clock.m_systemFrequency || m_phasePeriod <= 0)
+   {
++    // the clock runs off the display while the speed is adjusted, so the mean starts again
++    if (m_clock.m_speedAdjust != 0)
++      m_readings = 0;
+     if (m_state == State::PENDING || m_epoch != m_clock.m_clockEpoch)
+     {
+       m_clock.m_vSyncAdjust = 0;
+@@ -0,25 +0,32 @@
+   if (epoch != m_clock.m_clockEpoch || m_clock.m_bReset || m_clock.m_pauseClock)
+     return -m_clock.m_vSyncAdjust;
+ 
+-  // the lattice branch nearest to the phase held
+   double vsyncPhase = -m_clock.m_vSyncAdjust;
+   const double step = reading - vsyncPhase;
+-  vsyncPhase += step - m_phasePeriod * std::floor(step / m_phasePeriod + 0.5);
++  if (m_state != State::PUBLISHED || m_epoch != m_clock.m_clockEpoch)
++    m_readings = 0;
++  m_readings = std::min(m_readings + 1, PHASE_READINGS);
++  // the lattice branch nearest to the phase held, averaged so off-lattice pictures barely move it
++  vsyncPhase += (step - m_phasePeriod * std::floor(step / m_phasePeriod + 0.5)) / m_readings;
++
++  SetVsyncPhase(vsyncPhase);
++  PublishVsyncPhase();
++  return -m_clock.m_vSyncAdjust;
++}
+ 
++void CVsyncPhase::SetVsyncPhase(double vsyncPhase)
++{
+   // a wrap moves the clock by a period so the clock minus the phase stays put
+   if (std::abs(vsyncPhase) >= m_phasePeriod)
+   {
+     const double wrap = vsyncPhase > 0 ? m_phasePeriod : -m_phasePeriod;
+     m_clock.m_iDisc -= wrap;
+     vsyncPhase -= wrap;
+-    CLog::Log(LOGDEBUG,
+-              "CVsyncPhase::ApplyVsyncPhaseReading - phase wrap, clock:{:.3f} wrap:{:.3f}",
++    CLog::Log(LOGDEBUG, "CVsyncPhase::SetVsyncPhase - phase wrap, clock:{:.3f} wrap:{:.3f}",
+               m_clock.GetClock() / DVD_TIME_BASE, wrap / DVD_TIME_BASE);
+   }
+ 
+   m_clock.m_vSyncAdjust = -vsyncPhase;
+-  PublishVsyncPhase();
+-  return -m_clock.m_vSyncAdjust;
+ }
+ 
+ void CVsyncPhase::PublishVsyncPhase()
+diff --git a/xbmc/cores/VideoPlayer/VsyncPhase.h b/xbmc/cores/VideoPlayer/VsyncPhase.h
+--- a/xbmc/cores/VideoPlayer/VsyncPhase.h
++++ b/xbmc/cores/VideoPlayer/VsyncPhase.h
+@@ -0,13 +0,17 @@
+   //! The display vsync period the clock sync holds the clock to, 0 when off or without the
+   //! vsync presenter
+   void SetPhasePeriod(double period);
+-  //! The phase period, 0 while the speed is adjusted
++  //! The phase period, 0 without a phase or while the speed is adjusted
+   double GetPhasePeriod() const;
+   void SetVsyncPhasePending();
++  //! Ends a pending or published phase and clears the phase period; a vsync adjust set
++  //! without a phase stays
++  void EndVsyncPhase();
+   //! Takes the reading of the phase made with the clock of `epoch`, DVD_NOPTS_VALUE for none,
+-  //! and returns the phase that holds. A phase not read at the current epoch ends when no reading
+-  //! can come; an ended one starts again from a reading only with `restart`. At a whole phase
+-  //! period off, the clock and the phase move by it together.
++  //! and returns the phase that holds: a running mean of the readings since the last restart,
++  //! the newest weighted at least as stock weighs one of its 31. A phase not read at the current
++  //! epoch ends when no reading can come; an ended one starts again from a reading only with
++  //! `restart`. At a whole phase period off, the clock and the phase move by it together.
+   double ApplyVsyncPhaseReading(double reading, int epoch, bool restart);
+   //! 0 without a phase, -1 while pending or published at an older epoch, else an id that
+   //! changes at a new epoch and after pending or none
+@@ -0,10 +0,15 @@
+ 
+   void Reset() { m_state = State::NONE; }
+   void PublishVsyncPhase();
++  void SetVsyncPhase(double vsyncPhase);
++
++  // the readings stock clock sync averages
++  static constexpr int PHASE_READINGS = 31;
+ 
+   CDVDClock& m_clock;
+   double m_phasePeriod{0.0};
+   State m_state{State::NONE};
+   int m_epoch{0};
+   int m_generation{0};
++  int m_readings{0};
+ };

@@ -1,0 +1,188 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 10:33:03 -0600
+Subject: [PATCH] libbluray: resume an HDMV title end once it is presented
+
+The HDMV program resumes in the read that reaches the end of a title,
+so the next playlist opens while the player still shows its last
+pictures. Under the hold a jar without the hold methods got the BD-J
+end only on a later data read, which the player no longer makes, and
+END_OF_TITLE did not tell the player whether the end was held.
+---
+ ...-HDMV-title-end-once-it-is-presented.patch | 168 ++++++++++++++++++
+ 1 file changed, 168 insertions(+)
+ create mode 100644 packages/multimedia/libbluray/patches/libbluray-20-bluray-resume-an-HDMV-title-end-once-it-is-presented.patch
+
+diff --git a/packages/multimedia/libbluray/patches/libbluray-20-bluray-resume-an-HDMV-title-end-once-it-is-presented.patch b/packages/multimedia/libbluray/patches/libbluray-20-bluray-resume-an-HDMV-title-end-once-it-is-presented.patch
+new file mode 100644
+--- /dev/null
++++ b/packages/multimedia/libbluray/patches/libbluray-20-bluray-resume-an-HDMV-title-end-once-it-is-presented.patch
+@@ -0,0 +0,168 @@
++From 3005b5c5541342da11f462f90d6cab7df2b2e5c4 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Tue, 3 Nov 2026 09:42:33 -0600
++Subject: [PATCH] bluray: resume an HDMV title end once it is presented
++
++The HDMV program resumes in the read that reaches the end of a title,
++so the next playlist opens while the player still shows its last
++pictures. Under the hold a jar without the hold methods got the BD-J
++end only on a later data read, which the player no longer makes, and
++END_OF_TITLE did not tell the player whether the end was held.
++---
++ src/libbluray/bluray.c | 48 +++++++++++++++++++++++++++++++-----------
++ src/libbluray/bluray.h |  9 ++++++++
++ 2 files changed, 45 insertions(+), 12 deletions(-)
++
++diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
++index 85ea472dbe..ec0664bffb 100644
++--- a/src/libbluray/bluray.c
+++++ b/src/libbluray/bluray.c
++@@ -1572,7 +1572,12 @@ static BD_HELD_EVENT *_pres_push(BLURAY *bd)
++         }
++     }
++ 
+++    /* the end of the title stays last */
++     held = &bd->pres_events[bd->pres_first + bd->pres_count++];
+++    if (bd->pres_count > 1 && held[-1].kind == PRES_END) {
+++        held[0] = held[-1];
+++        held--;
+++    }
++     memset(held, 0, sizeof(*held));
++     held->armed = bd->pres_start != 1;
++     return held;
++@@ -1674,7 +1679,11 @@ static void _gc_init_start(BLURAY *bd)
++ static void _gc_run_or_hold(BLURAY *bd, gc_ctrl_e ctrl, uint32_t param)
++ {
++     if (bd->gc_held) {
++-        _gc_hold(bd, ctrl, param, bd->pres_events[bd->pres_first + bd->pres_count - 1].due);
+++        unsigned last = bd->pres_first + bd->pres_count - 1;
+++        if (bd->pres_events[last].kind == PRES_END) {
+++            last--;
+++        }
+++        _gc_hold(bd, ctrl, param, bd->pres_events[last].due);
++     } else {
++         _run_gc(bd, ctrl, param);
++     }
++@@ -1746,7 +1755,7 @@ static void _pres_hold_end(BLURAY *bd)
++     BD_HELD_EVENT *held = NULL;
++ 
++     _pres_data_read(bd);
++-    if (bd->pres_read) {
+++    if (bd->pres_read && (_pres_holding(bd) || _gc_holding(bd))) {
++         held = _pres_push(bd);
++     }
++ 
++@@ -1755,7 +1764,7 @@ static void _pres_hold_end(BLURAY *bd)
++         held->param = bd_psr_read(bd->regs, PSR_PLAYLIST);
++         held->due = bd->title->duration;
++         held->kind = PRES_END;
++-    } else {
+++    } else if (bd->title_type == title_bdj) {
++         /* the application gets a pending start ahead of the end */
++         if (bd->pres_start || bd->pres_seek) {
++             bd->pres_start = 0;
++@@ -1763,6 +1772,9 @@ static void _pres_hold_end(BLURAY *bd)
++             bdj_presentation_start(bd->bdjava);
++         }
++         bdj_process_event(bd->bdjava, BDJ_EVENT_END_OF_PLAYLIST, bd_psr_read(bd->regs, PSR_PLAYLIST));
+++    } else {
+++        /* the end read resumes the HDMV program */
+++        return;
++     }
++     bd->end_of_playlist |= 2;
++ }
++@@ -1773,6 +1785,19 @@ static int _pres_end_held(BLURAY *bd)
++            bd->pres_events[bd->pres_first + bd->pres_count - 1].kind == PRES_END;
++ }
++ 
+++/* the END_OF_TITLE param tells the player whether the end is held */
+++static void _end_of_title(BLURAY *bd)
+++{
+++    /* a player that holds the end reads no further, so a BD-J side without the hold
+++     * gets the end here too */
+++    if (!(bd->end_of_playlist & 2) &&
+++        (_gc_holding(bd) || (bd->pres_hold && bd->title_type == title_bdj))) {
+++        _pres_hold_end(bd);
+++    }
+++    _queue_event(bd, BD_EVENT_END_OF_TITLE, _pres_end_held(bd));
+++    bd->end_of_playlist |= 1;
+++}
+++
++ /* deliver what is due at the presented title time (1/90000 s) */
++ static void _pres_release(BLURAY *bd, int64_t title_time)
++ {
++@@ -1803,6 +1828,10 @@ static void _pres_release(BLURAY *bd, int64_t title_time)
++         bd->pres_count--;
++         if (held.kind == PRES_GC) {
++             _gc_run_held(bd, &held, NULL);
+++        } else if (held.kind == PRES_END && bd->title_type == title_hdmv) {
+++            /* the program runs on the next read */
+++            hdmv_vm_resume(bd->hdmv_vm);
+++            bd->hdmv_suspended = !hdmv_vm_running(bd->hdmv_vm);
++         } else {
++             bdj_process_event(bd->bdjava, held.ev, held.param);
++         }
++@@ -2569,8 +2598,7 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len)
++                     st->clip = nav_next_clip(bd->title, st->clip);
++                     if (st->clip == NULL) {
++                         BD_DEBUG(DBG_BLURAY | DBG_STREAM, "End of title\n");
++-                        _queue_event(bd, BD_EVENT_END_OF_TITLE, 0);
++-                        bd->end_of_playlist |= 1;
+++                        _end_of_title(bd);
++                         return 0;
++                     }
++                     _pres_set_due(bd, st->clip->title_time);
++@@ -2666,8 +2694,7 @@ static int _bd_read_locked(BLURAY *bd, unsigned char *buf, int len)
++     if (st->clip == NULL) {
++         // We previously reached the last clip.  Nothing
++         // else to read.
++-        _queue_event(bd, BD_EVENT_END_OF_TITLE, 0);
++-        bd->end_of_playlist |= 1;
+++        _end_of_title(bd);
++         return 0;
++     }
++ 
++@@ -4472,14 +4499,11 @@ static int _read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
++         bd->pres_read = 1;
++         _pres_data_read(bd);
++     }
++-    if (bytes == 0 && !bd->st0.clip && !(bd->end_of_playlist & 2) && _pres_holding(bd)) {
++-        _pres_hold_end(bd);
++-    }
++ 
++     if (bytes == 0) {
++ 
++-        // if no next clip (=end of title), resume HDMV VM
++-        if (!bd->st0.clip && bd->title_type == title_hdmv) {
+++        // if no next clip (=end of title), resume HDMV VM unless the end is held
+++        if (!bd->st0.clip && bd->title_type == title_hdmv && !(bd->end_of_playlist & 2)) {
++             hdmv_vm_resume(bd->hdmv_vm);
++             bd->hdmv_suspended = !hdmv_vm_running(bd->hdmv_vm);
++             BD_DEBUG(DBG_BLURAY, "bd_read_ext(): reached end of playlist. hdmv_suspended=%d\n", bd->hdmv_suspended);
++diff --git a/src/libbluray/bluray.h b/src/libbluray/bluray.h
++index 0ee3f841d0..c608a62a69 100644
++--- a/src/libbluray/bluray.h
+++++ b/src/libbluray/bluray.h
++@@ -1131,6 +1131,11 @@ BD_PUBLIC void bd_set_scr(BLURAY *bd, int64_t pts);
++ /* a seek raises the end of the playlist again */
++ #define BD_SEEK_REARMS_PLAYLIST_END 1
++ 
+++/* the end of a title is held until it is presented. BD-J needs a BD-J implementation that
+++ * supports the hold, else the end is delivered at once.
+++ * BD_EVENT_END_OF_TITLE carries 1 while the end is held and 0 otherwise */
+++#define BD_PRESENTED_TITLE_END 1
+++
++ /* everything read so far has been presented */
++ #define BD_PRESENTED_ALL INT64_MAX
++ 
++@@ -1150,6 +1155,10 @@ BD_PUBLIC void bd_set_scr(BLURAY *bd, int64_t pts);
++  *  until the first picture of the next playlist is reported, unless a seek or resume right
++  *  after the open removes it first.
++  *
+++ *  The end of a title is held until it is presented when data was read since the playback
+++ *  start, seek or still: BD-J END_OF_PLAYLIST is delivered, or the HDMV program resumes and
+++ *  runs on the next bd_read_ext(), once a time at the end or BD_PRESENTED_ALL is reported.
+++ *
++  *  Must be called before bd_play(). Without a BD-J implementation that supports it the
++  *  BD-J notifications are not held; HDMV menu pages are held without BD-J.
++  *

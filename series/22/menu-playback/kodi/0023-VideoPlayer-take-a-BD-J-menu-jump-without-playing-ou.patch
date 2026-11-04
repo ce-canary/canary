@@ -1,0 +1,175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 17 Oct 2026 21:59:52 -0500
+Subject: [PATCH] VideoPlayer: take a BD-J menu jump without playing out the
+ item
+
+A BD-J program answers a menu key with a seek that the read reports as
+a play item or seek with no data. The player then plays the old queue
+out before it opens the new item, seconds after the key.
+---
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 34 ++++++++++++++++++-
+ .../DVDInputStreams/DVDInputStreamBluray.h    |  5 +++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 14 ++++++++
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  1 +
+ 4 files changed, 53 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,11 +0,15 @@
+   case BD_EVENT_SECONDARY_VIDEO:
+   case BD_EVENT_SECONDARY_VIDEO_SIZE:
+   case BD_EVENT_SECONDARY_VIDEO_STREAM:
+-  case BD_EVENT_PLAYMARK:
+   case BD_EVENT_KEY_INTEREST_TABLE:
+   case BD_EVENT_UO_MASK_CHANGED:
+     break;
+ 
++  case BD_EVENT_PLAYMARK:
++    // a seek the disc program makes at a mark is not the answer to a key
++    m_menuInput = false;
++    break;
++
+   case BD_EVENT_PLAYLIST_STOP:
+     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - BD_EVENT_PLAYLIST_STOP: flush buffers");
+     m_player->OnDiscNavResult(nullptr, BD_EVENT_PLAYLIST_STOP);
+@@ -0,6 +0,14 @@
+         return result;
+       }
+ 
++      // the disc program answers an activation key with its next seek, play item, playlist or title
++      const bool menuJump =
++          m_menuInput && (m_event.event == BD_EVENT_SEEK || m_event.event == BD_EVENT_TITLE ||
++                          m_event.event == BD_EVENT_PLAYLIST ||
++                          (m_event.event == BD_EVENT_PLAYITEM && !joinsInLine()));
++      if (menuJump)
++        m_menuInput = false;
++
+       /* Check for holding events */
+       switch(m_event.event) {
+         case BD_EVENT_PLAYITEM:
+@@ -0,6 +0,10 @@
+             // a hold without data keeps the time the demuxer being closed already has
+             if (result == 0)
+               m_dispTimeBeforeRead = dispTimeHeld;
++            // a BD-J play item or seek with no data answers the key and leaves the item unplayed
++            if (result == 0 && menuJump && m_title && m_title->bdj &&
++                (m_event.event == BD_EVENT_PLAYITEM || m_event.event == BD_EVENT_SEEK))
++              m_itemAbandoned = true;
+             // the read starts the new play item, which the demuxer being closed must not consume
+             if ((m_event.event == BD_EVENT_PLAYITEM || m_event.event == BD_EVENT_DISCONTINUITY) &&
+                 result > 0 && !m_hasMVCExtension)
+@@ -0,6 +0,8 @@
+ 
+   if (titleEndWait)
+     m_endedTitleTime = 0;
++  m_menuInput = false;
++  m_itemAbandoned = false;
+   m_hold = HOLD_DATA;
+   m_nextClipKnown = clipKnown && m_clip;
+   // the next demuxer reads on from m_readPos, so no lookup reaches the spans before its first one
+@@ -0,11 +0,22 @@
+   return m_clip;
+ }
+ 
++bool CDVDInputStreamBluray::TakeItemAbandoned()
++{
++  const bool abandoned = m_itemAbandoned;
++  m_itemAbandoned = false;
++  return abandoned;
++}
++
+ void CDVDInputStreamBluray::UserInput(bd_vk_key_e vk)
+ {
+   if(m_bd == nullptr || !m_navmode)
+     return;
+ 
++  // only an activation key makes the disc program jump away from the item
++  if (vk == BD_VK_ENTER || vk == BD_VK_POPUP || vk == BD_VK_ROOT_MENU ||
++      (vk >= BD_VK_0 && vk <= BD_VK_9))
++    m_menuInput = true;
+   int ret = bd_user_input(m_bd, -1, vk);
+   if (ret < 0)
+   {
+@@ -0,6 +0,7 @@
+     return false;
+   }
+ 
++  m_menuInput = true;
+   if (bd_user_input(m_bd, -1, BD_VK_MOUSE_ACTIVATE) >= 0)
+     return true;
+ 
+@@ -0,6 +0,8 @@
+     return false;
+   }
+ 
++  m_menuInput = true;
++
+   // we can not use this event to track a possible popup menu state since bd-j blu-rays can
+   // toggle the popup menu on their own without firing this event, and if they do this, our
+   // internal tracking state would be wrong. So just process and return.
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,9 @@
+   bool IsTitleEnded() const { return m_endedTitleTime > 0; }
+   bool IsTitleEndWait() const { return m_titleEndWait; }
+ 
++  //! whether a menu action made the disc program leave the item being played out, reset by the call
++  bool TakeItemAbandoned();
++
+   //! the clip the item opened by the last NextStream starts with, when its events named it
+   const BLURAY_CLIP_INFO* GetNextItemClip() const;
+ 
+@@ -0,6 +0,8 @@
+     bool m_hasMVCExtension{false};
+     int m_endedTitleTime{0};
+     bool m_titleEndWait{false};
++    bool m_menuInput{false};
++    bool m_itemAbandoned{false};
+     bool m_nextClipKnown{false};
+     std::vector<uint8_t> m_clipStart;
+     size_t m_clipStartOffset{0};
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,10 @@
+ 
+     if (!pPacket)
+     {
++      // a menu jump of the disc program drops the old item instead of playing it out
++      if (TakeBlurayItemAbandoned())
++        FlushBuffers(DVD_NOPTS_VALUE, true, true);
++
+       // when paused, demuxer could be be returning empty
+       if (m_playSpeed == DVD_PLAYSPEED_PAUSE)
+       {
+@@ -0,6 +0,16 @@
+ #endif
+ }
+ 
++bool CVideoPlayer::TakeBlurayItemAbandoned()
++{
++#if defined(HAVE_LIBBLURAY)
++  const auto bluray = GetBlurayInputStream();
++  return bluray && bluray->TakeItemAbandoned();
++#else
++  return false;
++#endif
++}
++
+ // plays out the old item without blocking, as at the end of file; waits for the players that
+ // CloseStream would wait for, video until its decoder has drained
+ bool CVideoPlayer::PlayNavTail()
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+   std::shared_ptr<CDVDInputStreamBluray> GetBlurayInputStream() const;
+   bool IsBlurayTitleEnded() const;
+   bool IsBlurayTitleEndWait() const;
++  bool TakeBlurayItemAbandoned();
+   bool PlayNavTail();
+   bool DropInNavTail(CDVDMsg& msg);
+   bool OpenStream(CCurrentStream& current, int64_t demuxerId, int iStream, int source, bool reset = true);

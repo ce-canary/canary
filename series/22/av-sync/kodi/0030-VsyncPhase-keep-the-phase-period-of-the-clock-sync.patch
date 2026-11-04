@@ -1,0 +1,235 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 23:57:34 -0500
+Subject: [PATCH] VsyncPhase: keep the phase period of the clock sync
+
+Only the render manager knows the display vsync period the clock sync
+holds the clock to. The audio side cannot tell which clock moves keep
+the display sync.
+---
+ xbmc/cores/AudioEngine/Interfaces/AEStream.h  |  2 ++
+ xbmc/cores/VideoPlayer/AudioSinkAE.cpp        |  8 +++++
+ xbmc/cores/VideoPlayer/AudioSinkAE.h          |  1 +
+ xbmc/cores/VideoPlayer/CMakeLists.txt         |  4 ++-
+ xbmc/cores/VideoPlayer/DVDClock.h             |  5 ++++
+ .../VideoRenderers/RenderManager.cpp          | 12 ++++++++
+ xbmc/cores/VideoPlayer/VsyncPhase.cpp         | 24 +++++++++++++++
+ xbmc/cores/VideoPlayer/VsyncPhase.h           | 29 +++++++++++++++++++
+ 8 files changed, 84 insertions(+), 1 deletion(-)
+ create mode 100644 xbmc/cores/VideoPlayer/VsyncPhase.cpp
+ create mode 100644 xbmc/cores/VideoPlayer/VsyncPhase.h
+
+diff --git a/xbmc/cores/AudioEngine/Interfaces/AEStream.h b/xbmc/cores/AudioEngine/Interfaces/AEStream.h
+--- a/xbmc/cores/AudioEngine/Interfaces/AEStream.h
++++ b/xbmc/cores/AudioEngine/Interfaces/AEStream.h
+@@ -0,6 +0,8 @@
+   virtual double GetClockSpeed() { return 1.0; }
+   //! The audio in ms the clock start left out on purpose, once per start
+   virtual double TakeStartCut() { return 0.0; }
++  //! Clock moves by whole multiples of this period in ms keep the display sync, 0 if none
++  virtual double GetPhasePeriod() { return 0.0; }
+ };
+ 
+ class CAESyncInfo
+diff --git a/xbmc/cores/VideoPlayer/AudioSinkAE.cpp b/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
+--- a/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
++++ b/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
+@@ -0,6 +0,14 @@
+     return 1.0;
+ }
+ 
++double CAudioSinkAE::GetPhasePeriod()
++{
++  if (m_pClock)
++    return m_pClock->GetVsyncPhase().GetPhasePeriod() / DVD_TIME_BASE * 1000;
++  else
++    return 0.0;
++}
++
+ double CAudioSinkAE::TakeStartCut()
+ {
+   return m_startCut.exchange(0.0) / DVD_TIME_BASE * 1000;
+diff --git a/xbmc/cores/VideoPlayer/AudioSinkAE.h b/xbmc/cores/VideoPlayer/AudioSinkAE.h
+--- a/xbmc/cores/VideoPlayer/AudioSinkAE.h
++++ b/xbmc/cores/VideoPlayer/AudioSinkAE.h
+@@ -0,6 +0,7 @@
+   double GetClock() override;
+   double GetClockSpeed() override;
+   double TakeStartCut() override;
++  double GetPhasePeriod() override;
+ 
+   CAEStreamInfo::DataType GetPassthroughStreamType(AVCodecID codecId, int samplerate, int profile);
+ 
+diff --git a/xbmc/cores/VideoPlayer/CMakeLists.txt b/xbmc/cores/VideoPlayer/CMakeLists.txt
+--- a/xbmc/cores/VideoPlayer/CMakeLists.txt
++++ b/xbmc/cores/VideoPlayer/CMakeLists.txt
+@@ -0,7 +0,8 @@
+             VideoPlayerSubtitle.cpp
+             VideoPlayerTeletext.cpp
+             VideoPlayerVideo.cpp
+-            VideoReferenceClock.cpp)
++            VideoReferenceClock.cpp
++            VsyncPhase.cpp)
+ 
+ set(HEADERS AudioSinkAE.h
+             DVDClock.h
+@@ -0,6 +0,7 @@
+             VideoPlayerTeletext.h
+             VideoPlayerVideo.h
+             VideoReferenceClock.h
++            VsyncPhase.h
+             Interface/StreamInfo.h
+             Interface/DemuxPacket.h
+             Interface/DemuxCrypto.h
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.h b/xbmc/cores/VideoPlayer/DVDClock.h
+--- a/xbmc/cores/VideoPlayer/DVDClock.h
++++ b/xbmc/cores/VideoPlayer/DVDClock.h
+@@ -0,6 +0,7 @@
+ 
+ #pragma once
+ 
++#include "VsyncPhase.h"
+ #include "threads/CriticalSection.h"
+ 
+ #include <memory>
+@@ -0,6 +0,7 @@
+ 
+   bool GetClockInfo(int& MissedVblanks, double& ClockSpeed, double& RefreshRate) const;
+   void SetVsyncAdjust(double adjustment);
++  CVsyncPhase& GetVsyncPhase() { return m_vsyncPhase; }
+ 
+   void Pause(bool pause);
+   bool IsPaused() const;
+@@ -0,4 +0,7 @@
+ 
+   double m_maxspeedadjust;
+   CCriticalSection m_speedsection;
++
++  friend class CVsyncPhase;
++  CVsyncPhase m_vsyncPhase{*this};
+ };
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,6 +0,7 @@
+         // Clear stale vsync/late-frame state from the old framerate; CheckEnableClockSync() will recalibrate on the next FrameMove on the main thread.
+         m_clockSync.Reset();
+         m_dvdClock.SetVsyncAdjust(0);
++        m_dvdClock.GetVsyncPhase().SetPhasePeriod(0);
+         m_lateframes = -1;
+       }
+       return true;
+@@ -0,6 +0,7 @@
+     m_stateEvent.Reset();
+     m_clockSync.Reset();
+     m_dvdClock.SetVsyncAdjust(0);
++    m_dvdClock.GetVsyncPhase().SetPhasePeriod(0);
+     m_pConfigPicture = std::make_unique<VideoPicture>();
+     m_pConfigPicture->CopyRef(picture);
+ 
+@@ -0,6 +0,7 @@
+     m_renderDebug = false;
+     m_clockSync.Reset();
+     m_dvdClock.SetVsyncAdjust(0);
++    m_dvdClock.GetVsyncPhase().SetPhasePeriod(0);
+     m_overlays.Reset();
+     m_overlays.SetStereoMode(m_picture.stereoMode);
+     UpdateLatencyTweak();
+@@ -0,6 +0,7 @@
+   DeleteRenderer();
+ 
+   m_renderState = STATE_UNCONFIGURED;
++  m_dvdClock.GetVsyncPhase().SetPhasePeriod(0);
+   m_picture.Reset();
+   m_bRenderGUI = false;
+   CServiceBroker::GetWinSystem()->GetGfxContext().SetHDRType(m_picture.hdrType);
+@@ -0,6 +0,7 @@
+   else
+   {
+     m_dvdClock.SetVsyncAdjust(0);
++    m_dvdClock.GetVsyncPhase().SetPhasePeriod(0);
+     // with no lock to the display, release at the nearest vsync
+     if (!isPaused)
+       renderPts += frametime / 2;
+@@ -0,11 +0,18 @@
+   if (diff < 0.0005)
+   {
+     m_clockSync.m_enabled = true;
++    if (m_presenting)
++      m_dvdClock.GetVsyncPhase().SetPhasePeriod(
++          DVD_TIME_BASE /
++          static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()));
++    else
++      m_dvdClock.GetVsyncPhase().SetPhasePeriod(0);
+   }
+   else
+   {
+     m_clockSync.m_enabled = false;
+     m_dvdClock.SetVsyncAdjust(0);
++    m_dvdClock.GetVsyncPhase().SetPhasePeriod(0);
+   }
+ 
+   m_playerPort->UpdateClockSync(m_clockSync.m_enabled);
+diff --git a/xbmc/cores/VideoPlayer/VsyncPhase.cpp b/xbmc/cores/VideoPlayer/VsyncPhase.cpp
+new file mode 100644
+--- /dev/null
++++ b/xbmc/cores/VideoPlayer/VsyncPhase.cpp
+@@ -0,0 +0,24 @@
++/*
++ *  Copyright (C) 2026 Team CoreELEC
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#include "VsyncPhase.h"
++
++#include "DVDClock.h"
++
++#include <mutex>
++
++void CVsyncPhase::SetPhasePeriod(double period)
++{
++  std::unique_lock lock(m_clock.m_critSection);
++  m_phasePeriod = period;
++}
++
++double CVsyncPhase::GetPhasePeriod() const
++{
++  std::unique_lock lock(m_clock.m_critSection);
++  return m_clock.m_speedAdjust != 0 ? 0.0 : m_phasePeriod;
++}
+diff --git a/xbmc/cores/VideoPlayer/VsyncPhase.h b/xbmc/cores/VideoPlayer/VsyncPhase.h
+new file mode 100644
+--- /dev/null
++++ b/xbmc/cores/VideoPlayer/VsyncPhase.h
+@@ -0,0 +0,29 @@
++/*
++ *  Copyright (C) 2026 Team CoreELEC
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#pragma once
++
++class CDVDClock;
++
++// The clock sync phase of the vsync presenter. Every method runs under the clock's lock.
++class CVsyncPhase
++{
++public:
++  explicit CVsyncPhase(CDVDClock& clock) : m_clock(clock) {}
++  CVsyncPhase(const CVsyncPhase&) = delete;
++  CVsyncPhase& operator=(const CVsyncPhase&) = delete;
++
++  //! The display vsync period the clock sync holds the clock to, 0 when off or without the
++  //! vsync presenter
++  void SetPhasePeriod(double period);
++  //! The phase period, 0 while the speed is adjusted
++  double GetPhasePeriod() const;
++
++private:
++  CDVDClock& m_clock;
++  double m_phasePeriod{0.0};
++};

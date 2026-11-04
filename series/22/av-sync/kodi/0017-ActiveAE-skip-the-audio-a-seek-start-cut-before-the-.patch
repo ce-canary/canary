@@ -1,0 +1,166 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 23:56:55 -0500
+Subject: [PATCH] ActiveAE: skip the audio a seek start cut before the start
+ sync
+
+A seek start that cuts the audio lead on purpose hands the cut over as
+late audio. The player then moves its clock by a banded frame or leaves
+the audio late.
+---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp     | 15 +++++++++++++++
+ .../AudioEngine/Engines/ActiveAE/ActiveAEStream.h |  2 ++
+ xbmc/cores/AudioEngine/Interfaces/AEStream.h      |  2 ++
+ xbmc/cores/VideoPlayer/AudioSinkAE.cpp            | 11 +++++++++++
+ xbmc/cores/VideoPlayer/AudioSinkAE.h              |  3 +++
+ xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp       |  5 +++++
+ 6 files changed, 38 insertions(+)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,6 +0,9 @@
+         m_discardBufferPools.push_back((*it)->m_processingBuffers->GetResampleBuffers());
+         m_discardBufferPools.push_back((*it)->m_processingBuffers->GetAtempoBuffers());
+         (*it)->m_processingBuffers.reset();
++        // a start cut was measured against the flushed buffers
++        if ((*it)->m_pClock)
++          (*it)->m_pClock->TakeStartCut();
+         (*it)->m_syncState = CAESyncInfo::AESyncState::SYNC_START;
+       }
+       if (!(*it)->m_processingBuffers)
+@@ -0,10 +0,22 @@
+     stream->m_lateStartHandedOver = false;
+     stream->m_pauseBurstCarry = 0.0;
+     stream->m_silentSinceSyncStart = true;
++    stream->m_startCut = stream->m_pClock->TakeStartCut();
+     stream->m_syncSinkReports = m_stats.GetSinkReports();
+     CLog::Log(LOGDEBUG,"ActiveAE - start sync of audio stream");
+   }
+ 
++  if (stream->m_syncState == CAESyncInfo::AESyncState::SYNC_MUTE && stream->m_startCut > 0)
++  {
++    CSampleBuffer* buf = stream->m_processingBuffers->m_outputSamples.front();
++    const double skipped = SkipSyncSamples(stream, buf, stream->m_startCut);
++    stream->m_startCut = skipped > 0 ? stream->m_startCut - skipped : 0.0;
++    stream->m_syncError.Flush(100ms);
++    CLog::Log(LOGDEBUG, LOGAUDIO, "ActiveAE::SyncStream - start cut, skip {:.3f}ms", skipped);
++    if (buf->pkt->nb_samples == 0)
++      return ret;
++  }
++
+   double error;
+   double threshold = 100;
+   if (stream->m_resampleMode)
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+@@ -0,6 +0,8 @@
+   bool m_silentSinceSyncStart{false};
+   // whether m_lastSyncError holds an error measured since adjusting started
+   bool m_syncErrorBooked{false};
++  // ms of audio the clock start left out on purpose, skipped before the start sync measures
++  double m_startCut{0.0};
+   // the sink reports counted when the start sync began
+   unsigned int m_syncSinkReports{0};
+ };
+diff --git a/xbmc/cores/AudioEngine/Interfaces/AEStream.h b/xbmc/cores/AudioEngine/Interfaces/AEStream.h
+--- a/xbmc/cores/AudioEngine/Interfaces/AEStream.h
++++ b/xbmc/cores/AudioEngine/Interfaces/AEStream.h
+@@ -0,6 +0,8 @@
+   virtual ~IAEClockCallback() = default;
+   virtual double GetClock() = 0;
+   virtual double GetClockSpeed() { return 1.0; }
++  //! The audio in ms the clock start left out on purpose, once per start
++  virtual double TakeStartCut() { return 0.0; }
+ };
+ 
+ class CAESyncInfo
+diff --git a/xbmc/cores/VideoPlayer/AudioSinkAE.cpp b/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
+--- a/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
++++ b/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
+@@ -0,6 +0,7 @@
+   m_syncError = 0.0;
+   m_syncErrorTime = 0;
+   m_startSyncError = false;
++  m_startCut = 0.0;
+ }
+ 
+ void CAudioSinkAE::AbortAddPackets()
+@@ -0,6 +0,11 @@
+   return startSyncError;
+ }
+ 
++void CAudioSinkAE::SetStartCut(double cut)
++{
++  m_startCut = cut;
++}
++
+ double CAudioSinkAE::GetResampleRatio()
+ {
+   return m_resampleRatio;
+@@ -0,6 +0,11 @@
+     return 1.0;
+ }
+ 
++double CAudioSinkAE::TakeStartCut()
++{
++  return m_startCut.exchange(0.0) / DVD_TIME_BASE * 1000;
++}
++
+ CAEStreamInfo::DataType CAudioSinkAE::GetPassthroughStreamType(AVCodecID codecId,
+                                                                int samplerate,
+                                                                int profile)
+diff --git a/xbmc/cores/VideoPlayer/AudioSinkAE.h b/xbmc/cores/VideoPlayer/AudioSinkAE.h
+--- a/xbmc/cores/VideoPlayer/AudioSinkAE.h
++++ b/xbmc/cores/VideoPlayer/AudioSinkAE.h
+@@ -0,6 +0,7 @@
+   double GetSyncError();
+   void SetSyncErrorCorrection(double correction);
+   bool TakeStartSyncError();
++  void SetStartCut(double cut);
+ 
+   /*!
+    * \brief Returns the resample ratio, or 0.0 if unknown/invalid
+@@ -0,6 +0,7 @@
+ 
+   double GetClock() override;
+   double GetClockSpeed() override;
++  double TakeStartCut() override;
+ 
+   CAEStreamInfo::DataType GetPassthroughStreamType(AVCodecID codecId, int samplerate, int profile);
+ 
+@@ -0,6 +0,7 @@
+   double m_syncError;
+   unsigned int m_syncErrorTime;
+   bool m_startSyncError{false};
++  std::atomic<double> m_startCut{0.0};
+   double m_resampleRatio = 0.0; // invalid
+   CCriticalSection m_critSection;
+ 
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp b/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
+@@ -0,6 +0,7 @@
+ #include "utils/MathUtils.h"
+ #include "utils/log.h"
+ 
++#include <algorithm>
+ #include <mutex>
+ 
+ #ifdef TARGET_RASPBERRY_PI
+@@ -0,10 +0,14 @@
+                 pts / DVD_TIME_BASE, m_messageQueue.GetLevel(), m_audioSink.GetDelay() / DVD_TIME_BASE);
+ 
+       double delay = m_audioSink.GetDelay();
++      double startCut{0.0};
+       if (pts > m_audioClock - delay + 0.5 * DVD_TIME_BASE)
+       {
+         m_audioSink.Flush();
+       }
++      else if (resync.seekStart)
++        startCut = std::max(0.0, pts - (m_audioClock - delay));
++      m_audioSink.SetStartCut(startCut);
+       m_audioClock = pts + delay;
+       m_overlapLag = 0.0;
+       m_overlapClock = false;

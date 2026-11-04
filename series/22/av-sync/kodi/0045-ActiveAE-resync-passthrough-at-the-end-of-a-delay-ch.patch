@@ -1,0 +1,195 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 09:25:13 -0600
+Subject: [PATCH] ActiveAE: resync passthrough at the end of a delay change
+
+Passthrough does not follow a clock sync phase shift while it plays, so
+the rest of a delay change stays between audio and video. It is booked
+only at the next pause, seek or stream change, which may never come.
+---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp   |  9 +++++++++
+ xbmc/cores/AudioEngine/Interfaces/AEStream.h    |  2 ++
+ xbmc/cores/VideoPlayer/AudioSinkAE.cpp          |  5 +++++
+ xbmc/cores/VideoPlayer/AudioSinkAE.h            |  1 +
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp          |  5 +++++
+ xbmc/cores/VideoPlayer/VideoPlayer.h            |  1 +
+ .../VideoRenderers/RenderManager.cpp            |  6 +++++-
+ .../VideoPlayer/VideoRenderers/RenderManager.h  |  3 +++
+ xbmc/cores/VideoPlayer/VsyncPhase.cpp           | 17 +++++++++++++++++
+ xbmc/cores/VideoPlayer/VsyncPhase.h             |  5 +++++
+ 10 files changed, 53 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,6 +0,15 @@
+   if (!stream->m_pClock)
+     return ret;
+ 
++  // passthrough follows a phase shift only through a start sync, which measures it once;
++  // a commit made while the stream is not in sync waits for it
++  if (m_mode != MODE_PCM && stream->m_syncState == CAESyncInfo::AESyncState::SYNC_INSYNC &&
++      stream->m_pClock->TakeSyncShiftCommit())
++  {
++    stream->m_syncState = CAESyncInfo::AESyncState::SYNC_START;
++    CLog::Log(LOGDEBUG, LOGAUDIO, "ActiveAE::SyncStream - phase shift committed");
++  }
++
+   if (stream->m_syncState == CAESyncInfo::AESyncState::SYNC_START)
+   {
+     stream->m_syncState = CAESyncInfo::AESyncState::SYNC_MUTE;
+diff --git a/xbmc/cores/AudioEngine/Interfaces/AEStream.h b/xbmc/cores/AudioEngine/Interfaces/AEStream.h
+--- a/xbmc/cores/AudioEngine/Interfaces/AEStream.h
++++ b/xbmc/cores/AudioEngine/Interfaces/AEStream.h
+@@ -0,6 +0,8 @@
+     period = 0.0;
+     return 0;
+   }
++  //! Whether the clock asks once to book the phase shifts not followed so far
++  virtual bool TakeSyncShiftCommit() { return false; }
+ };
+ 
+ class CAESyncInfo
+diff --git a/xbmc/cores/VideoPlayer/AudioSinkAE.cpp b/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
+--- a/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
++++ b/xbmc/cores/VideoPlayer/AudioSinkAE.cpp
+@@ -0,6 +0,11 @@
+   return id;
+ }
+ 
++bool CAudioSinkAE::TakeSyncShiftCommit()
++{
++  return m_pClock && m_pClock->GetVsyncPhase().TakeVsyncShiftCommit();
++}
++
+ double CAudioSinkAE::TakeStartCut()
+ {
+   return m_startCut.exchange(0.0) / DVD_TIME_BASE * 1000;
+diff --git a/xbmc/cores/VideoPlayer/AudioSinkAE.h b/xbmc/cores/VideoPlayer/AudioSinkAE.h
+--- a/xbmc/cores/VideoPlayer/AudioSinkAE.h
++++ b/xbmc/cores/VideoPlayer/AudioSinkAE.h
+@@ -0,6 +0,7 @@
+   double GetClockSpeed() override;
+   double TakeStartCut() override;
+   int GetSyncPhaseId(double& shift, double& period) override;
++  bool TakeSyncShiftCommit() override;
+ 
+   CAEStreamInfo::DataType GetPassthroughStreamType(AVCodecID codecId, int samplerate, int profile);
+ 
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,11 @@
+   m_renderManager.SetDelay(static_cast<int>(std::lround(fValue * 1000.0f)));
+ }
+ 
++void CVideoPlayer::CommitAVDelay()
++{
++  m_renderManager.CommitDelay();
++}
++
+ float CVideoPlayer::GetAVDelay()
+ {
+   return static_cast<float>(m_renderManager.GetDelay()) / 1000.0f;
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+   bool CanPause() const override;
+   void SetAVDelay(float fValue = 0.0f) override;
+   float GetAVDelay() override;
++  void CommitAVDelay() override;
+   bool IsInMenu() const override;
+ 
+   /*!
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,7 +0,9 @@
+   if (!m_showVideo && !m_forceNext)
+     return;
+ 
+-  // a phase shift can move the clock, so it goes before the clock of the release is taken
++  // a phase shift can move the clock, so it goes before the clock of the release is taken;
++  // a commit is taken first, so the delays set before it are applied before it is passed on
++  const bool commit = m_videoDelayCommit.exchange(false);
+   const int videoDelay = m_videoDelay;
+   if (videoDelay != m_appliedVideoDelay)
+   {
+@@ -0,6 +0,8 @@
+       m_clockSync.m_syncOffset = phase;
+     m_appliedVideoDelay = videoDelay;
+   }
++  if (commit)
++    m_dvdClock.GetVsyncPhase().CommitVsyncShift();
+ 
+   const double frameOnScreen = m_dvdClock.GetClock(m_releaseClockEpoch);
+   m_releaseClock = frameOnScreen;
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -0,6 +0,8 @@
+ 
+   void SetDelay(int delay) { m_videoDelay = delay; }
+   int GetDelay() { return m_videoDelay; }
++  // the audio books what it has not followed of the delay changes set so far
++  void CommitDelay() { m_videoDelayCommit = true; }
+ 
+   /*!
+    * \brief How far ahead of the clock the picture on screen is, in DVD clock units.
+@@ -0,6 +0,7 @@
+   std::atomic_int m_videoDelay = {};
+   // the video delay the release and the clock sync phase use, presenter or render thread only
+   int m_appliedVideoDelay{0};
++  std::atomic_bool m_videoDelayCommit{false};
+ 
+   int m_QueueSize = 2;
+   int m_QueueSkip = 0;
+diff --git a/xbmc/cores/VideoPlayer/VsyncPhase.cpp b/xbmc/cores/VideoPlayer/VsyncPhase.cpp
+--- a/xbmc/cores/VideoPlayer/VsyncPhase.cpp
++++ b/xbmc/cores/VideoPlayer/VsyncPhase.cpp
+@@ -0,7 +0,24 @@
+   std::unique_lock lock(m_clock.m_critSection);
+ 
+   m_shiftFollowed = m_shift;
++  m_shiftCommit = false;
+   shift = m_shift;
+   period = m_state == State::NONE || m_clock.m_speedAdjust != 0 ? 0.0 : m_phasePeriod;
+   return GetVsyncPhaseId();
+ }
++
++void CVsyncPhase::CommitVsyncShift()
++{
++  std::unique_lock lock(m_clock.m_critSection);
++
++  m_shiftCommit = m_shift != m_shiftFollowed;
++}
++
++bool CVsyncPhase::TakeVsyncShiftCommit()
++{
++  std::unique_lock lock(m_clock.m_critSection);
++
++  const bool commit = m_shiftCommit && m_shift != m_shiftFollowed;
++  m_shiftCommit = false;
++  return commit;
++}
+diff --git a/xbmc/cores/VideoPlayer/VsyncPhase.h b/xbmc/cores/VideoPlayer/VsyncPhase.h
+--- a/xbmc/cores/VideoPlayer/VsyncPhase.h
++++ b/xbmc/cores/VideoPlayer/VsyncPhase.h
+@@ -0,6 +0,10 @@
+   //! As GetVsyncPhaseId(), with `shift` the sum of all phase shifts, which the audio follows now,
+   //! and the phase period, 0 without a phase or while the speed is adjusted
+   int FollowVsyncPhase(double& shift, double& period);
++  //! Asks the audio to book the phase shifts it has not followed, if there are any
++  void CommitVsyncShift();
++  //! Whether a commit asked for since the audio last followed is still owed, once
++  bool TakeVsyncShiftCommit();
+ 
+ private:
+   friend class CDVDClock;
+@@ -0,4 +0,5 @@
+   // the sum of all phase shifts, and its value when the audio last followed it
+   double m_shift{0.0};
+   double m_shiftFollowed{0.0};
++  bool m_shiftCommit{false};
+ };

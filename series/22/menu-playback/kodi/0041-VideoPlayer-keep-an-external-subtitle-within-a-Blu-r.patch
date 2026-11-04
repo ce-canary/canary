@@ -1,0 +1,184 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 27 Oct 2026 23:56:24 -0500
+Subject: [PATCH] VideoPlayer: keep an external subtitle within a Blu-ray
+ playlist
+
+In navigation mode each non-seamless item of a Blu-ray playlist opens as
+a new stream. The current subtitle was cleared there, so an external
+subtitle file was lost at every such join and the disc's own subtitle
+took its place. An external file runs on the title time of its playlist,
+which the next item of the same playlist continues.
+---
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 16 +++++++++
+ .../DVDInputStreams/DVDInputStreamBluray.h    | 11 ++++++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 35 ++++++++++++++++++-
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  1 +
+ 4 files changed, 62 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,6 +0,8 @@
+   // Process any events that occurred during opening
+   while (bd_get_event(m_bd, &m_event))
+     ProcessEvent();
++  m_playlistLeft = false;
++  m_itemSeeked = false;
+ 
+   OpenNextStream();
+ 
+@@ -0,6 +0,7 @@
+     //bd_read_skip_still(m_bd);
+     //m_hold = HOLD_HELD;
+     m_titleEndWait = false;
++    m_itemSeeked = true;
+     break;
+ 
+   case BD_EVENT_STILL_TIME:
+@@ -0,6 +0,7 @@
+   case BD_EVENT_END_OF_TITLE:
+     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - BD_EVENT_END_OF_TITLE {}", m_event.param);
+     /* when a title ends, playlist WILL eventually change */
++    m_playlistLeft = true;
+     if (m_navmode)
+     {
+       // the player still plays the title out of its queues until the next stream
+@@ -0,6 +0,7 @@
+ 
+     m_menu = false;
+     m_isInMainMenu = false;
++    m_playlistLeft = true;
+ 
+     if (m_event.param == BLURAY_TITLE_TOP_MENU)
+     {
+@@ -0,6 +0,7 @@
+     m_playlist = m_event.param;
+     ProcessItem(m_playlist);
+     m_titleEndWait = false;
++    m_playlistLeft = true;
+     break;
+ 
+   case BD_EVENT_PLAYITEM:
+@@ -0,6 +0,8 @@
+     ProcessEvent();
+   while (bd_get_event(m_bd, &m_event))
+     ProcessEvent();
++  // the player's own seek repositions an external subtitle
++  m_itemSeeked = false;
+   OpenClipSpan();
+ 
+   if (m_bMVCPlayback)
+@@ -0,6 +0,8 @@
+     ProcessEvent();
+   while (bd_get_event(m_bd, &m_event))
+     ProcessEvent();
++  // the player's own seek repositions an external subtitle
++  m_itemSeeked = false;
+   OpenClipSpan();
+ 
+   if (m_bMVCPlayback)
+@@ -0,6 +0,12 @@
+   m_itemAbandoned = false;
+   m_hold = HOLD_DATA;
+   m_nextClipKnown = clipKnown && m_clip;
++  m_nextItemInPlaylist = !m_playlistLeft;
++  m_nextItemSeekTime.reset();
++  if (m_nextItemInPlaylist && m_itemSeeked)
++    m_nextItemSeekTime = static_cast<int>(bd_tell_time(m_bd) / 90);
++  m_playlistLeft = false;
++  m_itemSeeked = false;
+   // the next demuxer reads on from m_readPos, so no lookup reaches the spans before its first one
+   const auto span = std::ranges::upper_bound(m_clipSpans, m_readPos, {}, &ClipSpan::readPos);
+   if (span != m_clipSpans.begin())
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,13 @@
+   //! the clip the item opened by the last NextStream starts with, when its events named it
+   const BLURAY_CLIP_INFO* GetNextItemClip() const;
+ 
++  //! whether the item opened by the last NextStream continues the playlist of the item before it
++  bool NextItemContinuesPlaylist() const { return m_nextItemInPlaylist; }
++
++  //! the title time (ms) the item opened by the last NextStream starts at, when a disc seek moved
++  //! it within its playlist
++  std::optional<int> GetNextItemSeekTime() const { return m_nextItemSeekTime; }
++
+   void OverlayCallback(const BD_OVERLAY * const);
+ #ifdef HAVE_LIBBLURAY_BDJ
+   void OverlayCallbackARGB(const struct bd_argb_overlay_s * const);
+@@ -0,6 +0,10 @@
+     bool m_menuInput{false};
+     bool m_itemAbandoned{false};
+     bool m_nextClipKnown{false};
++    bool m_playlistLeft{false};
++    bool m_nextItemInPlaylist{false};
++    bool m_itemSeeked{false};
++    std::optional<int> m_nextItemSeekTime;
+     std::vector<uint8_t> m_clipStart;
+     size_t m_clipStartOffset{0};
+     bool m_clipStartHeld{false};
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,7 +0,7 @@
+         m_navStopped = false;
+         m_CurrentAudio.Clear();
+         m_CurrentVideo.Clear();
+-        m_CurrentSubtitle.Clear();
++        CloseSubtitleForNextStream();
+         continue;
+       }
+ 
+@@ -0,6 +0,39 @@
+ }
+ #endif
+ 
++// an external subtitle file runs on title time, so it stays for the next item of its Blu-ray
++// playlist and closes when the next item starts another
++void CVideoPlayer::CloseSubtitleForNextStream()
++{
++#if defined(HAVE_LIBBLURAY)
++  const auto bluray = GetBlurayInputStream();
++  if (bluray && (STREAM_SOURCE_MASK(m_CurrentSubtitle.source) == STREAM_SOURCE_DEMUX_SUB ||
++                 STREAM_SOURCE_MASK(m_CurrentSubtitle.source) == STREAM_SOURCE_TEXT))
++  {
++    if (bluray->NextItemContinuesPlaylist())
++    {
++      m_CurrentSubtitle.stream = nullptr;
++      // a disc seek moved the title time the file runs on
++      if (const auto seekTime = bluray->GetNextItemSeekTime())
++      {
++        if (STREAM_SOURCE_MASK(m_CurrentSubtitle.source) == STREAM_SOURCE_DEMUX_SUB &&
++            m_pSubtitleDemuxer && !m_pSubtitleDemuxer->SeekTime(*seekTime, true))
++          CLog::Log(LOGDEBUG, "{} - failed to seek subtitle demuxer to: {}", __FUNCTION__,
++                    *seekTime);
++        m_CurrentSubtitle.dts = DVD_NOPTS_VALUE;
++        m_VideoPlayerSubtitle->Flush();
++      }
++      return;
++    }
++    CloseStream(m_CurrentSubtitle, false);
++    // the disc's display flag was not applied while the external subtitle was current
++    m_VideoPlayerVideo->EnableSubtitle(bluray->IsPgEnabled());
++    return;
++  }
++#endif
++  m_CurrentSubtitle.Clear();
++}
++
+ bool CVideoPlayer::IsBlurayTitleEnded() const
+ {
+ #if defined(HAVE_LIBBLURAY)
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+   bool PollBlurayEvents();
+   double GetBlurayPresentedTime();
+   void ReportBlurayPresented();
++  void CloseSubtitleForNextStream();
+   bool PlayNavTail();
+   bool DropInNavTail(CDVDMsg& msg);
+   bool OpenStream(CCurrentStream& current, int64_t demuxerId, int iStream, int source, bool reset = true);

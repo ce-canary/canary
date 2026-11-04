@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 23:53:38 -0500
+Subject: [PATCH] RenderManager: signal the configuration once the presenter
+ runs
+
+The render manager signals a new configuration before it reads the
+latency tweak and starts the vsync presenter. A waiter woken by that
+signal still sees the old tweak and no presenter.
+---
+ xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,6 +0,7 @@
+     m_dvdClock.SetVsyncAdjust(0);
+     m_overlays.Reset();
+     m_overlays.SetStereoMode(m_picture.stereoMode);
++    UpdateLatencyTweak();
+ 
+     m_renderState = STATE_CONFIGURED;
+ 
+@@ -0,7 +0,8 @@
+ 
+   m_pConfigPicture.reset();
+ 
+-  m_stateEvent.Set();
++  if (!result)
++    m_stateEvent.Set();
+   m_playerPort->VideoParamsChange();
+   return result;
+ }
+@@ -0,8 +0,9 @@
+       StopPresentThread();
+       if (!Configure())
+         return;
+-      UpdateLatencyTweak();
+       StartPresentThread();
++      // the release lead a waiter reads depends on whether the vsync presenter runs
++      m_stateEvent.Set();
+       threadLock.unlock();
+       firstFrame = true;
+       FrameWait(50ms);

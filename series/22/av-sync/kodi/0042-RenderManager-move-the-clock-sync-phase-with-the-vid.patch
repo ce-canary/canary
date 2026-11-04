@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 09:13:04 -0600
+Subject: [PATCH] RenderManager: move the clock sync phase with the video delay
+
+The release and the phase reading take the video delay on their own,
+whenever it was set. A change while playing reaches the clock sync
+phase only through the next reading. It moves the video by whole
+periods per step, and a rest of up to half a period piles up between
+the audio and the clock.
+---
+ .../VideoPlayer/VideoRenderers/RenderManager.cpp  | 15 +++++++++++++--
+ .../VideoPlayer/VideoRenderers/RenderManager.h    |  2 ++
+ 2 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,7 +0,7 @@
+   if (!m_releaseClockTaken)
+   {
+     clock = m_dvdClock.GetClock(epoch);
+-    latency = DVD_MSEC_TO_TIME(CalcReleaseLead() - m_videoDelay);
++    latency = DVD_MSEC_TO_TIME(CalcReleaseLead() - m_appliedVideoDelay);
+   }
+ 
+   // only a vsync wake knows the picture on screen
+@@ -0,6 +0,17 @@
+   if (!m_showVideo && !m_forceNext)
+     return;
+ 
++  // a phase shift can move the clock, so it goes before the clock of the release is taken
++  const int videoDelay = m_videoDelay;
++  if (videoDelay != m_appliedVideoDelay)
++  {
++    double phase = 0;
++    if (m_dvdClock.GetVsyncPhase().ShiftVsyncPhase(
++            DVD_MSEC_TO_TIME(videoDelay - m_appliedVideoDelay), phase))
++      m_clockSync.m_syncOffset = phase;
++    m_appliedVideoDelay = videoDelay;
++  }
++
+   const double frameOnScreen = m_dvdClock.GetClock(m_releaseClockEpoch);
+   m_releaseClock = frameOnScreen;
+   m_releaseClockTaken = true;
+@@ -0,7 +0,7 @@
+       1.0 / static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()) *
+       DVD_TIME_BASE;
+ 
+-  m_displayLatency = DVD_MSEC_TO_TIME(CalcReleaseLead() - m_videoDelay);
++  m_displayLatency = DVD_MSEC_TO_TIME(CalcReleaseLead() - videoDelay);
+ 
+   // While the clock is paused, frameOnScreen does not advance, so adding the display
+   // latency would pick a frame ahead of the one actually shown. That only holds for
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -0,6 +0,8 @@
+   /// Display latency updated in PrepareNextRender in DVD clock units, includes m_latencyTweak
+   std::atomic<double> m_displayLatency = 0.0;
+   std::atomic_int m_videoDelay = {};
++  // the video delay the release and the clock sync phase use, presenter or render thread only
++  int m_appliedVideoDelay{0};
+ 
+   int m_QueueSize = 2;
+   int m_QueueSkip = 0;

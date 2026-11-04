@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 29 Oct 2026 18:07:25 -0500
+Subject: [PATCH] VideoPlayer: continue the presentation across Blu-ray item
+ joins
+
+At a Blu-ray item join in navigation mode the player closes the video
+stream and opens the next item's. The Amlogic decoder is not told that
+video continues, so it tears its HDR or Dolby Vision output down and
+the sink falls back to SDR in the gap.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,9 @@
+           !m_SelectionStreams.m_Streams.empty())
+         OpenDefaultStreams();
+ 
++      if (m_SelectionStreams.CountType(StreamType::VIDEO) == 0)
++        aml_end_presentation(false);
++
+       UpdatePlayState(0);
+     }
+ 
+@@ -0,6 +0,8 @@
+         SetCaching(CACHESTATE_DONE);
+         CLog::Log(LOGINFO, "VideoPlayer: next stream, wait for old streams to be finished");
+         CloseStream(m_CurrentAudio, true);
++        if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY) && !m_bAbortRequest)
++          aml_continue_presentation();
+         CloseStream(m_CurrentVideo, true);
+ 
+         m_syncStartPtsWait.reset();
+@@ -0,6 +0,9 @@
+         FlushBuffers(DVD_NOPTS_VALUE, true, true);
+       }
+     }
++
++    if (m_CurrentVideo.id < 0 && m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_INSYNC)
++      aml_end_presentation(false);
+   }
+   else
+     m_syncStartPtsWait.reset();
+@@ -0,6 +0,8 @@
+       break;
+   }
+ 
++  // a stop never closes the video under an arm, nor leaves a hold no decoder took
++  aml_end_presentation(true);
+   CloseStream(m_CurrentAudio, !m_bAbortRequest);
+   CloseStream(m_CurrentVideo, !m_bAbortRequest);
+   CloseStream(m_CurrentTeletext,!m_bAbortRequest);
+@@ -0,6 +0,7 @@
+         m_callback.OnPlayBackStarted(m_item);
+       });
+ 
++      aml_end_presentation(true);
+       FlushBuffers(DVD_NOPTS_VALUE, true, true);
+       m_renderManager.Flush(false, false);
+       m_pDemuxer.reset();
+@@ -0,6 +0,8 @@
+       else if (aml_convert_to_hdr(hint.hdrType))
+         hint.hdrType = StreamHdrType::HDR_TYPE_HDR10;
+       res = OpenVideoStream(hint, reset);
++      // a presentation kept for this stream ends when no AML decoder claimed it
++      aml_end_presentation(false);
+       // Set the m_bFullScreenVideo flag now, before streamsReady, so the
+       // renderer's Configure() sees a valid viewport via GetViewWindow().
+       // The WINDOW_FULLSCREEN_VIDEO skin activation is deferred to

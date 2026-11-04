@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 22 Oct 2026 18:04:50 -0500
+Subject: [PATCH] FFmpegImage: hand the encoded packet to the caller without a
+ copy
+
+The encoded image was copied out of its packet while the encoder's own
+output buffer was still allocated, so a large PNG was held three times
+at the end of the encode. A repeated call leaked the previous copy.
+---
+ xbmc/guilib/FFmpegImage.cpp | 22 +++++-----------------
+ xbmc/guilib/FFmpegImage.h   |  2 +-
+ 2 files changed, 6 insertions(+), 18 deletions(-)
+
+diff --git a/xbmc/guilib/FFmpegImage.cpp b/xbmc/guilib/FFmpegImage.cpp
+--- a/xbmc/guilib/FFmpegImage.cpp
++++ b/xbmc/guilib/FFmpegImage.cpp
+@@ -0,7 +0,6 @@
+ {
+   m_hasAlpha = false;
+   m_pFrame = nullptr;
+-  m_outputBuffer = nullptr;
+ }
+ 
+ CFFmpegImage::~CFFmpegImage()
+@@ -0,21 +0,11 @@
+     return false;
+   }
+ 
++  // the caller reads the packet until ReleaseThumbnailBuffer
++  CleanupLocalOutputBuffer();
++  m_outputPacket = avpkt;
++  bufferout = avpkt->data;
+   bufferoutSize = avpkt->size;
+-  m_outputBuffer = (uint8_t*) av_malloc(bufferoutSize);
+-  if (!m_outputBuffer)
+-  {
+-    CLog::Log(LOGERROR, "Could not generate allocate memory for thumbnail: {}", destFile);
+-    CleanupLocalOutputBuffer();
+-    av_packet_free(&avpkt);
+-    return false;
+-  }
+-  // update buffer ptr for caller
+-  bufferout = m_outputBuffer;
+-
+-  // copy avpkt data into outputbuffer
+-  memcpy(m_outputBuffer, avpkt->data, avpkt->size);
+-  av_packet_free(&avpkt);
+ 
+   return true;
+ }
+@@ -0,8 +0,7 @@
+ 
+ void CFFmpegImage::CleanupLocalOutputBuffer()
+ {
+-  av_free(m_outputBuffer);
+-  m_outputBuffer = nullptr;
++  av_packet_free(&m_outputPacket);
+ }
+ 
+ std::shared_ptr<Frame> CFFmpegImage::ReadFrame()
+diff --git a/xbmc/guilib/FFmpegImage.h b/xbmc/guilib/FFmpegImage.h
+--- a/xbmc/guilib/FFmpegImage.h
++++ b/xbmc/guilib/FFmpegImage.h
+@@ -0,7 +0,7 @@
+   AVCodecContext* m_codec_ctx = nullptr;
+ 
+   AVFrame* m_pFrame;
+-  uint8_t* m_outputBuffer;
++  AVPacket* m_outputPacket = nullptr;
+ 
+   // the size the caller can use, and the size the file actually holds
+   unsigned int m_maxWidth = 0;

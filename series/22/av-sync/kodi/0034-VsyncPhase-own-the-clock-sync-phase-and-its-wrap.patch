@@ -1,0 +1,234 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 00:00:28 -0500
+Subject: [PATCH] VsyncPhase: own the clock sync phase and its wrap
+
+The vsync adjust is one bare value. A reader cannot tell whether it was
+read on the current clock mapping or before a discontinuity, pause or
+speed change. A writer cannot drop a reading that such a change made
+stale.
+---
+ xbmc/cores/VideoPlayer/DVDClock.cpp   | 18 +++++++
+ xbmc/cores/VideoPlayer/DVDClock.h     |  3 ++
+ xbmc/cores/VideoPlayer/VsyncPhase.cpp | 77 +++++++++++++++++++++++++++
+ xbmc/cores/VideoPlayer/VsyncPhase.h   | 28 +++++++++-
+ 4 files changed, 125 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.cpp b/xbmc/cores/VideoPlayer/DVDClock.cpp
+--- a/xbmc/cores/VideoPlayer/DVDClock.cpp
++++ b/xbmc/cores/VideoPlayer/DVDClock.cpp
+@@ -0,10 +0,20 @@
+   return clock + m_vSyncAdjust;
+ }
+ 
++double CDVDClock::GetClock(int& epoch)
++{
++  std::unique_lock lock(m_critSection);
++
++  const double clock = GetClock();
++  epoch = m_clockEpoch;
++  return clock;
++}
++
+ void CDVDClock::SetVsyncAdjust(double adjustment)
+ {
+   std::unique_lock lock(m_critSection);
+   m_vSyncAdjust = adjustment;
++  m_vsyncPhase.Reset();
+ }
+ 
+ void CDVDClock::Pause(bool pause)
+@@ -0,13 +0,19 @@
+   if (iSpeed == DVD_PLAYSPEED_PAUSE)
+   {
+     if (!m_pauseClock)
++    {
+       m_pauseClock = m_videoRefClock->GetTime();
++      m_clockEpoch++;
++    }
+     return;
+   }
+ 
+   int64_t current;
+   int64_t newfreq = m_systemFrequency * DVD_PLAYSPEED_NORMAL / iSpeed;
+ 
++  if (m_pauseClock || newfreq != m_systemUsed)
++    m_clockEpoch++;
++
+   current = m_videoRefClock->GetTime();
+   if (m_pauseClock)
+   {
+@@ -0,6 +0,7 @@
+   m_bReset = false;
+   m_systemAdjust = 0;
+   m_speedAdjust = 0;
++  m_clockEpoch++;
+ }
+ 
+ void CDVDClock::SetMaxSpeedAdjust(double speed)
+@@ -0,6 +0,7 @@
+     m_speedAdjust = 0;
+     m_vSyncAdjust = 0;
+     m_bReset = false;
++    m_clockEpoch++;
+   }
+ 
+   if (m_pauseClock)
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.h b/xbmc/cores/VideoPlayer/DVDClock.h
+--- a/xbmc/cores/VideoPlayer/DVDClock.h
++++ b/xbmc/cores/VideoPlayer/DVDClock.h
+@@ -0,6 +0,8 @@
+   double GetClock(double& absolute, bool interpolated = true);
+   //! The clock plus the vsync adjust, read together
+   double GetClockWithVsyncAdjust();
++  //! The clock and the epoch of its mapping, read together
++  double GetClock(int& epoch);
+ 
+   //! An `exact` error is moved by in full, as the audio engine already quantised it. A `start`
+   //! handover is never skipped as a minor update.
+@@ -0,5 +0,6 @@
+   CCriticalSection m_speedsection;
+ 
+   friend class CVsyncPhase;
++  int m_clockEpoch{0};
+   CVsyncPhase m_vsyncPhase{*this};
+ };
+diff --git a/xbmc/cores/VideoPlayer/VsyncPhase.cpp b/xbmc/cores/VideoPlayer/VsyncPhase.cpp
+--- a/xbmc/cores/VideoPlayer/VsyncPhase.cpp
++++ b/xbmc/cores/VideoPlayer/VsyncPhase.cpp
+@@ -0,7 +0,10 @@
+ #include "VsyncPhase.h"
+ 
+ #include "DVDClock.h"
++#include "cores/VideoPlayer/Interface/TimingConstants.h"
++#include "utils/log.h"
+ 
++#include <cmath>
+ #include <mutex>
+ 
+ void CVsyncPhase::SetPhasePeriod(double period)
+@@ -0,3 +0,77 @@
+   std::unique_lock lock(m_clock.m_critSection);
+   return m_clock.m_speedAdjust != 0 ? 0.0 : m_phasePeriod;
+ }
++
++void CVsyncPhase::SetVsyncPhasePending()
++{
++  std::unique_lock lock(m_clock.m_critSection);
++  m_clock.m_vSyncAdjust = 0;
++  m_state = State::PENDING;
++}
++
++double CVsyncPhase::ApplyVsyncPhaseReading(double reading, int epoch, bool restart)
++{
++  std::unique_lock lock(m_clock.m_critSection);
++
++  if (m_state == State::NONE)
++  {
++    if (!restart)
++      return -m_clock.m_vSyncAdjust;
++    m_clock.m_vSyncAdjust = 0;
++    m_state = State::PENDING;
++  }
++
++  // the audio start holds for a phase not read at this epoch only while a reading can come
++  if (reading == DVD_NOPTS_VALUE || m_clock.m_speedAdjust != 0 ||
++      m_clock.m_systemUsed != m_clock.m_systemFrequency || m_phasePeriod <= 0)
++  {
++    if (m_state == State::PENDING || m_epoch != m_clock.m_clockEpoch)
++    {
++      m_clock.m_vSyncAdjust = 0;
++      m_state = State::NONE;
++    }
++    return -m_clock.m_vSyncAdjust;
++  }
++  if (epoch != m_clock.m_clockEpoch || m_clock.m_bReset || m_clock.m_pauseClock)
++    return -m_clock.m_vSyncAdjust;
++
++  // the lattice branch nearest to the phase held
++  double vsyncPhase = -m_clock.m_vSyncAdjust;
++  const double step = reading - vsyncPhase;
++  vsyncPhase += step - m_phasePeriod * std::floor(step / m_phasePeriod + 0.5);
++
++  // a wrap moves the clock by a period so the clock minus the phase stays put
++  if (std::abs(vsyncPhase) >= m_phasePeriod)
++  {
++    const double wrap = vsyncPhase > 0 ? m_phasePeriod : -m_phasePeriod;
++    m_clock.m_iDisc -= wrap;
++    vsyncPhase -= wrap;
++    CLog::Log(LOGDEBUG,
++              "CVsyncPhase::ApplyVsyncPhaseReading - phase wrap, clock:{:.3f} wrap:{:.3f}",
++              m_clock.GetClock() / DVD_TIME_BASE, wrap / DVD_TIME_BASE);
++  }
++
++  m_clock.m_vSyncAdjust = -vsyncPhase;
++  PublishVsyncPhase();
++  return -m_clock.m_vSyncAdjust;
++}
++
++void CVsyncPhase::PublishVsyncPhase()
++{
++  // readers measure against one id, so a phase they have not seen gets a new one
++  if (m_state != State::PUBLISHED || m_epoch != m_clock.m_clockEpoch)
++    m_generation++;
++  m_state = State::PUBLISHED;
++  m_epoch = m_clock.m_clockEpoch;
++}
++
++int CVsyncPhase::GetVsyncPhaseId()
++{
++  std::unique_lock lock(m_clock.m_critSection);
++
++  if (m_state == State::NONE)
++    return 0;
++  if (m_state == State::PENDING || m_epoch != m_clock.m_clockEpoch || m_clock.m_bReset)
++    return -1;
++  return m_generation;
++}
+diff --git a/xbmc/cores/VideoPlayer/VsyncPhase.h b/xbmc/cores/VideoPlayer/VsyncPhase.h
+--- a/xbmc/cores/VideoPlayer/VsyncPhase.h
++++ b/xbmc/cores/VideoPlayer/VsyncPhase.h
+@@ -0,7 +0,9 @@
+ 
+ class CDVDClock;
+ 
+-// The clock sync phase of the vsync presenter. Every method runs under the clock's lock.
++// The clock sync phase s (vsync adjust -s) of the vsync presenter. It is none after
++// CDVDClock::SetVsyncAdjust(), pending a reading, or published at the clock epoch it was read at.
++// The epoch changes with the clock mapping. Every method runs under the clock's lock.
+ class CVsyncPhase
+ {
+ public:
+@@ -0,8 +0,32 @@
+   void SetPhasePeriod(double period);
+   //! The phase period, 0 while the speed is adjusted
+   double GetPhasePeriod() const;
++  void SetVsyncPhasePending();
++  //! Takes the reading of the phase made with the clock of `epoch`, DVD_NOPTS_VALUE for none,
++  //! and returns the phase that holds. A phase not read at the current epoch ends when no reading
++  //! can come; an ended one starts again from a reading only with `restart`. At a whole phase
++  //! period off, the clock and the phase move by it together.
++  double ApplyVsyncPhaseReading(double reading, int epoch, bool restart);
++  //! 0 without a phase, -1 while pending or published at an older epoch, else an id that
++  //! changes at a new epoch and after pending or none
++  int GetVsyncPhaseId();
+ 
+ private:
++  friend class CDVDClock;
++
++  enum class State
++  {
++    NONE,
++    PENDING,
++    PUBLISHED,
++  };
++
++  void Reset() { m_state = State::NONE; }
++  void PublishVsyncPhase();
++
+   CDVDClock& m_clock;
+   double m_phasePeriod{0.0};
++  State m_state{State::NONE};
++  int m_epoch{0};
++  int m_generation{0};
+ };

@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 27 Oct 2026 15:17:00 -0500
+Subject: [PATCH] DVDDemuxUtils: share the Blu-ray title time conversion
+
+Only the base demuxer puts Blu-ray timestamps on title time. The MVC
+dependent view pairs with the base view by exact timestamp, so it needs
+the same conversion, computed by the same code.
+---
+ .../DVDDemuxers/DVDDemuxFFmpeg.cpp            | 26 +++----------------
+ .../VideoPlayer/DVDDemuxers/DVDDemuxUtils.cpp | 26 +++++++++++++++++++
+ .../VideoPlayer/DVDDemuxers/DVDDemuxUtils.h   |  9 +++++++
+ 3 files changed, 39 insertions(+), 22 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+@@ -0,7 +0,6 @@
+ // ConvertTimestamp, which steps back at every seamless clip join.
+ void CDVDDemuxFFmpeg::ConvertBlurayTimestamps(DemuxPacket* packet, const AVStream* stream)
+ {
+-  constexpr AVRational CLIP_TIME_BASE = {1, 90000};
+   const auto bluray = static_cast<CDVDInputStreamBluray*>(m_pInput.get());
+ 
+   // a packet without position stays in the clip of its stream's last packet
+@@ -0,28 +0,11 @@
+   if (!clip)
+     return;
+ 
+-  const int64_t inTime =
+-      av_rescale_q(static_cast<int64_t>(clip->inTime), CLIP_TIME_BASE, stream->time_base);
+-  const int64_t startTime =
+-      av_rescale_q(static_cast<int64_t>(clip->startTime), CLIP_TIME_BASE, stream->time_base);
+-  const int64_t wrap = INT64_C(1) << stream->pts_wrap_bits;
+-
+-  const auto toTitleTime = [&](int64_t ts) -> double
++  // the preroll clamp of ConvertTimestamp, not on the transport stream path
++  const auto toTitleTime = [&](int64_t ts)
+   {
+-    if (ts == AV_NOPTS_VALUE)
+-      return DVD_NOPTS_VALUE;
+-
+-    int64_t clipTime = (ts - inTime) & (wrap - 1);
+-    if (clipTime >= wrap / 2)
+-      clipTime -= wrap;
+-
+-    double timestamp =
+-        static_cast<double>(clipTime + startTime) * stream->time_base.num / stream->time_base.den;
+-    // the preroll clamp of ConvertTimestamp, not on the transport stream path
+-    if (!m_checkTransportStream && timestamp < 0 && timestamp + 0.5 > 0)
+-      timestamp = 0;
+-
+-    return timestamp * DVD_TIME_BASE;
++    return CDVDDemuxUtils::BlurayTitleTime(ts, stream, clip->inTime, clip->startTime,
++                                           !m_checkTransportStream);
+   };
+ 
+   packet->pts = toTitleTime(m_pkt.pkt.pts);
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxUtils.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxUtils.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxUtils.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxUtils.cpp
+@@ -0,3 +0,29 @@
+   const double totalSeconds = hours * 3600.0 + minutes * 60.0 + seconds;
+   return totalSeconds > 0.0 ? frameCount / totalSeconds : 0.0;
+ }
++
++const AVRational CDVDDemuxUtils::BLURAY_CLIP_TIME_BASE = {1, 90000};
++
++double CDVDDemuxUtils::BlurayTitleTime(
++    int64_t ts, const AVStream* stream, uint64_t inTime, uint64_t startTime, bool clampPreroll)
++{
++  if (ts == AV_NOPTS_VALUE)
++    return DVD_NOPTS_VALUE;
++
++  const int64_t in =
++      av_rescale_q(static_cast<int64_t>(inTime), BLURAY_CLIP_TIME_BASE, stream->time_base);
++  const int64_t start =
++      av_rescale_q(static_cast<int64_t>(startTime), BLURAY_CLIP_TIME_BASE, stream->time_base);
++  const int64_t wrap = INT64_C(1) << stream->pts_wrap_bits;
++
++  int64_t clipTime = (ts - in) & (wrap - 1);
++  if (clipTime >= wrap / 2)
++    clipTime -= wrap;
++
++  double timestamp =
++      static_cast<double>(clipTime + start) * stream->time_base.num / stream->time_base.den;
++  if (clampPreroll && timestamp < 0 && timestamp + 0.5 > 0)
++    timestamp = 0;
++
++  return timestamp * DVD_TIME_BASE;
++}
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxUtils.h b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxUtils.h
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxUtils.h
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxUtils.h
+@@ -0,6 +0,8 @@
+ 
+ struct AVChapter;
+ struct AVPacket;
++struct AVRational;
++struct AVStream;
+ 
+ struct ChapterFFmpeg
+ {
+@@ -0,4 +0,11 @@
+   static bool SnapMsQuantisedFrameRate(int& fpsRate, int& fpsScale, double hintFps);
+   //! Average rate from Matroska NUMBER_OF_FRAMES and DURATION tags, or 0 if invalid.
+   static double FrameRateFromStatistics(const std::string& frames, const std::string& duration);
++  //! Time base of Blu-ray clip times (90 kHz)
++  static const AVRational BLURAY_CLIP_TIME_BASE;
++  //! Title time (DVD_TIME_BASE) of timestamp `ts` of `stream`, read in a Blu-ray clip from
++  //! `inTime` that plays at `startTime` of the title (both 90 kHz); `clampPreroll` puts the
++  //! half second before the title start at zero
++  static double BlurayTitleTime(
++      int64_t ts, const AVStream* stream, uint64_t inTime, uint64_t startTime, bool clampPreroll);
+ };

@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 22 Oct 2026 18:41:17 -0500
+Subject: [PATCH] Screenshot: tell the surface which screenshot it takes
+
+A capture spec does not say whether it is for a screenshot, so a
+surface reads a screenshot the way it reads a thumbnail or a
+continuous capture.
+---
+ xbmc/rendering/capture/CaptureTypes.h | 8 ++++++++
+ xbmc/utils/Screenshot.cpp             | 2 ++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/xbmc/rendering/capture/CaptureTypes.h b/xbmc/rendering/capture/CaptureTypes.h
+--- a/xbmc/rendering/capture/CaptureTypes.h
++++ b/xbmc/rendering/capture/CaptureTypes.h
+@@ -0,6 +0,13 @@
+   NATIVE, //!< the output surface's coding at its native depth
+ };
+ 
++//! The screenshot type a platform builds; captures other than screenshots leave it NONE
++enum class CaptureScreenshot
++{
++  NONE,
++  STANDARD, //!< what the user sees
++};
++
+ struct CaptureSpec
+ {
+   CaptureContent content{CaptureContent::COMPOSITE};
+@@ -0,6 +0,7 @@
+   unsigned int width{0};
+   unsigned int height{0};
+   CaptureFormat format{CaptureFormat::BGRA8};
++  CaptureScreenshot screenshot{CaptureScreenshot::NONE};
+ };
+ 
+ struct CaptureResult
+diff --git a/xbmc/utils/Screenshot.cpp b/xbmc/utils/Screenshot.cpp
+--- a/xbmc/utils/Screenshot.cpp
++++ b/xbmc/utils/Screenshot.cpp
+@@ -0,6 +0,7 @@
+   CaptureSpec spec;
+   spec.content = content;
+   spec.format = CaptureFormat::NATIVE;
++  spec.screenshot = CaptureScreenshot::STANDARD;
+ 
+   // failure dispatches an empty result because some consumers must act on
+   // it (a bookmark still writes its DB row); here WriteCapture declines it
+@@ -0,6 +0,7 @@
+   CaptureSpec spec;
+   spec.content = content;
+   spec.format = CaptureFormat::NATIVE;
++  spec.screenshot = CaptureScreenshot::STANDARD;
+ 
+   // Submitted before any filesystem work so the readback grabs the current frame;
+   // the folder dialog (when the path is unset), naming, and write all run in the

@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 09:12:38 -0600
+Subject: [PATCH] VsyncPhase: shift the clock sync phase by a video delay
+ change
+
+The phase moves only through a reading of the picture on screen. Each
+reading lands on the nearest whole period, so a run of video delay
+steps ends where its path took it, and the part below a period has no
+way onto the clock the audio follows.
+---
+ xbmc/cores/VideoPlayer/VsyncPhase.cpp | 24 ++++++++++++++++++++++++
+ xbmc/cores/VideoPlayer/VsyncPhase.h   |  9 ++++++++-
+ 2 files changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VsyncPhase.cpp b/xbmc/cores/VideoPlayer/VsyncPhase.cpp
+--- a/xbmc/cores/VideoPlayer/VsyncPhase.cpp
++++ b/xbmc/cores/VideoPlayer/VsyncPhase.cpp
+@@ -0,6 +0,30 @@
+   return -m_clock.m_vSyncAdjust;
+ }
+ 
++bool CVsyncPhase::ShiftVsyncPhase(double delay, double& phase)
++{
++  std::unique_lock lock(m_clock.m_critSection);
++
++  if (m_state != State::PUBLISHED || m_phasePeriod <= 0 || m_clock.m_speedAdjust != 0 ||
++      m_clock.m_systemUsed != m_clock.m_systemFrequency)
++    return false;
++
++  // the video moves by whole periods, so what the audio has not followed stays within half of one
++  const double owed = m_shift - m_shiftFollowed;
++  const double shift =
++      owed + delay - m_phasePeriod * std::floor((owed + delay) / m_phasePeriod + 0.5) - owed;
++  if (shift != 0)
++  {
++    m_shift += shift;
++    m_generation++;
++    SetVsyncPhase(-m_clock.m_vSyncAdjust - shift);
++  }
++  CLog::Log(LOGDEBUG, "CVsyncPhase::ShiftVsyncPhase - delay:{:.3f} video:{:.3f} shift:{:.3f}",
++            delay / DVD_TIME_BASE, (delay - shift) / DVD_TIME_BASE, shift / DVD_TIME_BASE);
++  phase = -m_clock.m_vSyncAdjust;
++  return true;
++}
++
+ void CVsyncPhase::SetVsyncPhase(double vsyncPhase)
+ {
+   // a wrap moves the clock by a period so the clock minus the phase stays put
+diff --git a/xbmc/cores/VideoPlayer/VsyncPhase.h b/xbmc/cores/VideoPlayer/VsyncPhase.h
+--- a/xbmc/cores/VideoPlayer/VsyncPhase.h
++++ b/xbmc/cores/VideoPlayer/VsyncPhase.h
+@@ -0,8 +0,12 @@
+   //! epoch ends when no reading can come; an ended one starts again from a reading only with
+   //! `restart`. At a whole phase period off, the clock and the phase move by it together.
+   double ApplyVsyncPhaseReading(double reading, int epoch, bool restart);
++  //! Moves a published phase by a change `delay` of the video delay: the video by whole phase
++  //! periods, the clock the audio follows by the rest. False without a published phase, a phase
++  //! period or at a speed adjust.
++  bool ShiftVsyncPhase(double delay, double& phase);
+   //! 0 without a phase, -1 while pending or published at an older epoch, else an id that
+-  //! changes at a new epoch and after pending or none
++  //! changes at a new epoch, after pending or none, and at a phase shift
+   int GetVsyncPhaseId();
+ 
+ private:
+@@ -0,4 +0,7 @@
+   int m_epoch{0};
+   int m_generation{0};
+   int m_readings{0};
++  // the sum of all phase shifts, and its value when the audio last followed it
++  double m_shift{0.0};
++  double m_shiftFollowed{0.0};
+ };

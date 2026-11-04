@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 15 Oct 2026 17:13:52 -0500
+Subject: [PATCH] vdin: bypass the vdin1 hdr stage for v4l2 capture
+
+vdin_set_hdr mapped HDR10 and HLG captures to SDR on SoCs with a vdin1
+hdr stage, and for DV it programmed nothing, so the stage kept the
+previous session's mapping. A v4l2 capture's colours depended on the
+SoC and on the previous session.
+---
+ drivers/media/vin/tvin/vdin/vdin_ctl.c    | 4 ++++
+ drivers/media/vin/tvin/vdin/vdin_ctl_s5.c | 4 ++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_ctl.c b/drivers/media/vin/tvin/vdin/vdin_ctl.c
+--- a/drivers/media/vin/tvin/vdin/vdin_ctl.c
++++ b/drivers/media/vin/tvin/vdin/vdin_ctl.c
+@@ -0,6 +0,10 @@
+ 		break;
+ 	}
+ 
++	/* v4l2 clients own the tone mapping: keep the stage in bypass */
++	if (devp->work_mode == VDIN_WORK_MD_V4L)
++		video_format = SIGNAL_SDR;
++
+ #ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
+ 	if (for_amdv_certification()) {
+ 		/*not modify data*/
+diff --git a/drivers/media/vin/tvin/vdin/vdin_ctl_s5.c b/drivers/media/vin/tvin/vdin/vdin_ctl_s5.c
+--- a/drivers/media/vin/tvin/vdin/vdin_ctl_s5.c
++++ b/drivers/media/vin/tvin/vdin/vdin_ctl_s5.c
+@@ -0,6 +0,10 @@
+ 		break;
+ 	}
+ 
++	/* v4l2 clients own the tone mapping: keep the stage in bypass */
++	if (devp->work_mode == VDIN_WORK_MD_V4L)
++		video_format = SIGNAL_SDR;
++
+ #ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
+ 	if (for_amdv_certification()) {
+ 		/*not modify data*/

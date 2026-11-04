@@ -1,0 +1,161 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 07:54:37 -0600
+Subject: [PATCH] DVDDemuxFFmpeg: drop an enhancement layer the item does not
+ list
+
+A UHD Blu-ray can offer one clip as Dolby Vision and as HDR10 from two
+playlists. Only the Dolby Vision one lists the enhancement layer in its
+stream table, and players decode only listed streams. The demuxer took
+the layer whenever Dolby Vision was enabled, so HDR10 played as DV.
+---
+ .../DVDDemuxers/DVDDemuxFFmpeg.cpp            | 26 +++++++++-----
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 35 +++++++++++++++++++
+ .../DVDInputStreams/DVDInputStreamBluray.h    | 10 ++++--
+ 3 files changed, 60 insertions(+), 11 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+@@ -0,6 +0,23 @@
+       return nullptr;
+     }
+ 
++#ifdef HAVE_LIBBLURAY
++    // UHD BD have a secondary video stream called by Dolby as enhancement layer. A player
++    // decodes it only where the stream table of the play item lists it.
++    if (pStream->id == HDMV_PID_VIDEO_EL && m_pInput->IsStreamType(DVDSTREAM_TYPE_BLURAY))
++    {
++      const bool dvEnabled = aml_dolby_vision_enabled();
++      if (!dvEnabled ||
++          !static_cast<CDVDInputStreamBluray*>(m_pInput.get())->ListsEnhancementLayer(pStream->id))
++      {
++        CLog::Log(LOGDEBUG, "CDVDDemuxFFmpeg::AddStream - discarding Dolby Vision stream ({})",
++                  dvEnabled ? "not in the play item" : "disabled");
++        pStream->discard = AVDISCARD_ALL;
++        return nullptr;
++      }
++    }
++#endif
++
+     CDemuxStream* stream = nullptr;
+ 
+     switch (pStream->codecpar->codec_type)
+@@ -0,15 +0,6 @@
+ #ifdef HAVE_LIBBLURAY
+     if (m_pInput->IsStreamType(DVDSTREAM_TYPE_BLURAY))
+     {
+-      // UHD BD have a secondary video stream called by Dolby as enhancement layer.
+-      // This is not used by streaming services and devices (ATV, Nvidia Shield, XONE).
+-      if (pStream->id == 0x1015 && !aml_dolby_vision_enabled())
+-      {
+-        CLog::Log(LOGDEBUG, "CDVDDemuxFFmpeg::AddStream - discarding Dolby Vision stream");
+-        pStream->discard = AVDISCARD_ALL;
+-        delete stream;
+-        return nullptr;
+-      }
+       stream->dvdNavId = pStream->id;
+ 
+       auto it = std::find_if(m_streams.begin(), m_streams.end(),
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,6 +0,7 @@
+ #include <iterator>
+ #include <limits>
+ #include <memory>
++#include <span>
+ #include <string>
+ #include <utility>
+ #include <vector>
+@@ -0,6 +0,7 @@
+   m_clip = nullptr;
+   m_nextClip = nullptr;
+   m_heldClip = nullptr;
++  m_demuxerClip = nullptr;
+   m_endedTitleTime = 0;
+   FreeClipInfo();
+ }
+@@ -0,7 +0,15 @@
+ {
+   const int result = ReadData(buf, buf_size);
+   if (result > 0)
++  {
+     m_readPos += result;
++    // a read returns the bytes of one clip, which ends where libbluray stands
++    if (m_demuxerClipPending)
++    {
++      m_demuxerClip = GetClipAt(bd_tell(m_bd) - result);
++      m_demuxerClipPending = false;
++    }
++  }
+   return result;
+ }
+ 
+@@ -0,6 +0,11 @@
+ 
+     result = std::min(buf_size, static_cast<int>(m_clipStart.size() - m_clipStartOffset));
+     std::copy_n(m_clipStart.data() + m_clipStartOffset, result, buf);
++    if (m_demuxerClipPending)
++    {
++      m_demuxerClip = m_heldClip;
++      m_demuxerClipPending = false;
++    }
+     m_clipStartOffset += result;
+     if (m_clipStartOffset == m_clipStart.size())
+       m_clipStart.clear();
+@@ -0,6 +0,26 @@
+   return jump;
+ }
+ 
++void CDVDInputStreamBluray::ReleaseClipStart()
++{
++  m_clipStartHeld = false;
++  m_demuxerClip = nullptr;
++  m_demuxerClipPending = true;
++}
++
++bool CDVDInputStreamBluray::ListsEnhancementLayer(int pid) const
++{
++#if (BLURAY_VERSION >= BLURAY_VERSION_CODE(1, 5, 0))
++  if (!m_demuxerClip)
++    return true;
++  return std::ranges::any_of(std::span(m_demuxerClip->dv_streams, m_demuxerClip->dv_stream_count),
++                             [pid](const BLURAY_STREAM_INFO& info)
++                             { return info.pid == static_cast<uint16_t>(pid); });
++#else
++  return true;
++#endif
++}
++
+ const BLURAY_CLIP_INFO* CDVDInputStreamBluray::GetNextItemClip() const
+ {
+   if (m_bMVCPlayback || m_hasMVCExtension)
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,9 +0,13 @@
+    */
+   std::optional<ClipTime> GetClipTime(uint64_t readPos) const;
+ 
+-  //! hand the clip start held at a join to the demuxer opened after it
+-  void ReleaseClipStart() { m_clipStartHeld = false; }
++  //! hand the clip start held at a join to the demuxer opened after it, whose first bytes then
++  //! name its play item
++  void ReleaseClipStart();
+   bool IsClipStartHeld() const { return !m_navmode && m_clipStartHeld && !m_clipStart.empty(); }
++  //! whether the stream table of the play item the demuxer opened on lists the Dolby Vision
++  //! enhancement layer `pid`, true when libbluray does not tell
++  bool ListsEnhancementLayer(int pid) const;
+   bool IsTitleEnded() const { return m_endedTitleTime > 0; }
+   bool IsTitleEndWait() const { return m_titleEndWait; }
+   //! whether a held title end still waits for its last picture to be presented
+@@ -0,6 +0,8 @@
+     bool m_clipStartHeld{false};
+     uint64_t m_clipStartEnd{0};
+     const BLURAY_CLIP_INFO* m_heldClip{nullptr};
++    const BLURAY_CLIP_INFO* m_demuxerClip{nullptr};
++    bool m_demuxerClipPending{false};
+     uint32_t m_pgStreamNumber{0};
+     uint32_t m_audioStreamNumber{0};
+     bool m_audioStreamPick{false};

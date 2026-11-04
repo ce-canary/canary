@@ -1,0 +1,245 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 09:24:08 -0600
+Subject: [PATCH] ApplicationPlayer: announce when a delay change is finished
+
+A client that follows a delay through Player.OnPropertyChanged sees each
+step of a slider or a settings dialog, but not which value the user kept.
+Only a guess with a timer tells a step from the end of the change.
+---
+ xbmc/application/ApplicationPlayer.cpp        | 16 +++++++++--
+ xbmc/application/ApplicationPlayer.h          |  9 ++++++-
+ xbmc/interfaces/json-rpc/schema/methods.json  |  3 ++-
+ .../json-rpc/schema/notifications.json        | 27 +++++++++++++++++++
+ xbmc/video/PlayerController.cpp               | 20 +++++++++++++-
+ xbmc/video/PlayerController.h                 |  1 +
+ .../dialogs/GUIDialogSubtitleSettings.cpp     | 15 +++++++++++
+ .../video/dialogs/GUIDialogSubtitleSettings.h |  2 ++
+ 8 files changed, 88 insertions(+), 5 deletions(-)
+
+diff --git a/xbmc/application/ApplicationPlayer.cpp b/xbmc/application/ApplicationPlayer.cpp
+--- a/xbmc/application/ApplicationPlayer.cpp
++++ b/xbmc/application/ApplicationPlayer.cpp
+@@ -0,8 +0,20 @@
+ void CApplicationPlayer::CommitAVDelay()
+ {
+   std::shared_ptr<IPlayer> player = GetInternal();
+-  if (player)
+-    player->CommitAVDelay();
++  if (!player)
++    return;
++
++  player->CommitAVDelay();
++
++  AnnounceDelay("OnPropertyChangeFinished", "audiodelay", GetVideoSettings().m_AudioDelay);
++}
++
++void CApplicationPlayer::CommitSubTitleDelay()
++{
++  if (!HasPlayer())
++    return;
++
++  AnnounceDelay("OnPropertyChangeFinished", "subtitledelay", GetVideoSettings().m_SubtitleDelay);
+ }
+ 
+ void CApplicationPlayer::SetDynamicRangeCompression(long drc)
+diff --git a/xbmc/application/ApplicationPlayer.h b/xbmc/application/ApplicationPlayer.h
+--- a/xbmc/application/ApplicationPlayer.h
++++ b/xbmc/application/ApplicationPlayer.h
+@@ -0,7 +0,8 @@
+   void SetAVDelay(float fValue = 0.0f);
+ 
+   /*!
+-   * \brief Ends an interactive change of the audio delay: the player applies it
++   * \brief Ends an interactive change of the audio delay: the player applies it and its final
++   * value is announced
+    */
+   void CommitAVDelay();
+ 
+@@ -0,6 +0,12 @@
+   bool SetPlayerState(const std::string& state);
+   void SetSubtitle(int iStream);
+   void SetSubTitleDelay(float fValue = 0.0f);
++
++  /*!
++   * \brief Ends an interactive change of the subtitle delay and announces its final value
++   */
++  void CommitSubTitleDelay();
++
+   void SetSubtitleVisible(bool bVisible);
+ 
+   /*!
+diff --git a/xbmc/interfaces/json-rpc/schema/methods.json b/xbmc/interfaces/json-rpc/schema/methods.json
+--- a/xbmc/interfaces/json-rpc/schema/methods.json
++++ b/xbmc/interfaces/json-rpc/schema/methods.json
+@@ -0,7 +0,8 @@
+   },
+   "Player.SetAudioDelay": {
+     "type": "method",
+-    "description": "Set the audio delay for the current playback",
++    "description":
++        "Set the audio delay for the current playback. A numeric offset, increment and decrement all end the change and send Player.OnPropertyChangeFinished.",
+     "transport": "Response",
+     "permission": "ControlPlayback",
+     "params": [
+diff --git a/xbmc/interfaces/json-rpc/schema/notifications.json b/xbmc/interfaces/json-rpc/schema/notifications.json
+--- a/xbmc/interfaces/json-rpc/schema/notifications.json
++++ b/xbmc/interfaces/json-rpc/schema/notifications.json
+@@ -0,6 +0,33 @@
+     ],
+     "returns": null
+   },
++  "Player.OnPropertyChangeFinished": {
++    "type": "notification",
++    "description":
++        "An interactive change of a property of the playing item has finished. The property holds its final value.",
++    "params": [
++      {
++        "name": "sender",
++        "type": "string",
++        "required": true
++      },
++      {
++        "name": "data",
++        "type": "object",
++        "required": true,
++        "properties": {
++          "property": {
++            "$ref": "Player.Property.Value"
++          },
++          "player": {
++            "$ref": "Player.Notifications.Player",
++            "required": true
++          }
++        }
++      }
++    ],
++    "returns": null
++  },
+   "Playlist.OnAdd": {
+     "type": "notification",
+     "description": "A playlist item has been added.",
+diff --git a/xbmc/video/PlayerController.cpp b/xbmc/video/PlayerController.cpp
+--- a/xbmc/video/PlayerController.cpp
++++ b/xbmc/video/PlayerController.cpp
+@@ -0,6 +0,12 @@
+   return action == ACTION_AUDIO_DELAY || action == ACTION_AUDIO_DELAY_MIN ||
+          action == ACTION_AUDIO_DELAY_PLUS;
+ }
++
++bool IsSubtitleDelayAction(int action)
++{
++  return action == ACTION_SUBTITLE_DELAY || action == ACTION_SUBTITLE_DELAY_MIN ||
++         action == ACTION_SUBTITLE_DELAY_PLUS;
++}
+ } // namespace
+ 
+ CPlayerController::CPlayerController()
+@@ -0,6 +0,8 @@
+         vs.m_SubtitleDelay -= videoSubsDelayStep;
+         if (vs.m_SubtitleDelay < -videoSubsDelayRange)
+           vs.m_SubtitleDelay = -videoSubsDelayRange;
++        if (vs.m_SubtitleDelay != appPlayer->GetVideoSettings().m_SubtitleDelay)
++          m_subtitleDelayChanged = true;
+         appPlayer->SetSubTitleDelay(vs.m_SubtitleDelay);
+ 
+         ShowSlider(action.GetID(), 22006, appPlayer->GetVideoSettings().m_SubtitleDelay,
+@@ -0,6 +0,8 @@
+         vs.m_SubtitleDelay += videoSubsDelayStep;
+         if (vs.m_SubtitleDelay > videoSubsDelayRange)
+           vs.m_SubtitleDelay = videoSubsDelayRange;
++        if (vs.m_SubtitleDelay != appPlayer->GetVideoSettings().m_SubtitleDelay)
++          m_subtitleDelayChanged = true;
+         appPlayer->SetSubTitleDelay(vs.m_SubtitleDelay);
+ 
+         ShowSlider(action.GetID(), 22006, appPlayer->GetVideoSettings().m_SubtitleDelay,
+@@ -0,7 +0,8 @@
+ void CPlayerController::ShowSlider(int action, int label, float value, float min, float delta, float max, bool modal)
+ {
+   // the open dialog takes the new slider without a close, which ends the change of the old one
+-  if (IsAudioDelayAction(action) != IsAudioDelayAction(m_sliderAction))
++  if (IsAudioDelayAction(action) != IsAudioDelayAction(m_sliderAction) ||
++      IsSubtitleDelayAction(action) != IsSubtitleDelayAction(m_sliderAction))
+     OnSliderClose(nullptr);
+   m_sliderAction = action;
+   if (modal)
+@@ -0,6 +0,8 @@
+     }
+     else if (m_sliderAction == ACTION_SUBTITLE_DELAY)
+     {
++      if (slider->GetFloatValue() != appPlayer->GetVideoSettings().m_SubtitleDelay)
++        m_subtitleDelayChanged = true;
+       appPlayer->SetSubTitleDelay(slider->GetFloatValue());
+     }
+     else if (m_sliderAction == ACTION_VOLAMP)
+@@ -0,4 +0,9 @@
+     m_audioDelayChanged = false;
+     appPlayer->CommitAVDelay();
+   }
++  else if (IsSubtitleDelayAction(m_sliderAction) && m_subtitleDelayChanged)
++  {
++    m_subtitleDelayChanged = false;
++    appPlayer->CommitSubTitleDelay();
++  }
+ }
+diff --git a/xbmc/video/PlayerController.h b/xbmc/video/PlayerController.h
+--- a/xbmc/video/PlayerController.h
++++ b/xbmc/video/PlayerController.h
+@@ -0,5 +0,6 @@
+ 
+   int m_sliderAction = 0; ///< \brief set to the action id for a slider being displayed \sa ShowSlider
+   bool m_audioDelayChanged{false};
++  bool m_subtitleDelayChanged{false};
+   KODI::UTILS::MOVING_SPEED::CMovingSpeed m_movingSpeed;
+ };
+diff --git a/xbmc/video/dialogs/GUIDialogSubtitleSettings.cpp b/xbmc/video/dialogs/GUIDialogSubtitleSettings.cpp
+--- a/xbmc/video/dialogs/GUIDialogSubtitleSettings.cpp
++++ b/xbmc/video/dialogs/GUIDialogSubtitleSettings.cpp
+@@ -0,6 +0,19 @@
+   CGUIDialogSettingsManualBase::FrameMove();
+ }
+ 
++void CGUIDialogSubtitleSettings::OnDeinitWindow(int nextWindowID)
++{
++  if (m_subtitleDelayChanged)
++  {
++    auto& components = CServiceBroker::GetAppComponents();
++    const auto appPlayer = components.GetComponent<CApplicationPlayer>();
++    appPlayer->CommitSubTitleDelay();
++    m_subtitleDelayChanged = false;
++  }
++
++  CGUIDialogSettingsManualBase::OnDeinitWindow(nextWindowID);
++}
++
+ bool CGUIDialogSubtitleSettings::OnMessage(CGUIMessage& message)
+ {
+   if (message.GetMessage() == GUI_MSG_SUBTITLE_DOWNLOADED)
+@@ -0,6 +0,8 @@
+   else if (settingId == SETTING_SUBTITLE_DELAY)
+   {
+     float value = static_cast<float>(std::static_pointer_cast<const CSettingNumber>(setting)->GetValue());
++    if (value != appPlayer->GetVideoSettings().m_SubtitleDelay)
++      m_subtitleDelayChanged = true;
+     appPlayer->SetSubTitleDelay(value);
+   }
+   else if (settingId == SETTING_SUBTITLE_STREAM)
+diff --git a/xbmc/video/dialogs/GUIDialogSubtitleSettings.h b/xbmc/video/dialogs/GUIDialogSubtitleSettings.h
+--- a/xbmc/video/dialogs/GUIDialogSubtitleSettings.h
++++ b/xbmc/video/dialogs/GUIDialogSubtitleSettings.h
+@@ -0,6 +0,7 @@
+ 
+   // specialization of CGUIWindow
+   void FrameMove() override;
++  void OnDeinitWindow(int nextWindowID) override;
+ 
+   static std::string BrowseForSubtitle();
+ 
+@@ -0,6 +0,7 @@
+ 
+   int m_subtitleStream;
+   bool m_subtitleVisible;
++  bool m_subtitleDelayChanged{false};
+   std::shared_ptr<CSettingInt> m_subtitleStreamSetting;
+ 
+   std::vector<IPlayerSubtitleCaps> m_subtitleCapabilities;

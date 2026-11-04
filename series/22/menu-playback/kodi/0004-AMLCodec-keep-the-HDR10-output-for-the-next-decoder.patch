@@ -1,0 +1,170 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 29 Oct 2026 18:07:25 -0500
+Subject: [PATCH] AMLCodec: keep the HDR10 output for the next decoder
+
+A decoder close takes the video layer off, and the HDR module then
+sends SDR until the next decoder shows a frame. Between two HDR10
+items the sink relocks from HDR10 to SDR and back, which blanks the
+picture for up to a second. The module treats only a PQ transfer as
+HDR10, so a title with HDR10 metadata alone plays as SDR.
+---
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  | 57 +++++++++++++++++--
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.h    |  4 +-
+ 2 files changed, 54 insertions(+), 7 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,6 +0,16 @@
+            (hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && dv2hdr)));
+ }
+ 
++// whether a decoder for `hints` sends HDR10 through the HDR module; forced PQ caps the sink at
++// HDR10, so an HDR10+ stream qualifies only where the sink drops its dynamic metadata anyway
++bool PlaysHdr10Output(const CDVDStreamInfo& hints, bool hdr10Plus)
++{
++  const auto hdrCap = CServiceBroker::GetWinSystem()->GetDisplayHDRCapabilities();
++  return !RunsDolbyVision(hints) && hints.hdrType == StreamHdrType::HDR_TYPE_HDR10 &&
++         hints.colorTransferCharacteristic == AVCOL_TRC_SMPTE2084 && hdrCap.SupportsHDR10() &&
++         (!hdr10Plus || !hdrCap.SupportsHDR10Plus());
++}
++
+ } // namespace
+ 
+ /*************************************************************************/
+@@ -0,6 +0,7 @@
+       AmlDisplay->aml_set_drmProperty("dv_policy", DRM_MODE_OBJECT_CRTC, AMDV_FOLLOW_SINK);
+       AmlDisplay->aml_set_drmProperty("hdr_policy", DRM_MODE_OBJECT_CRTC, AMDV_FOLLOW_SINK);
+       AmlDisplay->aml_set_drmProperty("force_output", DRM_MODE_OBJECT_CRTC, forceOutput);
++      m_outputModule = OutputModule::NONE;
+     }
+   }
+ 
+@@ -0,6 +0,11 @@
+       AmlDisplay->aml_set_drmProperty("dv_policy", DRM_MODE_OBJECT_CRTC, AMDV_FOLLOW_SOURCE);
+       dolby_vision_policy = AMDV_FOLLOW_SOURCE;
+     }
++    else if (m_outputModule == OutputModule::HDR)
++    {
++      AmlDisplay->aml_set_drmProperty("hdr_policy", DRM_MODE_OBJECT_CRTC, HDR_FOLLOW_SOURCE);
++      AmlDisplay->aml_set_drmProperty("force_output", DRM_MODE_OBJECT_CRTC, FORCE_OUTPUT_DISABLED);
++    }
+     CloseOutput(dv_enabled, dolby_vision_policy, m_decoder_timeout);
+ 
+     ShowMainVideo(false);
+@@ -0,14 +0,35 @@
+     }
+   }
+ 
++  // forced PQ keeps HDR10 on the wire over the gap without video, where the HDR module sends
++  // SDR otherwise; a user mapping keeps its own close
++  if (!dvEnabled && PlaysHdr10Output(m_hints, m_processInfo.GetIsHdr10Plus()) &&
++      (m_outputModule == OutputModule::HDR ||
++       (AmlDisplay->aml_get_drmProperty("hdr_policy", DRM_MODE_OBJECT_CRTC) == HDR_FOLLOW_SOURCE &&
++        dvPolicy != AMDV_FORCE_OUTPUT_MODE)))
++  {
++    // follow sink without the forced output sees a sink without HDR, so the forced output goes
++    // first
++    if (m_outputModule != OutputModule::HDR)
++    {
++      AmlDisplay->aml_set_drmProperty("force_output", DRM_MODE_OBJECT_CRTC, FORCE_OUTPUT_BT2020_PQ);
++      AmlDisplay->aml_set_drmProperty("hdr_policy", DRM_MODE_OBJECT_CRTC, HDR_FOLLOW_SINK);
++    }
++    heldModule = OutputModule::HDR;
++    hold = Hold::OUTPUT_HDR;
++  }
++
+   if (hold != Hold::NONE)
+   {
+     holdDecoderTimeout = m_decoder_timeout;
+     holdKept = true;
+   }
+   CLog::Log(LOGDEBUG, "CAMLCodec::{}: armed close keeps {}, dv core {}, dv policy {}",
+-            __FUNCTION__, hold == Hold::OUTPUT_DV ? "the dv output" : "nothing", dvEnabled,
+-            dvPolicy);
++            __FUNCTION__,
++            hold == Hold::OUTPUT_DV    ? "the dv output"
++            : hold == Hold::OUTPUT_HDR ? "the hdr output"
++                                       : "nothing",
++            dvEnabled, dvPolicy);
+   return hold;
+ }
+ 
+@@ -0,7 +0,9 @@
+   if (!holdKept || holdOwner != m_holdGen)
+     return;
+ 
+-  const bool take = heldModule == OutputModule::DV && RunsDolbyVision(hints);
++  const bool take = (heldModule == OutputModule::DV && RunsDolbyVision(hints)) ||
++                    (heldModule == OutputModule::HDR &&
++                     PlaysHdr10Output(hints, m_processInfo.GetIsHdr10Plus()));
+   CLog::Log(LOGDEBUG, "CAMLCodec::{}: {} the held output", __FUNCTION__,
+             take ? "takes" : "releases");
+   if (take)
+@@ -0,7 +0,7 @@
+   std::lock_guard<std::mutex> lock(holdMutex);
+   if (failed && m_outputModule != OutputModule::NONE)
+   {
+-    RestoreOutput(m_decoder_timeout);
++    RestoreOutput(m_outputModule, m_decoder_timeout);
+     m_outputModule = OutputModule::NONE;
+   }
+ }
+@@ -0,13 +0,13 @@
+ // under holdMutex
+ void CAMLCodec::ReleaseKept()
+ {
+-  RestoreOutput(holdDecoderTimeout);
++  RestoreOutput(heldModule, holdDecoderTimeout);
+   holdKept = false;
+   holdOwner = 0;
+ }
+ 
+ // the output teardown of a decoder close, where the hold of the output ends
+-void CAMLCodec::RestoreOutput(int decoderTimeout)
++void CAMLCodec::RestoreOutput(OutputModule module, int decoderTimeout)
+ {
+   auto* AmlDisplay =
+       static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
+@@ -0,6 +0,12 @@
+ 
+   ShowMainVideo(false);
+ 
++  if (module == OutputModule::HDR)
++  {
++    AmlDisplay->aml_set_drmProperty("hdr_policy", DRM_MODE_OBJECT_CRTC, HDR_FOLLOW_SOURCE);
++    AmlDisplay->aml_set_drmProperty("force_output", DRM_MODE_OBJECT_CRTC, FORCE_OUTPUT_DISABLED);
++  }
++
+   if (dvEnabled && dvPolicy == AMDV_FORCE_OUTPUT_MODE)
+     AmlDisplay->aml_set_drmProperty("dv_mode", DRM_MODE_OBJECT_CRTC, AMDV_OUTPUT_MODE_BYPASS);
+   CloseOutput(dvEnabled, dvPolicy, decoderTimeout);
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+@@ -0,6 +0,7 @@
+   {
+     NONE,
+     DV,
++    HDR,
+   };
+ 
+ private:
+@@ -0,6 +0,7 @@
+   {
+     NONE,
+     OUTPUT_DV,
++    OUTPUT_HDR,
+   };
+ 
+   static void   ShowMainVideo(const bool show);
+@@ -0,7 +0,7 @@
+   void          TakeHold(const CDVDStreamInfo& hints);
+   void          EndHold(bool failed);
+   static void   ReleaseKept();
+-  static void   RestoreOutput(int decoderTimeout);
++  static void   RestoreOutput(OutputModule module, int decoderTimeout);
+   std::string   GetVfmMap(const std::string &name);
+   void          SetVfmMap(const std::string &name, const std::string &map);
+   int           DequeueBuffer();

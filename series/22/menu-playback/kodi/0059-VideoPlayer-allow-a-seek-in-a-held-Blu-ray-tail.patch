@@ -1,0 +1,187 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 28 Oct 2026 22:10:33 -0500
+Subject: [PATCH] VideoPlayer: allow a seek in a held Blu-ray tail
+
+The player dropped every seek once the end of a title was read, as it
+would act on the next item. With the end held, the disc program stays
+on the title until its last picture is shown. Seeks were also dropped
+in the tail a non-seamless join plays out, while stock Kodi runs them
+late.
+---
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 36 +++++++++++++++++--
+ .../DVDInputStreams/DVDInputStreamBluray.h    |  5 +++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 36 +++++++++++++++----
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  1 +
+ 4 files changed, 69 insertions(+), 9 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,14 +0,45 @@
+   return m_dispTimeBeforeRead;
+ }
+ 
++// a read held at a discontinuity of the playlist, with the start of the next clip intact
++bool CDVDInputStreamBluray::IsJoinHeld() const
++{
++  return m_navmode && m_hold == HOLD_HELD && m_event.event == BD_EVENT_DISCONTINUITY &&
++         !m_clipStart.empty() && m_heldClip;
++}
++
++bool CDVDInputStreamBluray::IsTailInTitle() const
++{
++  if (IsTitleEndHeld())
++    return true;
++  return IsJoinHeld();
++}
++
++// a seek back before the held clip plays on in the same demuxer; a seek into the held clip or past
++// it keeps the discontinuity, whose reset the demuxer probed on the old clip needs
++void CDVDInputStreamBluray::DropClipStartOnSeek(bool joinHeld)
++{
++  const BLURAY_CLIP_INFO* clip = joinHeld ? GetClipAt(bd_tell(m_bd)) : nullptr;
++  if (clip && clip < m_heldClip)
++  {
++    m_event.event = BD_EVENT_NONE;
++    m_hold = HOLD_NONE;
++  }
++
++  m_clipStart.clear();
++  m_clipStartHeld = false;
++  m_heldClip = nullptr;
++}
++
+ bool CDVDInputStreamBluray::PosTime(int ms)
+ {
++  const bool joinHeld = IsJoinHeld();
+   if(bd_seek_time(m_bd, ms * 90) < 0)
+     return false;
+ 
+   ResetTitleEnd();
+ 
+-  m_clipStart.clear();
++  DropClipStartOnSeek(joinHeld);
+   EMPTY_QUEUE(m_clipQueue);
+   // a held still belongs to the position the seek left
+   if (m_event.event != BD_EVENT_NONE && m_event.event != BD_EVENT_STILL_TIME)
+@@ -0,12 +0,13 @@
+ 
+ bool CDVDInputStreamBluray::SeekChapter(int ch)
+ {
++  const bool joinHeld = IsJoinHeld();
+   if(m_titleInfo && bd_seek_chapter(m_bd, ch-1) < 0)
+     return false;
+ 
+   ResetTitleEnd();
+ 
+-  m_clipStart.clear();
++  DropClipStartOnSeek(joinHeld);
+   EMPTY_QUEUE(m_clipQueue);
+   // a held still belongs to the position the seek left
+   if (m_event.event != BD_EVENT_NONE && m_event.event != BD_EVENT_STILL_TIME)
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,9 @@
+   //! and the title time of the player clock, DVD_NOPTS_VALUE while the clock is stopped
+   void SetLastPictureTime(double time, double clockTime);
+ 
++  //! whether a seek while the read is held stays in the title being played out
++  bool IsTailInTitle() const;
++
+   //! whether a menu action made the disc program leave the item being played out, reset by the call
+   bool TakeItemAbandoned();
+ 
+@@ -0,6 +0,8 @@
+     void DropClipStartOnJump();
+     bool TakeMenuJump(bool joinsInLine);
+     bool AbandonsItem(bool menuJump, bool fromStill) const;
++    bool IsJoinHeld() const;
++    void DropClipStartOnSeek(bool joinHeld);
+     const BLURAY_CLIP_INFO* GetClipAt(uint64_t titlePos) const;
+ 
+     /*!
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,16 @@
+ #endif
+ }
+ 
++bool CVideoPlayer::IsBlurayTailInTitle() const
++{
++#if defined(HAVE_LIBBLURAY)
++  const auto bluray = GetBlurayInputStream();
++  return bluray && bluray->IsTailInTitle();
++#else
++  return false;
++#endif
++}
++
+ bool CVideoPlayer::TakeBlurayItemAbandoned()
+ {
+ #if defined(HAVE_LIBBLURAY)
+@@ -0,15 +0,27 @@
+   return true;
+ }
+ 
+-// seeks in the tail are dropped, as they would act on the next item; a disc audio or subtitle
+-// pick goes to the disc, whose stream registers carry it into the next item; video and program
+-// picks have no disc register and are dropped
++// seeks in the tail are dropped, as they would act on the next item, unless the read is held in
++// the title; a disc audio or subtitle pick goes to the disc, whose stream registers carry it into
++// the next item; video and program picks have no disc register and are dropped
+ bool CVideoPlayer::DropInNavTail(CDVDMsg& msg)
+ {
++  // a released title end drops seeks before the play state shows it
++  if (IsBlurayTitleEndWait() && !IsBlurayTitleEndHeld())
++  {
++    if (msg.IsType(CDVDMsg::PLAYER_SEEK))
++    {
++      m_processInfo->SetStateSeeking(false);
++      return true;
++    }
++    if (msg.IsType(CDVDMsg::PLAYER_SEEK_CHAPTER))
++      return true;
++  }
+   if (!m_navTail)
+     return false;
+ 
+-  if (msg.IsType(CDVDMsg::PLAYER_SEEK))
++  const bool seekable = IsBlurayTailInTitle();
++  if (msg.IsType(CDVDMsg::PLAYER_SEEK) && !seekable)
+   {
+     m_processInfo->SetStateSeeking(false);
+     return true;
+@@ -0,8 +0,8 @@
+     SelectDiscStream(st);
+     return true;
+   }
+-  return msg.IsType(CDVDMsg::PLAYER_SEEK_CHAPTER) || msg.IsType(CDVDMsg::PLAYER_SET_VIDEOSTREAM) ||
+-         msg.IsType(CDVDMsg::PLAYER_SET_PROGRAM);
++  return (msg.IsType(CDVDMsg::PLAYER_SEEK_CHAPTER) && !seekable) ||
++         msg.IsType(CDVDMsg::PLAYER_SET_VIDEOSTREAM) || msg.IsType(CDVDMsg::PLAYER_SET_PROGRAM);
+ }
+ 
+ // passes a pick of a disc stream to the disc, false when the disc does not allow the change; in a
+@@ -0,7 +0,7 @@
+ 
+   // the ended title keeps its duration for pause, a seek after it or in the tail would act on the
+   // next item
+-  if (IsBlurayTitleEnded() || m_navTail)
++  if (IsBlurayTitleEnded() || (m_navTail && !IsBlurayTailInTitle()))
+     state.canseek = false;
+ 
+   m_processInfo->SetPlayTimes(state.startTime, state.time, state.timeMin, state.timeMax);
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+   bool IsBlurayTitleEnded() const;
+   bool IsBlurayTitleEndWait() const;
+   bool IsBlurayTitleEndHeld() const;
++  bool IsBlurayTailInTitle() const;
+   bool TakeBlurayItemAbandoned();
+   bool PollBlurayEvents();
+   double GetBlurayPresentedTime();

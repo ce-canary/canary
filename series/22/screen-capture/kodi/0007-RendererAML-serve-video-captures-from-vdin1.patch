@@ -1,0 +1,428 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 22 Oct 2026 18:04:50 -0500
+Subject: [PATCH] RendererAML: serve video captures from vdin1
+
+The Amlogic renderer puts video on a hardware layer and has no
+CaptureVideoFrame, so every video capture fails: bookmark thumbnails,
+RenderCapture and the video half of a screenshot.
+---
+ .../HwDecRender/RendererAML.cpp               |  58 +++++++
+ .../VideoRenderers/HwDecRender/RendererAML.h  |   5 +
+ xbmc/utils/AMLCapture.cpp                     | 147 ++++++++++++++++++
+ xbmc/utils/AMLCapture.h                       |  25 +++
+ xbmc/utils/AMLCaptureConvert.h                |  12 ++
+ 5 files changed, 247 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+@@ -0,14 +0,19 @@
+ #include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h"
+ #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
+ #include "cores/VideoPlayer/VideoRenderers/RenderFlags.h"
++#include "rendering/capture/CapturePixels.h"
++#include "rendering/capture/CaptureTypes.h"
+ #include "settings/AdvancedSettings.h"
+ #include "settings/MediaSettings.h"
++#include "utils/AMLCapture.h"
+ #include "utils/AMLUtils.h"
+ #include "utils/log.h"
+ #include "windowing/GraphicContext.h"
+ #include "windowing/WinSystem.h"
+ #include "windowing/amlogic/WinSystemAmlogic.h"
+ 
++#include <algorithm>
++
+ namespace
+ {
+ // queued in one vsync, picked at the next and live one later
+@@ -0,6 +0,8 @@
+ 
+ CRendererAML::~CRendererAML()
+ {
++  if (m_capture)
++    m_capture->ClearPresented();
+   Reset();
+   static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())
+       ->ReleaseHdrGuiSession(m_hdrGuiOwner);
+@@ -0,11 +0,54 @@
+     winSystem->ReleaseHdrGuiSession(m_hdrGuiOwner);
+     m_hdrGuiOwner = 0;
+   }
++
++  if (!m_capture)
++    m_capture = CAMLCapture::Get();
++  AMLCaptureSource source;
++  source.dolbyVision = picture.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION;
++  source.transfer = picture.color_transfer;
++  m_capture->Configure(source);
++
+   m_bConfigured = true;
+ 
+   return true;
+ }
+ 
++bool CRendererAML::CaptureVideoFrame(const KODI::RENDERING::CAPTURE::CaptureSpec& spec,
++                                     KODI::RENDERING::CAPTURE::CaptureResult& result)
++{
++  using namespace KODI::RENDERING::CAPTURE;
++
++  const CRect visible =
++      m_capture && m_capture->IsPresented() ? m_capture->GetVisibleRect() : CRect();
++  if (visible.IsEmpty())
++  {
++    if (spec.cadence != CaptureCadence::CONTINUOUS)
++      return false;
++
++    // no picture yet: an empty delivery keeps a continuous capture alive (a callback
++    // would read it as a failure; RenderCapture has none)
++    result.pixels = std::make_shared<CHeapCapturePixels>(nullptr);
++    result.content = CaptureContent::VIDEO;
++    return true;
++  }
++
++  int captureWidth = 0;
++  int captureHeight = 0;
++  CAMLCapture::GetCaptureSize(captureWidth, captureHeight);
++
++  AMLCaptureVideoSpec video;
++  video.rect = CRect(0.0f, 0.0f, visible.Width(), visible.Height());
++  video.continuous = spec.cadence == CaptureCadence::CONTINUOUS;
++  video.width = spec.width ? static_cast<int>(spec.width)
++                           : std::max(2, static_cast<int>(video.rect.Width() * captureWidth));
++  video.height = spec.height ? static_cast<int>(spec.height)
++                             : std::max(2, static_cast<int>(video.rect.Height() * captureHeight));
++
++  m_capture->CreateVideoPixels(video, result);
++  return true;
++}
++
+ CRenderInfo CRendererAML::GetRenderInfo()
+ {
+   CRenderInfo info;
+@@ -0,6 +0,8 @@
+       {
+         m_releasedToken = amli->m_metadataToken;
+         m_releasedMeta = amli->m_metadata;
++        if (m_capture)
++          m_capture->SetPresented();
+       }
+       if (setVideoRect)
+         amli->m_amlCodec->SetVideoRect(m_sourceRect, m_destRect);
+@@ -0,6 +0,12 @@
+ {
+   ManageRenderArea();
+ 
++  if (m_capture && m_destRect != m_captureRect)
++  {
++    m_capture->SetVideoRect(m_destRect);
++    m_captureRect = m_destRect;
++  }
++
+   if (m_vsyncPresent)
+   {
+     std::shared_ptr<CAMLCodec> codec;
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
+@@ -0,6 +0,7 @@
+ #include <memory>
+ #include <mutex>
+ 
++class CAMLCapture;
+ class CAMLCodec;
+ struct AMLFrameMetadata;
+ 
+@@ -0,6 +0,8 @@
+ 
+   // Player functions
+   virtual bool IsGuiLayer() override { return false; };
++  virtual bool CaptureVideoFrame(const KODI::RENDERING::CAPTURE::CaptureSpec& spec,
++                                 KODI::RENDERING::CAPTURE::CaptureResult& result) override;
+   virtual bool StartVsyncPresent() override;
+   virtual void StopVsyncPresent() override;
+   virtual bool WaitVsync() override;
+@@ -0,4 +0,6 @@
+   //! Frame last released to amvideo, whose metadata goes out when the frame is shown
+   uint32_t m_releasedToken{0};
+   std::shared_ptr<const AMLFrameMetadata> m_releasedMeta;
++  std::shared_ptr<CAMLCapture> m_capture;
++  CRect m_captureRect;
+ };
+diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
+--- a/xbmc/utils/AMLCapture.cpp
++++ b/xbmc/utils/AMLCapture.cpp
+@@ -0,6 +0,7 @@
+ #include "cores/VideoPlayer/DVDCodecs/Video/AMLFrameMetadata.h"
+ #include "cores/VideoPlayer/Interface/StreamInfo.h"
+ #include "jobs/JobManager.h"
++#include "rendering/capture/CapturePixels.h"
+ #include "settings/Settings.h"
+ #include "settings/SettingsComponent.h"
+ #include "utils/AMLUtils.h"
+@@ -0,6 +0,8 @@
+ #include <sys/mman.h>
+ #include <unistd.h>
+ 
++using namespace KODI::RENDERING::CAPTURE;
++
+ namespace
+ {
+ 
+@@ -0,6 +0,8 @@
+ constexpr int MAX_CAPTURE_HEIGHT = 1080;
+ // vdin strides each line to 64 pixels but sizes the buffer from the width
+ constexpr int CAPTURE_WIDTH_ALIGN = 64;
++// the vdin scalers cannot shrink by 32 or more
++constexpr int MAX_CAPTURE_SHRINK = 32;
+ // DV player-led, dv2hdr and sdr2hdr frames are already display-mapped
+ constexpr float MAPPED_PEAK_NITS = 1000.0f;
+ // the grade of a Dolby Vision TV-led signal when the stream carries no HDR statics
+@@ -0,6 +0,94 @@
+   return source.titlePeak > 0 ? source.titlePeak : fallback;
+ }
+ 
++// the stream size that holds width x height pixels in the normalized crop
++void GetStreamSize(const CRect& crop, int width, int height, int& streamWidth, int& streamHeight)
++{
++  CAMLCapture::GetCaptureSize(streamWidth, streamHeight);
++  if (crop.IsEmpty())
++    return;
++
++  const RESOLUTION_INFO screen = CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo();
++
++  // a size within one alignment step of the capture is the capture, so full-size requests that
++  // differ by rounding share the stream
++  const auto size = [](int pixels, float part, int align, int output, int limit)
++  {
++    const int needed =
++        std::max(static_cast<int>(std::ceil(pixels / part)), output / MAX_CAPTURE_SHRINK + 1);
++    const int aligned = (needed + align - 1) / align * align;
++    return aligned >= limit - align ? limit : aligned;
++  };
++  streamWidth = size(width, crop.Width(), CAPTURE_WIDTH_ALIGN, screen.iScreenWidth, streamWidth);
++  streamHeight = size(height, crop.Height(), 2, screen.iScreenHeight, streamHeight);
++}
++
++// width x height sRGB pixels
++void DescribeSdr(int width, int height, CaptureResult& result)
++{
++  result.width = static_cast<unsigned int>(width);
++  result.height = static_cast<unsigned int>(height);
++  result.stride = width * 4;
++  result.format = AV_PIX_FMT_BGRA;
++  result.color.primaries = AVCOL_PRI_BT709;
++  result.color.transfer = AVCOL_TRC_IEC61966_2_1;
++  result.color.range = AVCOL_RANGE_JPEG;
++}
++
++class CAMLVideoPixels : public ICapturePixels
++{
++public:
++  CAMLVideoPixels(std::weak_ptr<CAMLCapture> session,
++                  std::shared_ptr<void> lease,
++                  const AMLCaptureVideoSpec& spec,
++                  int streamWidth,
++                  int streamHeight)
++    : m_session(std::move(session)),
++      m_lease(std::move(lease)),
++      m_spec(spec),
++      m_streamWidth(streamWidth),
++      m_streamHeight(streamHeight)
++  {
++  }
++
++  const uint8_t* Lock() override
++  {
++    std::lock_guard lock(m_lock);
++
++    // per-frame buffers stay immutable: every Lock returns the first read
++    if (m_read)
++      return m_buffer.get();
++    m_read = true;
++
++    const auto session = m_session.lock();
++    if (!session)
++      return nullptr;
++
++    auto buffer = std::make_unique_for_overwrite<uint8_t[]>(static_cast<size_t>(m_spec.width) *
++                                                            m_spec.height * 4);
++    const AMLCaptureImage dst = AMLCaptureImage::Packed(
++        AV_PIX_FMT_BGRA, m_spec.width, m_spec.height, buffer.get(), m_spec.width * 4);
++    const bool ok = session->Read(
++        m_streamWidth, m_streamHeight,
++        [this, &dst](const AMLCaptureFrame& frame, CAMLCaptureConvert& convert)
++        { return convert.Convert(CAMLCapture::Crop(frame.image, m_spec.rect), frame.color, dst); });
++
++    if (ok)
++      m_buffer = std::move(buffer);
++    return m_buffer.get();
++  }
++
++private:
++  std::weak_ptr<CAMLCapture> m_session;
++  std::shared_ptr<void> m_lease;
++  AMLCaptureVideoSpec m_spec;
++  int m_streamWidth{0};
++  int m_streamHeight{0};
++  std::mutex m_lock;
++  bool m_read{false};
++  std::unique_ptr<uint8_t[]> m_buffer;
++};
++
+ std::mutex s_sessionLock;
+ std::weak_ptr<CAMLCapture> s_session;
+ 
+@@ -0,6 +0,28 @@
+   m_presented = true;
+ }
+ 
++void CAMLCapture::SetVideoRect(const CRect& rect)
++{
++  std::lock_guard lock(m_lock);
++
++  m_videoRect = rect;
++}
++
++CRect CAMLCapture::GetVisibleRect()
++{
++  // the codec places the video at the GUI rect scaled to the output, so the GUI size normalizes it
++  const CGraphicContext& context = CServiceBroker::GetWinSystem()->GetGfxContext();
++  const RESOLUTION_INFO gui = context.GetResInfo(context.GetVideoResolution());
++  if (gui.iWidth <= 0 || gui.iHeight <= 0)
++    return {};
++
++  std::lock_guard lock(m_lock);
++
++  CRect rect(m_videoRect.x1 / gui.iWidth, m_videoRect.y1 / gui.iHeight, m_videoRect.x2 / gui.iWidth,
++             m_videoRect.y2 / gui.iHeight);
++  return rect.Intersect(CRect(0.0f, 0.0f, 1.0f, 1.0f));
++}
++
+ std::shared_ptr<CAMLCapture::CStream> CAMLCapture::TakeStream()
+ {
+   if (m_stream)
+@@ -0,3 +0,35 @@
+   }
+   return color;
+ }
++
++AMLCaptureImage CAMLCapture::Crop(const AMLCaptureImage& image, const CRect& rect)
++{
++  if (rect.IsEmpty())
++    return image;
++
++  const auto edge = [](float v, int size)
++  { return std::clamp(static_cast<int>(std::lround(v * size / 2)) * 2, 0, size); };
++  const int x1 = edge(rect.x1, image.width);
++  const int x2 = edge(rect.x2, image.width);
++  const int y1 = edge(rect.y1, image.height);
++  const int y2 = edge(rect.y2, image.height);
++
++  AMLCaptureImage crop = image;
++  crop.width = x2 - x1;
++  crop.height = y2 - y1;
++  crop.data[0] += y1 * image.linesize[0] + x1;
++  crop.data[1] += y1 / 2 * image.linesize[1] + x1;
++  return crop;
++}
++
++void CAMLCapture::CreateVideoPixels(const AMLCaptureVideoSpec& spec, CaptureResult& result)
++{
++  int width = 0;
++  int height = 0;
++  GetStreamSize(spec.rect, spec.width, spec.height, width, height);
++  auto lease = spec.continuous ? Lease(width, height) : Lease();
++  result.pixels =
++      std::make_shared<CAMLVideoPixels>(weak_from_this(), std::move(lease), spec, width, height);
++  DescribeSdr(spec.width, spec.height, result);
++  result.content = CaptureContent::VIDEO;
++}
+diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
+--- a/xbmc/utils/AMLCapture.h
++++ b/xbmc/utils/AMLCapture.h
+@@ -0,7 +0,9 @@
+ #pragma once
+ 
+ #include "guilib/DispResource.h"
++#include "rendering/capture/CaptureTypes.h"
+ #include "utils/AMLCaptureConvert.h"
++#include "utils/Geometry.h"
+ 
+ #include <atomic>
+ #include <condition_variable>
+@@ -0,6 +0,15 @@
+   AMLCaptureColor color;
+ };
+ 
++struct AMLCaptureVideoSpec
++{
++  int width{0};
++  int height{0};
++  //! the visible video, normalized to the output; vdin1 holds it at the frame origin
++  CRect rect;
++  bool continuous{false};
++};
++
+ //! \brief The process-wide capture session on the vdin1 V4L2 node: video after the VPP and the
+ //! DV and HDR cores, without the GUI.
+ //!
+@@ -0,7 +0,13 @@
+ 
+   void Configure(const AMLCaptureSource& source);
+   void SetPresented();
++  //! the renderer releases the session: no video is presented
++  void ClearPresented() { m_presented = false; }
+   bool IsPresented() const { return m_presented; }
++  //! Render thread: the video destination in GUI coordinates
++  void SetVideoRect(const CRect& rect);
++  //! Render thread: the video destination on screen, normalized to the output
++  CRect GetVisibleRect();
+ 
+   //! Keeps the stream running until the last lease is released. A continuous consumer passes
+   //! the stream size it reads at, which the stream keeps while the lease lasts.
+@@ -0,6 +0,13 @@
+   //! restarts the stream. A wait ends after a bound of output frame periods.
+   bool Read(int width, int height, const ReadFunc& use);
+ 
++  //! The crop of an NV12 image to a normalized rect, on even pixels for the chroma plane
++  static AMLCaptureImage Crop(const AMLCaptureImage& image, const CRect& rect);
++
++  //! Deferred sRGB BGRA pixels of the visible video in result.
++  void CreateVideoPixels(const AMLCaptureVideoSpec& spec,
++                         KODI::RENDERING::CAPTURE::CaptureResult& result);
++
+ private:
+   class CStream;
+ 
+@@ -0,6 +0,7 @@
+   AMLCaptureSource m_source;
+   //! the frame metadata the title peak in m_source was decoded from
+   std::shared_ptr<const AMLFrameMetadata> m_staticsMeta;
++  CRect m_videoRect;
+   std::atomic<bool> m_presented{false};
+ 
+   //! serializes consumers; held across the frame wait, never taken by Stop
+diff --git a/xbmc/utils/AMLCaptureConvert.h b/xbmc/utils/AMLCaptureConvert.h
+--- a/xbmc/utils/AMLCaptureConvert.h
++++ b/xbmc/utils/AMLCaptureConvert.h
+@@ -0,6 +0,18 @@
+   int height{0};
+   uint8_t* data[2]{};
+   int linesize[2]{};
++
++  static AMLCaptureImage Packed(
++      AVPixelFormat format, int width, int height, uint8_t* data, int linesize)
++  {
++    AMLCaptureImage image;
++    image.format = format;
++    image.width = width;
++    image.height = height;
++    image.data[0] = data;
++    image.linesize[0] = linesize;
++    return image;
++  }
+ };
+ 
+ //! A buffer kept between calls whose growth leaves the new elements uninitialized

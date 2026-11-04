@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 23:53:51 -0500
+Subject: [PATCH] VideoPlayerVideo: report the release lead as the start delay
+
+The video start delay is a 100 ms placeholder, and an interlaced start
+on Amlogic moved its start timestamp by a fixed 12 fields. Behind the
+vsync presenter a picture reaches the screen two vsyncs after its
+release, plus a field when deinterlaced, so the clock did not start
+with the first picture on screen.
+---
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp   | 22 ++-----------------
+ .../VideoRenderers/RenderManager.cpp          |  2 +-
+ .../VideoRenderers/RenderManager.h            |  2 +-
+ 3 files changed, 4 insertions(+), 22 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+@@ -0,27 +0,9 @@
+       SStartMsg msg;
+       msg.player = VideoPlayer_VIDEO;
+       msg.cachetime = DVD_MSEC_TO_TIME(50); //! @todo implement
+-      msg.cachetotal = DVD_MSEC_TO_TIME(100); //! @todo implement
+-
+-      // Amlogic hardware deinterlace pipeline latency compensation.
+-      // When interlaced content is decoded by AML hardware, the VFM pipeline
+-      // includes a deinterlace module (di0) that buffers multiple fields before
+-      // producing output (buffer_keep_count=3, start_frame_drop=2, plus post-
+-      // processing). Kodi captures PTS via V4L2 DQBUF *before* the DI stage,
+-      // so the frame appears on screen ~240ms later than Kodi's sync expects.
+-      // Shift the video start timestamp forward to delay audio accordingly.
+-      double diCompensation = 0;
+-      if (m_processInfo.GetVideoInterlaced() && m_processInfo.IsVideoHwDecoder() &&
+-          CSysfsPath{"/sys/class/deinterlace/di0/frame_format"}.Exists())
+-      {
+-        constexpr int DI_PIPELINE_FIELDS = 12;
+-        diCompensation = DI_PIPELINE_FIELDS * DVD_TIME_BASE / m_fFrameRate;
+-        CLog::Log(LOGDEBUG, "CVideoPlayerVideo - DI pipeline latency compensation: "
+-                  "{:.0f}ms ({} fields at {:.1f}Hz)",
+-                  diCompensation / (DVD_TIME_BASE / 1000), DI_PIPELINE_FIELDS, m_fFrameRate);
+-      }
++      msg.cachetotal = DVD_MSEC_TO_TIME(m_renderManager.GetReleaseLead());
+ 
+-      msg.timestamp = hasTimestamp ? (pts + m_renderManager.GetDelay() * 1000 + diCompensation) : DVD_NOPTS_VALUE;
++      msg.timestamp = hasTimestamp ? (pts + m_renderManager.GetDelay() * 1000) : DVD_NOPTS_VALUE;
+       m_messageParent.Put(std::make_shared<CDVDMsgType<SStartMsg>>(CDVDMsg::PLAYER_STARTED, msg));
+     }
+ 
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,7 +0,7 @@
+ {
+   std::unique_lock lock(m_statelock);
+ 
+-  if (m_renderState != STATE_CONFIGURED || !m_pRenderer)
++  if (m_renderState != STATE_CONFIGURED || !m_pRenderer || m_pRenderer->GetPresentLatency() < 0)
+     return UNKNOWN_RELEASE_LEAD_MS;
+ 
+   return CalcReleaseLead();
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -0,7 +0,7 @@
+ 
+   /**
+    * The time in ms from the release of a frame to its scan-out, without the video delay;
+-   * 100 until a renderer is configured
++   * 100 until a renderer is configured or when it does not know its present latency
+    */
+   double GetReleaseLead();
+ 
