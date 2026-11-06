@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 12:33:32 -0600
+Subject: [PATCH] vdin: capture any even width at a reported line stride
+
+vdin rounded a capture width down to the canvas alignment and reported
+line sizes without the stride the hardware writes at. A client could
+only read widths on that alignment, so 720 came out as 704 and a Native
+shot was resampled.
+---
+ drivers/media/vin/tvin/vdin/vdin_ctl.c     |  2 +-
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 39 +++++++++++-----------
+ 2 files changed, 20 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_ctl.c b/drivers/media/vin/tvin/vdin/vdin_ctl.c
+--- a/drivers/media/vin/tvin/vdin/vdin_ctl.c
++++ b/drivers/media/vin/tvin/vdin/vdin_ctl.c
+@@ -0,7 +0,7 @@
+ 	if (devp->index == 0)
+ 		return 0;
+ 
+-	scaling4w = rounddown(devp->prop.scaling4w, devp->canvas_align);
++	scaling4w = rounddown(devp->prop.scaling4w, 2);
+ 	if (devp->prop.scaling4w != scaling4w) {
+ 		pr_info("vdin1,%s.scaling4w=%d round down to %d\n",
+ 			__func__, devp->prop.scaling4w, scaling4w);
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,16 +0,18 @@
+ 
+ 	if (v4l2_fmt->fmt.pix_mp.num_planes == 1) {
+ 		if (v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_UYVY) {
+-			v4l2_fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
+-				v4l2_fmt->fmt.pix_mp.width * v4l2_fmt->fmt.pix_mp.height * 2;
+ 			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
+-				(v4l2_fmt->fmt.pix_mp.width * 16) >> 3;
++				roundup(v4l2_fmt->fmt.pix_mp.width * 2, devp->canvas_align);
++			v4l2_fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
++				v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline *
++				v4l2_fmt->fmt.pix_mp.height;
+ 		} else if (v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12 ||
+ 				   v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21) {
+-			v4l2_fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
+-				v4l2_fmt->fmt.pix_mp.width * v4l2_fmt->fmt.pix_mp.height * 3 / 2;
+ 			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
+-				(v4l2_fmt->fmt.pix_mp.width * 12) >> 3;
++				roundup(v4l2_fmt->fmt.pix_mp.width, devp->canvas_align);
++			v4l2_fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
++				v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline *
++				v4l2_fmt->fmt.pix_mp.height * 3 / 2;
+ 		} else if (v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_AML_YUV422_10P) {
+ 			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
+ 				roundup(v4l2_fmt->fmt.pix_mp.width * 5 / 2, devp->canvas_align);
+@@ -0,26 +0,24 @@
+ 		v4l2_fmt->fmt.pix_mp.plane_fmt[1].sizeimage = 0;
+ 		v4l2_fmt->fmt.pix_mp.plane_fmt[1].bytesperline = 0;
+ 	} else if (v4l2_fmt->fmt.pix_mp.num_planes == 2) {
++		unsigned int stride = roundup(v4l2_fmt->fmt.pix_mp.width, devp->canvas_align);
++
+ 		if (v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV16M ||
+ 			v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV61M) {
++			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline = stride;
++			v4l2_fmt->fmt.pix_mp.plane_fmt[1].bytesperline = stride;
+ 			v4l2_fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
+-				v4l2_fmt->fmt.pix_mp.width * v4l2_fmt->fmt.pix_mp.height;
++				stride * v4l2_fmt->fmt.pix_mp.height;
+ 			v4l2_fmt->fmt.pix_mp.plane_fmt[1].sizeimage =
+-				v4l2_fmt->fmt.pix_mp.width * v4l2_fmt->fmt.pix_mp.height;
+-			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
+-				v4l2_fmt->fmt.pix_mp.width;
+-			v4l2_fmt->fmt.pix_mp.plane_fmt[1].bytesperline =
+-				v4l2_fmt->fmt.pix_mp.width;
++				stride * v4l2_fmt->fmt.pix_mp.height;
+ 		} else if (v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12M ||
+ 				   v4l2_fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21M) {
++			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline = stride;
++			v4l2_fmt->fmt.pix_mp.plane_fmt[1].bytesperline = stride;
+ 			v4l2_fmt->fmt.pix_mp.plane_fmt[0].sizeimage =
+-				v4l2_fmt->fmt.pix_mp.width * v4l2_fmt->fmt.pix_mp.height;
++				stride * v4l2_fmt->fmt.pix_mp.height;
+ 			v4l2_fmt->fmt.pix_mp.plane_fmt[1].sizeimage =
+-				v4l2_fmt->fmt.pix_mp.width * v4l2_fmt->fmt.pix_mp.height / 2;
+-			v4l2_fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
+-				v4l2_fmt->fmt.pix_mp.width;
+-			v4l2_fmt->fmt.pix_mp.plane_fmt[1].bytesperline =
+-				v4l2_fmt->fmt.pix_mp.width / 2;
++				stride * v4l2_fmt->fmt.pix_mp.height / 2;
+ 		}
+ 	} else {
+ 		dprintk(0, "vdin%d,err.not support num_planes=%d\n ",
+@@ -0,8 +0,7 @@
+ static void vdin_v4l2_bound_size(struct vdin_dev_s *devp,
+ 				 struct v4l2_pix_format_mplane *pix_mp)
+ {
+-	pix_mp->width = clamp_t(u32, rounddown(pix_mp->width, devp->canvas_align),
+-				devp->canvas_align, VDIN_4K_SIZE >> 16);
++	pix_mp->width = clamp_t(u32, rounddown(pix_mp->width, 2), 2, VDIN_4K_SIZE >> 16);
+ 	pix_mp->height = clamp_t(u32, rounddown(pix_mp->height, 2), 2, VDIN_4K_SIZE & 0xffff);
+ }
+ 

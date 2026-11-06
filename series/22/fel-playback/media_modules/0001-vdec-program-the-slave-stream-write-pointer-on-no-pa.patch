@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SamuriHL <samurihl@gmail.com>
+Date: Thu, 5 Nov 2026 22:11:12 -0600
+Subject: [PATCH] vdec: program the slave stream write pointer on no-parser
+ SoCs
+
+With no stream parser (SC2 and S6 among them) only the master of a dual
+layer pair writes HEVC_STREAM_WR_PTR. The slave copies the master's wp
+into its vbuf and leaves the register at the master's last run. So
+vdec_has_more_input stays true on the slave, and an el can spin at the
+end of input.
+---
+ drivers/frame_provider/decoder/utils/vdec.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/drivers/frame_provider/decoder/utils/vdec.c b/drivers/frame_provider/decoder/utils/vdec.c
+--- a/drivers/frame_provider/decoder/utils/vdec.c
++++ b/drivers/frame_provider/decoder/utils/vdec.c
+@@ -0,6 +0,9 @@
+ 			} else {
+ 				STBUF_WRITE(&vdec->vbuf, set_wp,
+ 					STBUF_READ(&vdec->master->vbuf, get_wp));
++				/* the register still holds the master's last run */
++				WRITE_VREG(HEVC_STREAM_WR_PTR,
++					STBUF_READ(&vdec->vbuf, get_wp));
+ 			}
+ 		} else {
+ 			WRITE_VREG(HEVC_STREAM_WR_PTR,

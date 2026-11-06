@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 11:19:54 -0600
+Subject: [PATCH] vdin: report the v4l2 frame period
+
+VIDIOC_G_PARM returned nothing, so a client took the period from the
+output rate. A capture that delivers one field of a pair has twice that
+period, and a client that took it for the output rate threw away frames
+it thought were stale.
+---
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,6 +0,15 @@
+ static int vdin_vidioc_g_parm(struct file *file, void *priv,
+ 			 struct v4l2_streamparm *parms)
+ {
++	struct vdin_dev_s *devp = video_drvdata(file);
++	const struct vinfo_s *vinfo = get_current_vinfo();
++	struct v4l2_fract *period = &parms->parm.capture.timeperframe;
++
++	period->numerator = vinfo->sync_duration_den;
++	period->denominator = vinfo->sync_duration_num;
++	if (vdin_v4l2_is_field(devp))
++		period->numerator *= 2;
++
+ 	return 0;
+ }
+ 

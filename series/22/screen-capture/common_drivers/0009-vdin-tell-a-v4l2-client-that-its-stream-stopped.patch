@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 13:09:19 -0600
+Subject: [PATCH] vdin: tell a v4l2 client that its stream stopped
+
+Suspend, a debug stop or another vdin user stops the decoder without
+vb2 knowing. A client then polled a queue that would never give another
+frame, and could only guess from silence.
+---
+ drivers/media/vin/tvin/vdin/vdin_drv.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.c b/drivers/media/vin/tvin/vdin/vdin_drv.c
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.c
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.c
+@@ -0,6 +0,10 @@
+ 		return;
+ 	}
+ 
++	/* a client must not wait on frames of a stream stopped outside v4l2 */
++	if (devp->work_mode == VDIN_WORK_MD_V4L && vb2_start_streaming_called(&devp->vb_queue))
++		vb2_queue_error(&devp->vb_queue);
++
+ 	if (devp->index == 0 && devp->dtdata->vdin0_en == 0) {
+ 		pr_err("%s vdin%d not enable\n", __func__, devp->index);
+ 		return;

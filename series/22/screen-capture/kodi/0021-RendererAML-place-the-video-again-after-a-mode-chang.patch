@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 00:59:04 -0600
+Subject: [PATCH] RendererAML: place the video again after a mode change
+
+A mode switch at video start waits for the first frame, so the plane
+holds the size of the old mode. It stays there until the next new frame
+after the clock resumes. For that moment the screen shows a small
+picture in a corner, and a capture of the screen shows it too.
+---
+ .../HwDecRender/RendererAML.cpp               | 34 +++++++++++++------
+ .../VideoRenderers/HwDecRender/RendererAML.h  |  6 ++--
+ 2 files changed, 28 insertions(+), 12 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+@@ -0,7 +0,10 @@
+       if (setVideoRect)
+         amli->m_amlCodec->SetVideoRect(m_sourceRect, m_destRect);
+       m_presentHold = amli->m_amlCodec->GetPresentHold();
+-      m_prevCodec = amli->m_amlCodec;
++      {
++        std::lock_guard<std::mutex> lock(m_pendingGeometryLock);
++        m_prevCodec = amli->m_amlCodec;
++      }
+       std::shared_ptr<CAMLCodec> codec = std::move(amli->m_amlCodec); //Mark frame as processed
+       m_prevVPts = pts;
+       return codec;
+@@ -0,6 +0,18 @@
+   return nullptr;
+ }
+ 
++void CRendererAML::Update()
++{
++  // a new mode leaves the plane at its old size until the next new frame
++  const RESOLUTION res = CServiceBroker::GetWinSystem()->GetGfxContext().GetVideoResolution();
++  std::lock_guard<std::mutex> lock(m_pendingGeometryLock);
++  if (res == m_placedResolution)
++    return;
++
++  m_placedResolution = res;
++  m_pendingGeometry = m_prevCodec.lock();
++}
++
+ void CRendererAML::RenderUpdate(int index, int index2, bool clear, unsigned int flags, unsigned int alpha)
+ {
+   ManageRenderArea();
+@@ -0,17 +0,16 @@
+     m_captureRect = m_destRect;
+   }
+ 
+-  if (m_vsyncPresent)
++  std::shared_ptr<CAMLCodec> codec;
+   {
+-    std::shared_ptr<CAMLCodec> codec;
+-    {
+-      std::lock_guard<std::mutex> lock(m_pendingGeometryLock);
+-      codec.swap(m_pendingGeometry);
+-    }
+-    if (codec && codec->IsOpen())
+-      codec->SetVideoRect(m_sourceRect, m_destRect);
+-    return;
++    std::lock_guard<std::mutex> lock(m_pendingGeometryLock);
++    codec.swap(m_pendingGeometry);
+   }
++  if (codec && codec->IsOpen())
++    codec->SetVideoRect(m_sourceRect, m_destRect);
++
++  if (m_vsyncPresent)
++    return;
+ 
+   QueueFrame(index, true);
+   PublishReleasedFrame();
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
+@@ -0,6 +0,7 @@
+ #pragma once
+ 
+ #include "cores/VideoPlayer/VideoRenderers/BaseRenderer.h"
++#include "windowing/Resolution.h"
+ 
+ #include <atomic>
+ #include <memory>
+@@ -0,7 +0,7 @@
+   virtual bool ConfigChanged(const VideoPicture &picture) { return false; };
+   virtual CRenderInfo GetRenderInfo() override;
+   virtual void UnInit() override {};
+-  virtual void Update() override {};
++  virtual void Update() override;
+   virtual void RenderUpdate(int index, int index2, bool clear, unsigned int flags, unsigned int alpha) override;
+   virtual bool SupportsMultiPassRendering()override { return false; };
+   virtual bool Flush(bool saveBuffers) override;
+@@ -0,9 +0,10 @@
+   bool m_lastWakeVsync{false};
+   //! Vsync thread only: the wake that ended its last wait
+   VsyncPresentWake m_lastWake{VsyncPresentWake::STEP};
+-  //! Codec of the frame last queued from the vsync thread, for the render loop to apply geometry
++  //! Codec for the render loop to apply geometry to: the last queued frame, or a new mode
+   std::mutex m_pendingGeometryLock;
+   std::shared_ptr<CAMLCodec> m_pendingGeometry;
++  RESOLUTION m_placedResolution{RES_INVALID};
+   //! Frame last released to amvideo, whose metadata goes out when the frame is shown
+   uint32_t m_releasedToken{0};
+   std::shared_ptr<const AMLFrameMetadata> m_releasedMeta;

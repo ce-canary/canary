@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 6 Nov 2026 09:16:05 -0600
+Subject: [PATCH] VideoPlayer: tell the decoder when its input has ended
+
+A drain asks a decoder for its pictures whether the input ended or a
+read is only late. A decoder that waits for more bytes cannot tell the
+two apart, and a still sends nothing at all. No message reports the
+end. An end mark must follow the demuxer's own end of stream, since
+the input's EOF needs a read past the last byte.
+---
+ .../DVDCodecs/Video/DVDVideoCodec.h           |  5 ++++
+ xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h |  5 ++++
+ .../DVDDemuxers/DVDDemuxFFmpeg.cpp            |  5 ++++
+ .../VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.h  |  1 +
+ xbmc/cores/VideoPlayer/DVDMessage.h           |  1 +
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 27 +++++++++++++++++++
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  2 ++
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp   | 10 +++++++
+ 8 files changed, 56 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h
+@@ -0,6 +0,11 @@
+    */
+   virtual void SetCodecControl(int flags) {}
+ 
++  /**
++   * The input has ended, it is not only late. A packet that follows resumes the decoder.
++   */
++  virtual void SetInputEnd() {}
++
+   /**
+    * Re-open the decoder.
+    * Decoder request to re-open
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h
+@@ -0,6 +0,11 @@
+    */
+   virtual DemuxPacket* Read() = 0;
+ 
++  /*
++   * True when the last read found the end of the stream, not an error
++   */
++  virtual bool IsAtEnd() const { return false; }
++
+   /*
+    * Seek, time in msec calculated from stream start
+    */
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+@@ -0,6 +0,11 @@
+   return pPacket;
+ }
+ 
++bool CDVDDemuxFFmpeg::IsAtEnd() const
++{
++  return m_pkt.result == AVERROR_EOF;
++}
++
+ void CDVDDemuxFFmpeg::FlushInputSeek()
+ {
+   Flush();
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.h b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.h
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.h
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.h
+@@ -0,6 +0,7 @@
+   std::string GetFileName() override;
+ 
+   DemuxPacket* Read() override;
++  bool IsAtEnd() const override;
+   DemuxPacket* ReadInternal(bool keep);
+ 
+   bool SeekTime(double time, bool backwards = false, double* startpts = NULL) override;
+diff --git a/xbmc/cores/VideoPlayer/DVDMessage.h b/xbmc/cores/VideoPlayer/DVDMessage.h
+--- a/xbmc/cores/VideoPlayer/DVDMessage.h
++++ b/xbmc/cores/VideoPlayer/DVDMessage.h
+@@ -0,6 +0,7 @@
+     // video related messages
+     VIDEO_SET_ASPECT,               // set aspectratio of video
+     VIDEO_DRAIN,                    // wait for decoder to output last frame
++    VIDEO_INPUT_END,                // no packets follow for now, the read has not just stalled
+ 
+     // subtitle related messages
+     SUBTITLE_CLUTCHANGE,
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,10 @@
+         continue;
+       }
+ 
++      // a read without a packet at a still is the end of the input until the disc moves on
++      if (m_dvd.state == DVDSTATE_STILL)
++        SendVideoInputEnd();
++
+       // check for a still frame state
+       if (std::shared_ptr<CDVDInputStream::IMenus> pStream = std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream))
+       {
+@@ -0,6 +0,12 @@
+ 
+       if (!m_inputEnded && m_CurrentVideo.id >= 0 && m_CurrentVideo.packets > 0)
+       {
++        // a demuxer can come back empty on a late read, a disc that gets here has no next item;
++        // the input's EOF needs a read past the last byte, which a demuxer may never make
++        if (m_pInputStream->IsEOF() || (m_pDemuxer && m_pDemuxer->IsAtEnd()) ||
++            std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream))
++          SendVideoInputEnd();
++
+         m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
+       }
+       m_inputEnded = true;
+@@ -0,6 +0,10 @@
+       break;
+     }
+ 
++    // the still state can leave and return while packets flow, only new input needs a new end
++    if (pStream->type == StreamType::VIDEO)
++      m_videoInputEnded = false;
++
+     if (STREAM_SOURCE_MASK(pStream->source) != STREAM_SOURCE_DEMUX_SUB)
+     {
+       m_syncWait.reset();
+@@ -0,7 +0,10 @@
+   if (!m_navTail)
+   {
+     if (m_CurrentVideo.id >= 0)
++    {
++      SendVideoInputEnd();
+       m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
++    }
+     m_inputEnded = true;
+ 
+     m_CurrentAudio.inited = false;
+@@ -0,6 +0,16 @@
+   return true;
+ }
+ 
++// queues behind the last packet, once for each run of input
++void CVideoPlayer::SendVideoInputEnd()
++{
++  if (m_CurrentVideo.id < 0 || m_CurrentVideo.packets == 0 || m_videoInputEnded)
++    return;
++
++  m_videoInputEnded = true;
++  m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_INPUT_END));
++}
++
+ // seeks in the tail are dropped, as they would act on the next item, unless the read is held in
+ // the title; a disc audio or subtitle pick goes to the disc, whose stream registers carry it into
+ // the next item; video and program picks have no disc register and are dropped
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+   void ReportBlurayItemPlayedOut();
+   void CloseSubtitleForNextStream();
+   bool PlayNavTail();
++  void SendVideoInputEnd();
+   bool DropInNavTail(CDVDMsg& msg);
+   bool SelectDiscStream(const SelectionStream& st);
+   bool TakeDiscAudioPick(CDemuxStream* stream);
+@@ -0,6 +0,7 @@
+   double m_lastVideoTitleTime{DVD_NOPTS_VALUE};
+   bool m_navStop{false};
+   bool m_navStopped{false};
++  bool m_videoInputEnded{false};
+   // the demuxer has no more for now, the players play out what they hold
+   bool m_inputEnded{false};
+   bool m_discAudioPick{false};
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+@@ -0,6 +0,7 @@
+   // wait until buffers are empty
+   if (bWaitForBuffers && m_speed > 0)
+   {
++    SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_INPUT_END), 0);
+     SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN), 0);
+     m_messageQueue.WaitUntilEmpty();
+   }
+@@ -0,6 +0,7 @@
+ inline void CVideoPlayerVideo::FlushMessages()
+ {
+   m_messageQueue.Flush(CDVDMsg::VIDEO_DRAIN);
++  m_messageQueue.Flush(CDVDMsg::VIDEO_INPUT_END);
+   m_messageQueue.Flush();
+   m_processInfo.SetLevelVQ(m_messageQueue.GetLevel());
+ }
+@@ -0,6 +0,9 @@
+     {
+       auto msg = std::static_pointer_cast<CDVDMsgVideoCodecChange>(pMsg);
+ 
++      if (m_pVideoCodec)
++        m_pVideoCodec->SetInputEnd();
++
+       if (drainStep(pMsg))
+         continue;
+ 
+@@ -0,6 +0,11 @@
+         m_picture.videoBuffer = nullptr;
+       }
+     }
++    else if (pMsg->IsType(CDVDMsg::VIDEO_INPUT_END))
++    {
++      if (m_pVideoCodec)
++        m_pVideoCodec->SetInputEnd();
++    }
+     else if (pMsg->IsType(CDVDMsg::VIDEO_DRAIN))
+     {
+       // not finished while the step runs, the requeued drain is out of the queue

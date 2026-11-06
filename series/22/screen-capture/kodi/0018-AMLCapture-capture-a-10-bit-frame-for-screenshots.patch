@@ -8,12 +8,12 @@ HDR gradients and speckles Dolby Vision highlights, while vdin1 can give
 VD1 as 10-bit 4:2:2.
 ---
  .../HwDecRender/RendererAML.cpp               |   1 +
- xbmc/utils/AMLCapture.cpp                     | 204 +++++++++++++++---
- xbmc/utils/AMLCapture.h                       |  30 ++-
- xbmc/utils/AMLCaptureConvert.cpp              | 119 +++++++++-
+ xbmc/utils/AMLCapture.cpp                     | 190 +++++++++++++++---
+ xbmc/utils/AMLCapture.h                       |  33 ++-
+ xbmc/utils/AMLCaptureConvert.cpp              | 119 ++++++++++-
  xbmc/utils/AMLCaptureConvert.h                |  16 +-
  .../amlogic/ScreenshotSurfaceAML.cpp          |  24 ++-
- 6 files changed, 346 insertions(+), 48 deletions(-)
+ 6 files changed, 332 insertions(+), 51 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
@@ -29,31 +29,19 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp b
 diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
 --- a/xbmc/utils/AMLCapture.cpp
 +++ b/xbmc/utils/AMLCapture.cpp
-@@ -0,6 +0,10 @@
+@@ -0,6 +0,12 @@
  constexpr int FRAME_WAIT_PERIODS = 10;
- // vdin1 has 8 canvas ids and an NV12 buffer takes two
+ // vdin1 writes one, holds the last, the reader holds one and one stays free
  constexpr unsigned int CAPTURE_BUFFERS = 4;
 +// V4L2_PIX_FMT_AML_YUV422_10P in the vendor tvin.h, which the sysroot does not ship
 +constexpr uint32_t PIX_FMT_YUV422_10P = v4l2_fourcc('A', 'Y', '2', 'P');
-+// vdin1 refuses a single buffer
-+constexpr unsigned int SHOT_BUFFERS = 3;
- // the vdin1 line buffer is 1920 pixels wide; a 2160p output is downscaled 2:1
- constexpr int MAX_CAPTURE_WIDTH = 1920;
- constexpr int MAX_CAPTURE_HEIGHT = 1080;
-@@ -0,6 +0,13 @@
-   int guiInput{-1};
- };
- 
-+// G12A, G12B and SM1 vdin keeps the even chroma sample of a full pack pair
-+bool HasCositedChroma()
-+{
-+  const int family = aml_get_cpufamily_id();
-+  return family == AML_G12A || family == AML_G12B || family == AML_SM1;
-+}
-+
- AMLCaptureDevice Discover()
- {
-   AMLCaptureDevice device;
++// vdin1 raises this to the fewest it allows
++constexpr unsigned int SHOT_BUFFERS = 1;
++// V4L2_PIX_FMT_FLAG_AML_COSITED_CHROMA in the vendor tvin.h
++constexpr uint8_t PIX_FMT_FLAG_COSITED_CHROMA = 0x80;
+ // DV player-led, dv2hdr and sdr2hdr frames are already display-mapped
+ constexpr float MAPPED_PEAK_NITS = 1000.0f;
+ // the grade of a Dolby Vision TV-led signal when the stream carries no HDR statics
 @@ -0,12 +0,15 @@
      const AMLCaptureImage dst = AMLCaptureImage::Packed(
          AV_PIX_FMT_BGRA, m_spec.width, m_spec.height, buffer.get(), m_spec.width * 4);
@@ -76,27 +64,30 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
  
      if (ok)
        m_buffer = std::move(buffer);
-@@ -0,15 +0,24 @@
+@@ -0,19 +0,25 @@
+     LOST,
+   };
  
-   //! failures log at `logLevel`; `busy` tells whether another vdin1 user holds the node, `refused`
-   //! whether vdin1 cannot give this input at this size
+-  //! failures log at `logLevel`; `busy` tells whether another vdin1 user holds the node, `refused`
+-  //! whether vdin1 cannot give this input at this size
 -  static std::shared_ptr<CStream> Open(
--      AMLCaptureInput input, int width, int height, int logLevel, bool& busy, bool& refused);
+-      AMLCaptureInput input, int width, int height, int logLevel, bool& busy);
++  //! failures log at `logLevel`; `busy` tells whether another vdin1 user holds the node
 +  static std::shared_ptr<CStream> Open(AMLCaptureInput input,
 +                                       uint32_t pixelFormat,
 +                                       unsigned int buffers,
 +                                       int width,
 +                                       int height,
 +                                       int logLevel,
-+                                       bool& busy,
-+                                       bool& refused);
++                                       bool& busy);
    ~CStream();
  
    void Stop();
    AMLCaptureInput GetInput() const { return m_input; }
--  bool Matches(AMLCaptureInput input, int width, int height) const
 +  uint32_t GetPixelFormat() const { return m_pixelFormat; }
-+  int GetBuffers() const { return static_cast<int>(m_maps.size()); }
+   int GetBuffers() const { return static_cast<int>(m_maps.size()); }
+   float GetFramePeriodMs() const { return m_framePeriodMs; }
+-  bool Matches(AMLCaptureInput input, int width, int height) const
 +  bool Matches(AMLCaptureInput input, uint32_t pixelFormat, int width, int height) const
    {
 -    return input == m_input && width == m_width && height == m_height;
@@ -116,33 +107,37 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
  
  private:
    bool Dequeue(unsigned int& index);
-@@ -0,16 +0,24 @@
+@@ -0,12 +0,14 @@
    int m_fd{-1};
    int m_eventFd{-1};
    AMLCaptureInput m_input{AMLCaptureInput::VIDEO};
 +  uint32_t m_pixelFormat{V4L2_PIX_FMT_NV12};
    int m_width{0};
    int m_height{0};
-+  int m_stride{0};
+   // the size vdin1 agreed to deliver for the size asked for
+   int m_imageWidth{0};
+   int m_imageHeight{0};
+   int m_stride{0};
++  bool m_cositedChroma{false};
+   float m_framePeriodMs{0.0f};
    bool m_streaming{false};
    std::atomic<bool> m_stopped{false};
-   std::vector<std::pair<void*, size_t>> m_maps;
+@@ -0,8 +0,13 @@
    std::chrono::steady_clock::time_point m_dequeued;
  };
  
 -std::shared_ptr<CAMLCapture::CStream> CAMLCapture::CStream::Open(
--    AMLCaptureInput input, int width, int height, int logLevel, bool& busy, bool& refused)
+-    AMLCaptureInput input, int width, int height, int logLevel, bool& busy)
 +std::shared_ptr<CAMLCapture::CStream> CAMLCapture::CStream::Open(AMLCaptureInput input,
 +                                                                 uint32_t pixelFormat,
 +                                                                 unsigned int buffers,
 +                                                                 int width,
 +                                                                 int height,
 +                                                                 int logLevel,
-+                                                                 bool& busy,
-+                                                                 bool& refused)
++                                                                 bool& busy)
  {
    const AMLCaptureDevice& device = FindDevice();
-   int index = input == AMLCaptureInput::GUI ? device.guiInput : device.input;
+   int index = input == AMLCaptureInput::SCREEN ? device.screenInput : device.input;
 @@ -0,6 +0,7 @@
  
    auto stream = std::make_shared<CStream>();
@@ -151,7 +146,7 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
    stream->m_width = width;
    stream->m_height = height;
    stream->m_fd = open(device.path.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
-@@ -0,22 +0,29 @@
+@@ -0,20 +0,25 @@
    format.type = BUFFER_TYPE;
    format.fmt.pix_mp.width = width;
    format.fmt.pix_mp.height = height;
@@ -159,26 +154,31 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
 +  format.fmt.pix_mp.pixelformat = pixelFormat;
    format.fmt.pix_mp.field = V4L2_FIELD_NONE;
    format.fmt.pix_mp.num_planes = 1;
--  const size_t frameSize = static_cast<size_t>(width) * height * 3 / 2;
--  if (ioctl(stream->m_fd, VIDIOC_S_FMT, &format) < 0 ||
 +  const bool fullPack = pixelFormat == PIX_FMT_YUV422_10P;
-+  const int ioctlResult = ioctl(stream->m_fd, VIDIOC_S_FMT, &format);
-+  stream->m_stride =
-+      fullPack ? static_cast<int>(format.fmt.pix_mp.plane_fmt[0].bytesperline) : width;
-+  const size_t frameSize = fullPack ? static_cast<size_t>(stream->m_stride) * height
-+                                    : static_cast<size_t>(width) * height * 3 / 2;
+   const int ioctlResult = ioctl(stream->m_fd, VIDIOC_S_FMT, &format);
+   stream->m_stride = static_cast<int>(format.fmt.pix_mp.plane_fmt[0].bytesperline);
+   stream->m_imageWidth = static_cast<int>(format.fmt.pix_mp.width);
+   stream->m_imageHeight = static_cast<int>(format.fmt.pix_mp.height);
+-  const size_t frameSize = static_cast<size_t>(stream->m_stride) * stream->m_imageHeight * 3 / 2;
+-  if (ioctlResult < 0 || format.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_NV12 ||
+-      stream->m_stride < stream->m_imageWidth ||
++  stream->m_cositedChroma = format.fmt.pix_mp.flags & PIX_FMT_FLAG_COSITED_CHROMA;
++  const size_t lumaSize = static_cast<size_t>(stream->m_stride) * stream->m_imageHeight;
++  const size_t frameSize = fullPack ? lumaSize : lumaSize * 3 / 2;
 +  if (ioctlResult < 0 || format.fmt.pix_mp.pixelformat != pixelFormat ||
-       format.fmt.pix_mp.width != static_cast<uint32_t>(width) ||
-       format.fmt.pix_mp.height != static_cast<uint32_t>(height) ||
-+      (fullPack && stream->m_stride < width / 2 * AML_FULL_PACK_PAIR_BYTES) ||
++      stream->m_stride <
++          (fullPack ? stream->m_imageWidth / 2 * AML_FULL_PACK_PAIR_BYTES : stream->m_imageWidth) ||
        format.fmt.pix_mp.plane_fmt[0].sizeimage < frameSize)
    {
+     busy = ioctlResult < 0 && errno == EBUSY;
 -    CLog::Log(logLevel, "CAMLCapture::{}: NV12 {}x{} refused", __FUNCTION__, width, height);
 +    CLog::Log(logLevel, "CAMLCapture::{}: {} {}x{} refused", __FUNCTION__,
 +              fullPack ? "10-bit" : "NV12", width, height);
-     refused = true;
      return {};
    }
+ 
+@@ -0,7 +0,7 @@
+   stream->m_framePeriodMs = 1000.0f * period.numerator / period.denominator;
  
    v4l2_requestbuffers request{};
 -  request.count = CAPTURE_BUFFERS;
@@ -186,15 +186,6 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
    request.type = BUFFER_TYPE;
    request.memory = V4L2_MEMORY_MMAP;
    if (ioctl(stream->m_fd, VIDIOC_REQBUFS, &request) < 0 || request.count == 0)
-@@ -0,6 +0,8 @@
-   uint32_t type = BUFFER_TYPE;
-   if (ioctl(stream->m_fd, VIDIOC_STREAMON, &type) < 0)
-   {
-+    // the line buffer limits a 10-bit stream that scales vertically
-+    refused = fullPack && errno == EINVAL;
-     CLog::Log(logLevel, "CAMLCapture::{}: stream start failed: {}", __FUNCTION__, strerror(errno));
-     return {};
-   }
 @@ -0,14 +0,33 @@
    }
  }
@@ -215,24 +206,24 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
 -  // single-plane NV12: the chroma plane follows the luma plane at the same stride
    AMLCaptureImage image;
 -  image.format = AV_PIX_FMT_NV12;
-   image.width = m_width;
-   image.height = m_height;
+   image.width = m_imageWidth;
+   image.height = m_imageHeight;
    image.data[0] = static_cast<uint8_t*>(m_maps[index].first);
 +  if (m_pixelFormat == PIX_FMT_YUV422_10P)
 +  {
 +    image.fullPack = true;
-+    image.cositedChroma = HasCositedChroma();
++    image.cositedChroma = m_cositedChroma;
 +    image.linesize[0] = m_stride;
 +    return image;
 +  }
 +
 +  // single-plane NV12: the chroma plane follows the luma plane at the same stride
 +  image.format = AV_PIX_FMT_NV12;
-   image.data[1] = image.data[0] + static_cast<size_t>(m_width) * m_height;
-   image.linesize[0] = m_width;
-   image.linesize[1] = m_width;
-@@ -0,18 +0,99 @@
- 
+   image.data[1] = image.data[0] + static_cast<size_t>(m_stride) * m_imageHeight;
+   image.linesize[0] = m_stride;
+   image.linesize[1] = m_stride;
+@@ -0,12 +0,89 @@
+ {
    std::lock_guard read(m_readLock);
  
 -  return ReadStream(input, width, height,
@@ -248,13 +239,13 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
 +  {
 +    AMLCaptureShotFrame frame;
 +    CAMLCaptureConvert convert;
-+    if (ReadShot(frame) && use(frame.frame, convert))
++    if (ReadShot(width, height, frame) && use(frame.frame, convert))
 +      return true;
 +  }
 +  return Read(AMLCaptureInput::VIDEO, width, height, use);
 +}
 +
-+bool CAMLCapture::ReadShot(AMLCaptureShotFrame& frame)
++bool CAMLCapture::ReadShot(int width, int height, AMLCaptureShotFrame& frame)
 +{
 +  std::unique_lock read(m_readLock);
 +
@@ -277,23 +268,17 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
 +    }
 +    if (map == MAP_FAILED)
 +    {
-+      CLog::Log(LOGDEBUG, "CAMLCapture::{}: no dmabuf of the frame, copying in place: {}",
-+                __FUNCTION__, strerror(errno));
++      CLog::Log(LOGWARNING, "CAMLCapture::{}: no dmabuf of the frame: {}", __FUNCTION__,
++                strerror(errno));
 +      if (dmabuf >= 0)
 +        close(dmabuf);
-+      dmabuf = -1;
-+      std::memcpy(frame.data.get(), source.image.data[0], size);
-+      frame.frame.image.data[0] = frame.data.get();
-+      return true;
++      return false;
 +    }
 +    // vdin1 must not refill the exported buffer once it is queued again
 +    stream.Stop();
 +    return true;
 +  };
 +
-+  int width = 0;
-+  int height = 0;
-+  GetCaptureSize(width, height);
 +  const bool ok =
 +      ReadStream(AMLCaptureInput::VIDEO, PIX_FMT_YUV422_10P, SHOT_BUFFERS, width, height, copy);
 +
@@ -327,47 +312,32 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
 +                             int height,
 +                             const StreamFunc& use)
  {
-   const float fps = CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
-   const int waitMs =
-       static_cast<int>(std::ceil(FRAME_WAIT_PERIODS * 1000.0f / std::max(fps, 1.0f)));
--  const std::chrono::milliseconds maxAge(
--      static_cast<int>((CAPTURE_BUFFERS - 2) * 1000.0f / std::max(fps, 1.0f)));
-   bool restarted = false;
-   for (;;)
-   {
+   std::shared_ptr<CStream> stream;
+   std::shared_ptr<CStream> stale;
 @@ -0,12 +0,12 @@
-         return false;
-       for (const auto& [continuousInput, continuousWidth, continuousHeight] : m_continuousSizes)
-       {
--        if (continuousInput != input)
-+        if (continuousInput != input || pixelFormat != V4L2_PIX_FMT_NV12)
-           continue;
-         width = std::max(width, continuousWidth);
-         height = std::max(height, continuousHeight);
-       }
--      if (m_stream && !m_stream->Matches(input, width, height))
-+      if (m_stream && !m_stream->Matches(input, pixelFormat, width, height))
-         stale = TakeStream();
-       stream = m_stream;
-       if (input == AMLCaptureInput::VIDEO)
-@@ -0,7 +0,7 @@
-       bool busy = false;
-       bool refused = false;
-       const int logLevel = m_openFailed ? LOGDEBUG : LOGWARNING;
--      stream = CStream::Open(input, width, height, logLevel, busy, refused);
-+      stream = CStream::Open(input, pixelFormat, buffers, width, height, logLevel, busy, refused);
-       if (refused && input == AMLCaptureInput::GUI)
-         RefuseGui();
-       else if (!busy)
-@@ -0,6 +0,8 @@
-       m_stream = stream;
+       return false;
+     for (const auto& [continuousInput, continuousWidth, continuousHeight] : m_continuousSizes)
+     {
+-      if (continuousInput != input)
++      if (continuousInput != input || pixelFormat != V4L2_PIX_FMT_NV12)
+         continue;
+       width = std::max(width, continuousWidth);
+       height = std::max(height, continuousHeight);
      }
+-    if (m_stream && !m_stream->Matches(input, width, height))
++    if (m_stream && !m_stream->Matches(input, pixelFormat, width, height))
+       stale = TakeStream();
+     stream = m_stream;
+     UpdateStatics(std::move(meta));
+@@ -0,7 +0,7 @@
  
-+    const std::chrono::milliseconds maxAge(
-+        static_cast<int>((stream->GetBuffers() - 2) * 1000.0f / std::max(fps, 1.0f)));
-     unsigned int index = 0;
-     const CStream::Wake wake =
-         stream->TakeNewest(maxAge, index) ? CStream::Wake::FRAME : stream->Wait(waitMs, index);
+     bool busy = false;
+     const int logLevel = m_openFailed ? LOGDEBUG : LOGWARNING;
+-    stream = CStream::Open(input, width, height, logLevel, busy);
++    stream = CStream::Open(input, pixelFormat, buffers, width, height, logLevel, busy);
+     if (!busy)
+       m_openFailed = !stream;
+ 
 @@ -0,6 +0,11 @@
    AMLCaptureImage crop = image;
    crop.width = x2 - x1;
@@ -380,6 +350,16 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
    crop.data[0] += y1 * image.linesize[0] + x1;
    crop.data[1] += y1 / 2 * image.linesize[1] + x1;
    return crop;
+@@ -0,7 +0,8 @@
+ 
+ void CAMLCapture::CreateLivePixels(int width, int height, CaptureResult& result)
+ {
+-  if (FindDevice().screenInput < 0)
++  const AMLCaptureDevice& device = FindDevice();
++  if (device.input < 0 || device.screenInput < 0)
+     return;
+ 
+   const auto session = Get();
 diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
 --- a/xbmc/utils/AMLCapture.h
 +++ b/xbmc/utils/AMLCapture.h
@@ -407,15 +387,16 @@ diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
  };
  
  //! \brief The process-wide capture session on the vdin1 V4L2 node: video after the VPP and the
-@@ -0,8 +0,17 @@
+@@ -0,8 +0,18 @@
    //! the input's continuous size when larger, else wait for the next one, and run `use` on it. An
-   //! input or size change restarts the stream. A wait ends after a bound of output frame periods.
+   //! input or size change restarts the stream. A wait ends after a bound of frame periods.
    bool Read(AMLCaptureInput input, int width, int height, const ReadFunc& use);
 -
 -  //! The crop of an NV12 image to a normalized rect, on even pixels for the chroma plane
-+  //! Consumer thread: copy out a frame of a one-shot 10-bit video stream at the largest capture
-+  //! size. The stream closes before this returns; a continuous reader reopens its own.
-+  bool ReadShot(AMLCaptureShotFrame& frame);
++  //! Consumer thread: copy out a frame of a one-shot 10-bit video stream of the size asked for;
++  //! vdin1 settles what it delivers. The stream closes before this returns; a continuous reader
++  //! reopens its own.
++  bool ReadShot(int width, int height, AMLCaptureShotFrame& frame);
 +  //! Consumer thread: run `use` on the frame of a shot, else, or when that fails, on a Read of
 +  //! the video at width x height.
 +  bool ReadVideo(KODI::RENDERING::CAPTURE::CaptureScreenshot shot,
@@ -427,6 +408,15 @@ diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
    static AMLCaptureImage Crop(const AMLCaptureImage& image, const CRect& rect);
  
    //! Deferred sRGB BGRA pixels of the visible video in result.
+@@ -0,7 +0,7 @@
+                          KODI::RENDERING::CAPTURE::CaptureResult& result);
+ 
+   //! Render thread: continuous sRGB BGRA pixels of the screen in result, read at each Lock, so they
+-  //! outlast a stretch with no drawn frame. No pixels when vdin1 gave no screen in this output mode.
++  //! outlast a stretch with no drawn frame. No pixels without a vdin1 screen input.
+   static void CreateLivePixels(int width,
+                                int height,
+                                KODI::RENDERING::CAPTURE::CaptureResult& result);
 @@ -0,7 +0,12 @@
  
    void ReleaseLease(AMLCaptureInput input, int width, int height);

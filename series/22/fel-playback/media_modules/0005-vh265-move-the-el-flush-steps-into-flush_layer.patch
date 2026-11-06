@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 22:11:22 -0600
+Subject: [PATCH] vh265: move the el flush steps into flush_layer
+
+The dolby el flush open-codes the steps that flush one layer. End of
+stream needs the same steps on both layers. No behaviour change.
+---
+ drivers/frame_provider/decoder/h265/vh265.c | 29 +++++++++++----------
+ 1 file changed, 15 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/frame_provider/decoder/h265/vh265.c b/drivers/frame_provider/decoder/h265/vh265.c
+--- a/drivers/frame_provider/decoder/h265/vh265.c
++++ b/drivers/frame_provider/decoder/h265/vh265.c
+@@ -0,6 +0,19 @@
+ 	}
+ }
+ 
++static void flush_layer(struct hevc_state_s *hevc)
++{
++	struct PIC_s *pic;
++
++	check_pic_decoded_error(hevc, hevc->pic_decoded_lcu_idx);
++	pic = get_pic_by_POC(hevc, hevc->curr_POC);
++	hevc->curr_POC = INVALID_POC;
++	hevc->m_pocRandomAccess = MAX_INT;
++	flush_output(hevc, pic);
++	hevc->decoded_poc = INVALID_POC; /* already call flush_output */
++	hevc->decoding_pic = NULL;
++}
++
+ /* only when we decoded one field or one frame,
+ we can call this function to get qos info*/
+ static void get_picture_qos_info(struct hevc_state_s *hevc)
+@@ -0,20 +0,8 @@
+ 					dolby_el_flush_th != 0 &&
+ 					hevc->no_switch_dvlayer_count >
+ 					dolby_el_flush_th) {
+-					struct hevc_state_s *hevc_el =
+-					(struct hevc_state_s *)
+-					vdec->slave->private;
+-					struct PIC_s *el_pic;
+-					check_pic_decoded_error(hevc_el,
+-					hevc_el->pic_decoded_lcu_idx);
+-					el_pic = get_pic_by_POC(hevc_el,
+-						hevc_el->curr_POC);
+-					hevc_el->curr_POC = INVALID_POC;
+-					hevc_el->m_pocRandomAccess = MAX_INT;
+-					flush_output(hevc_el, el_pic);
+-					hevc_el->decoded_poc = INVALID_POC; /*
+-					already call flush_output*/
+-					hevc_el->decoding_pic = NULL;
++					flush_layer((struct hevc_state_s *)
++						vdec->slave->private);
+ 					hevc->no_switch_dvlayer_count = 0;
+ 					if (get_dbg_flag(hevc) & H265_DEBUG_DV)
+ 						hevc_print(hevc, 0,

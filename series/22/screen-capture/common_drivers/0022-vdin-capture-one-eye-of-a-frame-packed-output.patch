@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 14:33:28 -0600
+Subject: [PATCH] vdin: capture one eye of a frame packed output
+
+A frame packed 3D output stacks both eyes with a blank between them in
+one tall frame. A capture squeezed the whole stack into its image, so
+the LEDs and screenshots showed two squashed pictures.
+---
+ drivers/media/vin/tvin/vdin/vdin_drv.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.c b/drivers/media/vin/tvin/vdin/vdin_drv.c
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.c
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.c
+@@ -0,6 +0,10 @@
+ {
+ 	const struct vinfo_s *vinfo = get_current_vinfo();
+ 
++	/* frame packing stacks the eyes with a blank between them: take the first */
++	if (vinfo->info_3d == FP_3D)
++		return vinfo->height - vinfo->vtotal / 2;
++
+ 	return vdin_v4l2_is_field(devp) ? vinfo->field_height : vinfo->height;
+ }
+ 

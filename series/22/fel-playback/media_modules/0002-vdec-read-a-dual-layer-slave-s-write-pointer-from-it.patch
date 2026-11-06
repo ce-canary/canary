@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 22:11:12 -0600
+Subject: [PATCH] vdec: read a dual layer slave's write pointer from its master
+
+On a no-parser SoC a slave copies the master's wp into its vbuf at each
+sync and programs the register from that copy. vdec_has_more_input then
+compares the two copies, which always match even when the master has
+written more. So a slave reports end of stream early, with input unread.
+---
+ drivers/frame_provider/decoder/utils/vdec.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/frame_provider/decoder/utils/vdec.c b/drivers/frame_provider/decoder/utils/vdec.c
+--- a/drivers/frame_provider/decoder/utils/vdec.c
++++ b/drivers/frame_provider/decoder/utils/vdec.c
+@@ -0,8 +0,10 @@
+ 			return READ_VREG(VLD_MEM_VIFIFO_WP) !=
+ 				STBUF_READ(&vdec->vbuf, get_wp);
+ 		else {
++			struct vdec_s *owner = vdec->master ? vdec->master : vdec;
++
+ 			return (READ_VREG(HEVC_STREAM_WR_PTR) & ~0x3) !=
+-				(STBUF_READ(&vdec->vbuf, get_wp) & ~0x3);
++				(STBUF_READ(&owner->vbuf, get_wp) & ~0x3);
+ 		}
+ 	}
+ }

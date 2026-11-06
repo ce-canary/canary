@@ -9,10 +9,10 @@ RenderCapture and the video half of a screenshot.
 ---
  .../HwDecRender/RendererAML.cpp               |  58 +++++++
  .../VideoRenderers/HwDecRender/RendererAML.h  |   5 +
- xbmc/utils/AMLCapture.cpp                     | 147 ++++++++++++++++++
- xbmc/utils/AMLCapture.h                       |  25 +++
+ xbmc/utils/AMLCapture.cpp                     | 141 ++++++++++++++++++
+ xbmc/utils/AMLCapture.h                       |  25 ++++
  xbmc/utils/AMLCaptureConvert.h                |  12 ++
- 5 files changed, 247 insertions(+)
+ 5 files changed, 241 insertions(+)
 
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
@@ -171,15 +171,15 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
  {
  
 @@ -0,6 +0,8 @@
- constexpr int MAX_CAPTURE_HEIGHT = 1080;
- // vdin strides each line to 64 pixels but sizes the buffer from the width
- constexpr int CAPTURE_WIDTH_ALIGN = 64;
-+// the vdin scalers cannot shrink by 32 or more
-+constexpr int MAX_CAPTURE_SHRINK = 32;
- // DV player-led, dv2hdr and sdr2hdr frames are already display-mapped
- constexpr float MAPPED_PEAK_NITS = 1000.0f;
- // the grade of a Dolby Vision TV-led signal when the stream carries no HDR statics
-@@ -0,6 +0,94 @@
+ // the range of ITU-R BT.2100 PQ, the peak of a stream that states none
+ constexpr float PQ_PEAK_NITS = 10000.0f;
+ constexpr uint32_t BUFFER_TYPE = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
++// far above the float error of a normalized edge times a size, far below a pixel
++constexpr float CROP_END_EPSILON = 0.01f;
+ 
+ // amdv dv_mode and dv_ll_policy values (dolby_vision.h, amdv.h)
+ enum class DvMode
+@@ -0,6 +0,85 @@
    return source.titlePeak > 0 ? source.titlePeak : fallback;
  }
  
@@ -190,19 +190,10 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
 +  if (crop.IsEmpty())
 +    return;
 +
-+  const RESOLUTION_INFO screen = CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo();
-+
-+  // a size within one alignment step of the capture is the capture, so full-size requests that
-+  // differ by rounding share the stream
-+  const auto size = [](int pixels, float part, int align, int output, int limit)
-+  {
-+    const int needed =
-+        std::max(static_cast<int>(std::ceil(pixels / part)), output / MAX_CAPTURE_SHRINK + 1);
-+    const int aligned = (needed + align - 1) / align * align;
-+    return aligned >= limit - align ? limit : aligned;
-+  };
-+  streamWidth = size(width, crop.Width(), CAPTURE_WIDTH_ALIGN, screen.iScreenWidth, streamWidth);
-+  streamHeight = size(height, crop.Height(), 2, screen.iScreenHeight, streamHeight);
++  const auto size = [](int pixels, float part, int limit)
++  { return std::min((static_cast<int>(std::ceil(pixels / part)) + 1) & ~1, limit); };
++  streamWidth = size(width, crop.Width(), streamWidth);
++  streamHeight = size(height, crop.Height(), streamHeight);
 +}
 +
 +// width x height sRGB pixels
@@ -273,7 +264,7 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
 +
  std::mutex s_sessionLock;
  std::weak_ptr<CAMLCapture> s_session;
- 
+ } // namespace
 @@ -0,6 +0,28 @@
    m_presented = true;
  }
@@ -303,7 +294,7 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
  std::shared_ptr<CAMLCapture::CStream> CAMLCapture::TakeStream()
  {
    if (m_stream)
-@@ -0,3 +0,35 @@
+@@ -0,3 +0,38 @@
    }
    return color;
  }
@@ -315,10 +306,13 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
 +
 +  const auto edge = [](float v, int size)
 +  { return std::clamp(static_cast<int>(std::lround(v * size / 2)) * 2, 0, size); };
++  // the end rounds down to even, so a whole end stays put and a fractional one does not round up
++  const auto end = [](float v, int size)
++  { return std::clamp(static_cast<int>(std::floor(v * size + CROP_END_EPSILON)) & ~1, 0, size); };
 +  const int x1 = edge(rect.x1, image.width);
-+  const int x2 = edge(rect.x2, image.width);
++  const int x2 = end(rect.x2, image.width);
 +  const int y1 = edge(rect.y1, image.height);
-+  const int y2 = edge(rect.y2, image.height);
++  const int y2 = end(rect.y2, image.height);
 +
 +  AMLCaptureImage crop = image;
 +  crop.width = x2 - x1;
@@ -383,7 +377,7 @@ diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
    //! Keeps the stream running until the last lease is released. A continuous consumer passes
    //! the stream size it reads at, which the stream keeps while the lease lasts.
 @@ -0,6 +0,13 @@
-   //! restarts the stream. A wait ends after a bound of output frame periods.
+   //! restarts the stream. A wait ends after a bound of frame periods.
    bool Read(int width, int height, const ReadFunc& use);
  
 +  //! The crop of an NV12 image to a normalized rect, on even pixels for the chroma plane
@@ -395,7 +389,7 @@ diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
 +
  private:
    class CStream;
- 
+   using StreamFunc =
 @@ -0,6 +0,7 @@
    AMLCaptureSource m_source;
    //! the frame metadata the title peak in m_source was decoded from

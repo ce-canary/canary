@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 6 Nov 2026 09:16:05 -0600
+Subject: [PATCH] DVDVideoCodecAndroidMediaCodec: end a drain with no surface
+
+A drain ends on VC_EOF, which came only from the flushed state. A
+decoder stopped by a lost surface answered VC_NONE to every pull, so
+the drain never ended.
+---
+ .../DVDCodecs/Video/DVDVideoCodecAndroidMediaCodec.cpp          | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAndroidMediaCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAndroidMediaCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAndroidMediaCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAndroidMediaCodec.cpp
+@@ -0,7 +0,7 @@
+     SignalEndOfStream();
+     m_state = MEDIACODEC_STATE_WAIT_ENDOFSTREAM;
+   }
+-  else if (m_state == MEDIACODEC_STATE_FLUSHED)
++  else if (m_state != MEDIACODEC_STATE_WAIT_ENDOFSTREAM)
+     return VC_EOF;
+ 
+   return VC_NONE;

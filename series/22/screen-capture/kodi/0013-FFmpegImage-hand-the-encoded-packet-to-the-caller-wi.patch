@@ -63,7 +63,7 @@ diff --git a/xbmc/guilib/FFmpegImage.h b/xbmc/guilib/FFmpegImage.h
 --- a/xbmc/guilib/FFmpegImage.h
 +++ b/xbmc/guilib/FFmpegImage.h
 @@ -0,7 +0,7 @@
-   AVCodecContext* m_codec_ctx = nullptr;
+   const AVStreamGroup* m_tileGrid = nullptr;
  
    AVFrame* m_pFrame;
 -  uint8_t* m_outputBuffer;

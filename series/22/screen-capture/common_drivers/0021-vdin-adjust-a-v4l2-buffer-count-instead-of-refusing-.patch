@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 12:59:23 -0600
+Subject: [PATCH] vdin: adjust a v4l2 buffer count instead of refusing it
+
+REQBUFS returned EINVAL outside the range vdin supports, so a client had
+to know its minimum and how many buffers the canvases allow. V4L2 lets
+the driver adjust the count and return it.
+---
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 9 +++------
+ 1 file changed, 3 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,12 +0,9 @@
+ 			reqbufs->type, reqbufs->count);
+ 		//return 0;
+ 	}
+-	if (reqbufs->count && (reqbufs->count < devp->vb_queue.min_buffers_needed ||
+-		reqbufs->count > VDIN_CANVAS_MAX_CNT)) {
+-		dprintk(0, "%s err,count=%d,out of range[%d,%d]\n", __func__,
+-			reqbufs->count, devp->vb_queue.min_buffers_needed, VDIN_CANVAS_MAX_CNT);
+-		return -EINVAL;
+-	}
++	if (reqbufs->count)
++		reqbufs->count = clamp_t(u32, reqbufs->count, devp->vb_queue.min_buffers_needed,
++					 VDIN_CANVAS_MAX_CNT);
+ 
+ 	dprintk(1, "%s memory:%d,type:%d buff_num:%d\n", __func__,
+ 		reqbufs->memory, reqbufs->type, reqbufs->count);

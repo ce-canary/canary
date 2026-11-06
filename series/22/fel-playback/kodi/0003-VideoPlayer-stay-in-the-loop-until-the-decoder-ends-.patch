@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 6 Nov 2026 09:16:05 -0600
+Subject: [PATCH] VideoPlayer: stay in the loop until the decoder ends video
+
+Video counted as finished when its message queue was empty, while
+the decoder could still hold the rest of the stream. The rest was
+dropped at close, or played on after the player left its main loop.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 13 ++++++++++---
+ xbmc/cores/VideoPlayer/VideoPlayer.h   |  2 ++
+ 2 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,7 @@
+   m_CurrentAudioID3.hint.Clear();
+   m_SpeedState.Reset(DVD_NOPTS_VALUE);
+   m_navTail = false;
++  m_inputEnded = false;
+   m_navStop = false;
+   m_navStopped = false;
+   m_discAudioPick = false;
+@@ -0,10 +0,11 @@
+         continue;
+       }
+ 
+-      if (m_CurrentVideo.inited)
++      if (!m_inputEnded && m_CurrentVideo.id >= 0 && m_CurrentVideo.packets > 0)
+       {
+         m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
+       }
++      m_inputEnded = true;
+ 
+       m_CurrentAudio.inited = false;
+       m_CurrentVideo.inited = false;
+@@ -0,9 +0,11 @@
+         continue;
+       }
+ 
+-      // while players are still playing, keep going to allow seekbacks
++      // while players are still playing, keep going to allow seekbacks; pictures left in the
++      // decoder are not in its queue, and only the decoder knows when it has shown them
+       if (m_VideoPlayerAudio->HasData() ||
+-          m_VideoPlayerVideo->HasData())
++          m_VideoPlayerVideo->HasData() ||
++          (m_CurrentVideo.id >= 0 && m_CurrentVideo.packets > 0 && !m_VideoPlayerVideo->IsEOS()))
+       {
+         CThread::Sleep(100ms);
+         continue;
+@@ -0,6 +0,7 @@
+     {
+       m_syncWait.reset();
+       m_navTail = false;
++      m_inputEnded = false;
+     }
+ 
+     // see if we can find something better to play
+@@ -0,6 +0,7 @@
+   {
+     if (m_CurrentVideo.id >= 0)
+       m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
++    m_inputEnded = true;
+ 
+     m_CurrentAudio.inited = false;
+     m_CurrentVideo.inited = false;
+@@ -0,6 +0,7 @@
+   m_syncStartPtsWait.reset();
+   m_seekStart = false;
+   m_navTail = false;
++  m_inputEnded = false;
+   m_lastVideoTitleTime = DVD_NOPTS_VALUE;
+ #if defined(HAVE_LIBBLURAY)
+   if (const auto bluray = GetBlurayInputStream())
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,8 @@
+   double m_lastVideoTitleTime{DVD_NOPTS_VALUE};
+   bool m_navStop{false};
+   bool m_navStopped{false};
++  // the demuxer has no more for now, the players play out what they hold
++  bool m_inputEnded{false};
+   bool m_discAudioPick{false};
+ 
+   CEdl m_Edl;

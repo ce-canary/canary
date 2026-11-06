@@ -1,0 +1,128 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 09:55:21 -0600
+Subject: [PATCH] vdin: report the rows an interlaced loopback input holds
+
+The post blend input delivers one field per frame on an interlaced
+output, and vd1 is scaled to one field unless the SoC makes the fields
+after it. vdin1 took the height of the whole frame, so a capture filled
+half its rows and left the rest zero, which reads as green. vdin can
+not scale up, so the client has to get the height the input holds.
+---
+ drivers/media/video_sink/video_hw.c           |  6 +++++
+ drivers/media/video_sink/video_hw_cut.c       |  6 +++++
+ drivers/media/vin/tvin/vdin/vdin_drv.c        | 23 +++++++++++++++++++
+ drivers/media/vin/tvin/vdin/vdin_drv.h        |  2 ++
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c    |  4 ++--
+ .../linux/amlogic/media/video_sink/video.h    |  1 +
+ 6 files changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/video_sink/video_hw.c b/drivers/media/video_sink/video_hw.c
+--- a/drivers/media/video_sink/video_hw.c
++++ b/drivers/media/video_sink/video_hw.c
+@@ -0,6 +0,12 @@
+ 	return cur_dev;
+ }
+ 
++bool get_video_frm2fld_support(void)
++{
++	return cur_dev->frm2fld_support;
++}
++EXPORT_SYMBOL(get_video_frm2fld_support);
++
+ u32 get_video_enabled(u8 layer_id)
+ {
+ 	u32 global_output = 0;
+diff --git a/drivers/media/video_sink/video_hw_cut.c b/drivers/media/video_sink/video_hw_cut.c
+--- a/drivers/media/video_sink/video_hw_cut.c
++++ b/drivers/media/video_sink/video_hw_cut.c
+@@ -0,6 +0,12 @@
+ 	return cur_dev;
+ }
+ 
++bool get_video_frm2fld_support(void)
++{
++	return cur_dev->frm2fld_support;
++}
++EXPORT_SYMBOL(get_video_frm2fld_support);
++
+ u32 get_video_enabled(u8 layer_id)
+ {
+ 	u32 global_output = 0;
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.c b/drivers/media/vin/tvin/vdin/vdin_drv.c
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.c
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.c
+@@ -0,6 +0,29 @@
+ 	}
+ }
+ 
++/*
++ * Whether the vd1 or post blend input holds one field of an interlaced output.
++ * The blend runs on one field; vd1 does too unless the fields are made after it.
++ */
++bool vdin_v4l2_is_field(struct vdin_dev_s *devp)
++{
++	const struct vinfo_s *vinfo = get_current_vinfo();
++
++	if (devp->work_mode != VDIN_WORK_MD_V4L || vinfo->field_height >= vinfo->height)
++		return false;
++
++	return devp->v4l2_port_cur == TVIN_PORT_VIU1_WB0_POST_BLEND ||
++	       (devp->v4l2_port_cur == TVIN_PORT_VIU1_WB0_VD1 && !get_video_frm2fld_support());
++}
++
++/* the rows of a picture on a loopback input; vdin can not scale up */
++unsigned int vdin_v4l2_source_height(struct vdin_dev_s *devp)
++{
++	const struct vinfo_s *vinfo = get_current_vinfo();
++
++	return vdin_v4l2_is_field(devp) ? vinfo->field_height : vinfo->height;
++}
++
+ /*
+  * 1. config canvas base on  canvas_config_mode
+  *		0: canvas_config in driver probe
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.h b/drivers/media/vin/tvin/vdin/vdin_drv.h
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.h
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.h
+@@ -0,6 +0,8 @@
+ int vdin_open_fe(enum tvin_port_e port, int index,
+ 		 struct vdin_dev_s *devp);
+ void vdin_close_fe(struct vdin_dev_s *devp);
++bool vdin_v4l2_is_field(struct vdin_dev_s *devp);
++unsigned int vdin_v4l2_source_height(struct vdin_dev_s *devp);
+ int vdin_start_dec(struct vdin_dev_s *devp);
+ void vdin_self_start_dec(struct vdin_dev_s *devp);
+ void vdin_stop_dec(struct vdin_dev_s *devp);
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,7 +0,7 @@
+ 
+ 	if (devp->index) {
+ 		src_w = get_current_vinfo()->width;
+-		src_h = get_current_vinfo()->height;
++		src_h = vdin_v4l2_source_height(devp);
+ 		min_w = roundup(src_w / VDIN_V4L2_MAX_SHRINK + 1, 2);
+ 		min_h = roundup(src_h / VDIN_V4L2_MAX_SHRINK + 1, 2);
+ 	}
+@@ -0,7 +0,7 @@
+ 	if (devp->index) {
+ 		devp->parm.info.fmt = TVIN_SIG_FMT_MAX;
+ 		loopback_fmt.h_active = get_current_vinfo()->width;
+-		loopback_fmt.v_active = get_current_vinfo()->height;
++		loopback_fmt.v_active = vdin_v4l2_source_height(devp);
+ 		fmt_info_p = &loopback_fmt;
+ 	} else {
+ 		fmt_info_p = tvin_get_fmt_info(devp->parm.info.fmt);
+diff --git a/include/linux/amlogic/media/video_sink/video.h b/include/linux/amlogic/media/video_sink/video.h
+--- a/include/linux/amlogic/media/video_sink/video.h
++++ b/include/linux/amlogic/media/video_sink/video.h
+@@ -0,6 +0,7 @@
+ u32 get_video_angle(void);
+ u32 get_video_hold_state(void);
+ bool get_vd1_vd2_mux(void);
++bool get_video_frm2fld_support(void);
+ void set_vd1_vd2_mux(bool en);
+ unsigned int DI_POST_REG_RD(unsigned int addr);
+ int DI_POST_WR_REG_BITS(u32 adr, u32 val, u32 start, u32 len);

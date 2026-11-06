@@ -1,0 +1,142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 12:23:36 -0600
+Subject: [PATCH] vdin: capture a loopback input at any output mode
+
+The loopback format came from a list of four sizes. On any other mode,
+such as 480p or 576p, the format was null and a v4l2 capture did not
+start, so the LED feed and video screenshots had no source. A loopback
+input is the size of the output mode. The free size path allocated a
+format that a failed start leaked.
+---
+ drivers/media/vin/tvin/vdin/vdin_drv.c     | 11 +----
+ drivers/media/vin/tvin/vdin/vdin_drv.h     |  1 +
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 56 ++++------------------
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.h |  1 -
+ 4 files changed, 12 insertions(+), 57 deletions(-)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.c b/drivers/media/vin/tvin/vdin/vdin_drv.c
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.c
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.c
+@@ -0,13 +0,7 @@
+ 	fmt = devp->parm.info.fmt;
+ 	/* add for camera random resolution */
+ 	if (para->fmt >= TVIN_SIG_FMT_MAX) {
+-		devp->fmt_info_p = kmalloc(sizeof(*devp->fmt_info_p),
+-					   GFP_KERNEL);
+-		if (!devp->fmt_info_p) {
+-			pr_err("[vdin]%s kmalloc error.\n", __func__);
+-			mutex_unlock(&devp->fe_lock);
+-			return -ENOMEM;
+-		}
++		devp->fmt_info_p = &devp->free_size_fmt;
+ 		devp->fmt_info_p->hs_bp     = para->hs_bp;
+ 		devp->fmt_info_p->vs_bp     = para->vs_bp;
+ 		devp->fmt_info_p->hs_pol    = para->hsync_phase;
+@@ -0,9 +0,6 @@
+ 			devp->frontend->dec_ops->close(devp->frontend, devp->port_type);
+ 	}
+ 	vdin_stop_dec(devp);
+-	/*free the memory allocated in start tvin service*/
+-	if (devp->parm.info.fmt >= TVIN_SIG_FMT_MAX)
+-		kfree(devp->fmt_info_p);
+ /* #ifdef CONFIG_ARCH_MESON6 */
+ /* switch_mod_gate_by_name("vdin", 0); */
+ /* #endif */
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.h b/drivers/media/vin/tvin/vdin/vdin_drv.h
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.h
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.h
+@@ -0,6 +0,7 @@
+ 	struct device *dev;
+ 	struct tvin_parm_s parm;
+ 	struct tvin_format_s *fmt_info_p;
++	struct tvin_format_s free_size_fmt;
+ 	struct vf_pool *vfp;
+ 	struct tvin_frontend_s *frontend;
+ 	struct tvin_frontend_s	vdin_frontend;
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,61 +0,25 @@
+ 	return ret;
+ }
+ 
+-/* Check loopback source format */
+-int vdin_v4l2_loopback_fmt(struct vdin_dev_s *devp)
+-{
+-	int h, v;
+-	int err_range = 10;
+-	const struct vinfo_s *vinfo;
+-
+-	dprintk(1, "%s,fmt:%s,cfmt:%s,status:%#x,fps:%d\n",
+-		__func__, tvin_sig_fmt_str(devp->parm.info.fmt),
+-		tvin_color_fmt_str(devp->parm.info.cfmt),
+-		devp->parm.info.status, devp->parm.info.fps);
+-#ifdef VDIN_V4L2_GET_LOOPBACK_FMT_BY_VOUT_SERVE
+-	vinfo = get_current_vinfo();
+-	h = vinfo->width;
+-	v = vinfo->height;
+-	dprintk(1, "%s,%d; %dx%d,vmode:%d\n", __func__, __LINE__,
+-		vinfo->width, vinfo->height, vinfo->mode);
+-#else
+-	h = vdin_get_active_h(devp);
+-	v = vdin_get_active_v(devp);
+-	dprintk(1, "%s,%d; %dx%d\n", __func__, __LINE__, vinfo->width, vinfo->height);
+-#endif
+-	if (h >= 4096 - err_range && h <= 4096 + err_range &&
+-		v >= 2160 - err_range && v <= 2160 + err_range)
+-		devp->parm.info.fmt = TVIN_SIG_FMT_HDMI_4096_2160_00HZ;
+-	else if (h >= 3840 - err_range && h <= 3840 + err_range &&
+-			 v >= 2160 - err_range && v <= 2160 + err_range)
+-		devp->parm.info.fmt = TVIN_SIG_FMT_HDMI_3840_2160_00HZ;
+-	else if (h >= 1920 - err_range && h <= 1920 + err_range &&
+-			 v >= 1080 - err_range && v <= 1080 + err_range)
+-		devp->parm.info.fmt = TVIN_SIG_FMT_HDMI_1920X1080P_60HZ;
+-	else if (h >= 1280 - err_range && h <= 1280 + err_range &&
+-			 v >= 720 - err_range && v <= 720 + err_range)
+-		devp->parm.info.fmt = TVIN_SIG_FMT_HDMI_1280X720P_60HZ;
+-	else
+-		devp->parm.info.fmt = TVIN_SIG_FMT_NULL;
+-
+-	dprintk(1, "vdin%d,active,h=%d,v=%d\n", devp->index, h, v);
+-
+-	return 0;
+-}
+-
+ /* start vdin dec for v4l2 */
+ int vdin_v4l2_start_tvin(struct vdin_dev_s *devp)
+ {
+ 	int ret;
+ 	struct vdin_parm_s vdin_cap_param;
+ 	const struct tvin_format_s *fmt_info_p;
++	struct tvin_format_s loopback_fmt = {};
+ 
+-	/* TODO:get vd1/osd loopback source fmt */
+-	if (devp->index)
+-		vdin_v4l2_loopback_fmt(devp);
++	/* a loopback input is the size of the output mode */
++	if (devp->index) {
++		devp->parm.info.fmt = TVIN_SIG_FMT_MAX;
++		loopback_fmt.h_active = get_current_vinfo()->width;
++		loopback_fmt.v_active = get_current_vinfo()->height;
++		fmt_info_p = &loopback_fmt;
++	} else {
++		fmt_info_p = tvin_get_fmt_info(devp->parm.info.fmt);
++	}
+ 
+ 	/* Check args */
+-	fmt_info_p = tvin_get_fmt_info(devp->parm.info.fmt);
+ 	if (!fmt_info_p) {
+ 		dprintk(0, "%s,invalid fmt:%s\n",
+ 			__func__, tvin_sig_fmt_str(devp->parm.info.fmt));
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.h b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.h
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.h
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.h
+@@ -0,7 +0,6 @@
+ 
+ #include "vdin_drv.h"
+ #include <linux/amlogic/meson_uvm_core.h>
+-#define VDIN_V4L2_GET_LOOPBACK_FMT_BY_VOUT_SERVE
+ 
+ #define VDIN_DEV_VER		0x20240116
+ #define VDIN_DEV_VER2		"v4l2 base func ok"

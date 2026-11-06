@@ -8,9 +8,9 @@ swscale copies input that is already in the encoder's pixel format
 into a second frame of the same size, 50 MB for a 2160p 16-bit PNG.
 No XB format names RGB48BE rows.
 ---
- xbmc/guilib/FFmpegImage.cpp  | 41 +++++++++++++++++++++++++-----------
+ xbmc/guilib/FFmpegImage.cpp  | 31 +++++++++++++++++++++++--------
  xbmc/guilib/TextureFormats.h |  1 +
- 2 files changed, 30 insertions(+), 12 deletions(-)
+ 2 files changed, 24 insertions(+), 8 deletions(-)
 
 diff --git a/xbmc/guilib/FFmpegImage.cpp b/xbmc/guilib/FFmpegImage.cpp
 --- a/xbmc/guilib/FFmpegImage.cpp
@@ -32,7 +32,7 @@ diff --git a/xbmc/guilib/FFmpegImage.cpp b/xbmc/guilib/FFmpegImage.cpp
  
    // XB_FMT_OPAQUE 16-bit sources carry undefined alpha; RGB48 output drops it
    const AVPixelFormat fmt16bit = opaque ? AV_PIX_FMT_RGB48BE : AV_PIX_FMT_RGBA64BE;
-@@ -0,26 +0,42 @@
+@@ -0,12 +0,25 @@
      case XB_FMT_X2BGR10:
        srcFmt = AV_PIX_FMT_X2BGR10LE;
        break;
@@ -59,30 +59,20 @@ diff --git a/xbmc/guilib/FFmpegImage.cpp b/xbmc/guilib/FFmpegImage.cpp
    {
      CLog::Log(LOGERROR, "Could not fill picture for thumbnail: {}", destFile);
      CleanupLocalOutputBuffer();
-     return false;
+@@ -0,9 +0,10 @@
    }
  
--  // SWS_ACCURATE_RND skips RGB->YUV fast paths that ignore the range set below
+   // SWS_ACCURATE_RND skips RGB->YUV fast paths that ignore the range set below
 -  tdm.sws = sws_getContext(width, height, srcFmt, width, height, intermediateFmt,
 -                           jpg_output ? SWS_ACCURATE_RND : 0, nullptr, nullptr, nullptr);
 -  if (!tdm.sws)
-+  if (!lend)
++  tdm.sws = lend ? nullptr
++                 : sws_getContext(width, height, srcFmt, width, height, intermediateFmt,
++                                  jpg_output ? SWS_ACCURATE_RND : 0, nullptr, nullptr, nullptr);
++  if (!lend && !tdm.sws)
    {
--    CLog::Log(LOGERROR, "Could not setup scaling context for thumbnail: {}", destFile);
--    CleanupLocalOutputBuffer();
--    return false;
-+    // SWS_ACCURATE_RND skips RGB->YUV fast paths that ignore the range set below
-+    tdm.sws = sws_getContext(width, height, srcFmt, width, height, intermediateFmt,
-+                             jpg_output ? SWS_ACCURATE_RND : 0, nullptr, nullptr, nullptr);
-+    if (!tdm.sws)
-+    {
-+      CLog::Log(LOGERROR, "Could not setup scaling context for thumbnail: {}", destFile);
-+      CleanupLocalOutputBuffer();
-+      return false;
-+    }
-   }
- 
-   // Setup jpeg range for sws
+     CLog::Log(LOGERROR, "Could not setup scaling context for thumbnail: {}", destFile);
+     CleanupLocalOutputBuffer();
 @@ -0,8 +0,8 @@
      }
    }

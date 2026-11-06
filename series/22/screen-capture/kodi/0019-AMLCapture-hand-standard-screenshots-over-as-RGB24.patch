@@ -61,9 +61,9 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
  }
  
 @@ -0,7 +0,7 @@
-   auto lease = session->Lease(AMLCaptureInput::GUI, streamWidth, streamHeight);
-   result.pixels = std::make_shared<CAMLGuiPixels>(session, std::move(lease), width, height,
-                                                   streamWidth, streamHeight);
+   auto lease = session->Lease(AMLCaptureInput::SCREEN, streamWidth, streamHeight);
+   result.pixels = std::make_shared<CAMLLivePixels>(session, std::move(lease), width, height,
+                                                    streamWidth, streamHeight);
 -  DescribeSdr(width, height, result);
 +  DescribeSdr(width, height, false, result);
    result.content = CaptureContent::COMPOSITE;
@@ -247,7 +247,7 @@ diff --git a/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp b/xbmc/windowing/am
        return true;
      }
  
-     convert.MapToSdr(image, coding, dst, &overlay);
+     convert.MapToSdr(image, coding, dst, &overlay, frame.color.luminance);
 +
 +    if (IsRgb())
 +      Repack<3>(m_buffer.get(), pixels);

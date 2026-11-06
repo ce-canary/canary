@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 22:11:12 -0600
+Subject: [PATCH] vh265: skip the buffer level gate once input has ended
+
+run_ready waits for pre_decode_buf_level bytes before every run. When
+input ends with less than that left, nothing more can arrive. The
+decoder stops short of the data it holds and never reports empty, so
+the last pictures never show. vdec_ready_to_run already skips its own
+level checks under input.eos.
+---
+ drivers/frame_provider/decoder/h265/vh265.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/frame_provider/decoder/h265/vh265.c b/drivers/frame_provider/decoder/h265/vh265.c
+--- a/drivers/frame_provider/decoder/h265/vh265.c
++++ b/drivers/frame_provider/decoder/h265/vh265.c
+@@ -0,7 +0,8 @@
+ 			(int)(get_jiffies_64() - hevc->sc_start_time) * 1000/HZ);
+ 	}
+ 	if (vdec_stream_based(vdec)
+-			&& pre_decode_buf_level != 0) {
++			&& pre_decode_buf_level != 0
++			&& !vdec->input.eos) {
+ 			u32 rp, wp, level;
+ 
+ 			rp = STBUF_READ(&vdec->vbuf, get_rp);

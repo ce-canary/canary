@@ -10,11 +10,12 @@ These builds are for testing and early feature previews. Despite extensive testi
 
 **Status: active.**
 
-- CoreELEC 22: latest build `22.0-Piers_canary_20261104`, based on the nightly of `20261103`.
+- CoreELEC 22: latest build `22.0-Piers_canary_20261106`, based on the nightly of `20261106`.
 
 - **Blu-ray menu playback:** full disc menus with more seamless clip transitions.
 - **A/V sync:** vastly tighter audio and video sync with stability across playback events.
 - **Screen capture:** screenshots and Hyperion ambilight for all HDR formats and output modes.
+- **Dolby Vision FEL playback:** FEL titles play through to the end, and Blu-ray menus no longer turn black on FEL clips.
 
 When everything here has landed in CoreELEC, this section will say there is no active canary. Use the normal nightly until the next testflight starts.
 
@@ -82,7 +83,7 @@ Hyperion gets its picture from Kodi, so it needs no grabber of its own.
 
 1. Disable the normal Hyperion add-on, then enable "Hyperion.NG (canary)" in My add-ons. It copies your existing configuration on first start.
 2. In the Hyperion web UI (`http://<your box>:8090`), open Network Services and check that the Flatbuffer Server is enabled on port 19400. Those are the defaults, so a normal setup needs no change.
-3. In the add-on's settings, choose what Kodi sends: Off, Video, or Video and menus (the default). You can also keep sending while a screensaver runs.
+3. In the add-on's settings, choose what Kodi sends: Off, Playback only, or Playback and menus (the default). You can also keep sending while a screensaver runs.
 
 Your LED layout and other settings work as before.
 
@@ -98,12 +99,13 @@ Follow CoreELEC's [guide to reporting an issue](https://discourse.coreelec.org/t
 
 ## Changes by feature
 
-| Feature | Kodi | common_drivers | CoreELEC | History |
-|---|---|---|---|---|
-| Blu-ray menu playback | [72 commits](https://github.com/ce-canary/xbmc/compare/base/22...topic/22/menu-playback) | [5 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/av-sync...topic/22/menu-playback) | [17 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/screen-capture...topic/22/menu-playback) | [history](https://github.com/ce-canary/canary/commits/main/series/22/menu-playback) |
-| A/V sync | [45 commits](https://github.com/ce-canary/xbmc/compare/topic/22/menu-playback...topic/22/av-sync) | [4 commits](https://github.com/ce-canary/common_drivers/compare/base/22...topic/22/av-sync) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/av-sync) |
-| Screen capture | [23 commits](https://github.com/ce-canary/xbmc/compare/topic/22/av-sync...topic/22/screen-capture) | [12 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/menu-playback...topic/22/screen-capture) | [5 commits](https://github.com/ce-canary/CoreELEC/compare/base/22...topic/22/screen-capture) | [history](https://github.com/ce-canary/canary/commits/main/series/22/screen-capture) |
-| Canary-only changes | none | none | [3 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/menu-playback...topic/22/canary-only) | [history](https://github.com/ce-canary/canary/commits/main/series/22/canary-only) |
+| Feature | Kodi | common_drivers | media_modules-aml | CoreELEC | History |
+|---|---|---|---|---|---|
+| Blu-ray menu playback | [72 commits](https://github.com/ce-canary/xbmc/compare/base/22...topic/22/menu-playback) | [5 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/av-sync...topic/22/menu-playback) | none | [17 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/screen-capture...topic/22/menu-playback) | [history](https://github.com/ce-canary/canary/commits/main/series/22/menu-playback) |
+| A/V sync | [45 commits](https://github.com/ce-canary/xbmc/compare/topic/22/menu-playback...topic/22/av-sync) | [3 commits](https://github.com/ce-canary/common_drivers/compare/base/22...topic/22/av-sync) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/av-sync) |
+| Screen capture | [21 commits](https://github.com/ce-canary/xbmc/compare/topic/22/av-sync...topic/22/screen-capture) | [23 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/menu-playback...topic/22/screen-capture) | none | [6 commits](https://github.com/ce-canary/CoreELEC/compare/base/22...topic/22/screen-capture) | [history](https://github.com/ce-canary/canary/commits/main/series/22/screen-capture) |
+| Dolby Vision FEL playback | [6 commits](https://github.com/ce-canary/xbmc/compare/topic/22/screen-capture...topic/22/fel-playback) | none | [8 commits](https://github.com/ce-canary/media_modules-aml/compare/base/22...topic/22/fel-playback) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/fel-playback) |
+| Canary-only changes | none | none | none | [3 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/menu-playback...topic/22/canary-only) | [history](https://github.com/ce-canary/canary/commits/main/series/22/canary-only) |
 
 Each link shows that feature's commits and combined diff for the current build. History shows how a feature changed between builds.
 
@@ -111,7 +113,7 @@ Each link shows that feature's commits and combined diff for the current build. 
 
 ## Credits
 
-The Blu-ray menu and A/V sync work draws on [SamuriHL](https://github.com/SamuriHL)'s public builds and branches. His commits showed several of the defects, mechanisms and design ideas used here, and he reached a number of these problems first. Pull requests credit him per change.
+The Blu-ray menu, A/V sync and Dolby Vision FEL work draws on [SamuriHL](https://github.com/SamuriHL)'s public builds and branches. Their commits showed several of the defects, mechanisms and design ideas used here, and they reached a number of these problems first. Pull requests credit them per change.
 
 ## Source
 

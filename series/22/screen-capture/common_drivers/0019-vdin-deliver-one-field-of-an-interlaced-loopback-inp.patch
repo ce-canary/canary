@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 10:56:26 -0600
+Subject: [PATCH] vdin: deliver one field of an interlaced loopback input
+
+A capture of a field took both fields of an interlaced output in turn.
+The two images differ, so a client sampling at a slower rate saw them
+alternate and the LEDs flickered on a still picture.
+---
+ drivers/media/vin/tvin/vdin/vdin_drv.c | 7 +++++++
+ drivers/media/vin/tvin/vdin/vdin_drv.h | 2 ++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.c b/drivers/media/vin/tvin/vdin/vdin_drv.c
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.c
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.c
+@@ -0,6 +0,7 @@
+ 	devp->canvas_config_mode = canvas_config_mode;
+ 	/* h_active/v_active will be recalculated by bellow calling */
+ 	vdin_set_decimation(devp);
++	devp->v4l2_one_field = vdin_v4l2_is_field(devp);
+ 
+ #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+ 	/* check if need enable afbce */
+@@ -0,6 +0,12 @@
+ 		goto irq_handled;
+ 	}
+ 
++	/* the two fields of a pair differ, so a client gets only one of them */
++	if (devp->v4l2_one_field && (devp->irq_cnt & 1)) {
++		vdin_drop_frame_info(devp, "other field");
++		goto irq_handled;
++	}
++
+ 	/* set CRC check pulse */
+ 	vdin_set_crc_pulse(devp);
+ 	devp->vdin_reset_flag = vdin_vsync_reset_mif(devp->index);
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.h b/drivers/media/vin/tvin/vdin/vdin_drv.h
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.h
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.h
+@@ -0,6 +0,8 @@
+ 	/*use frame rate to cal duration*/
+ 	unsigned int use_frame_rate;
+ 	unsigned int irq_cnt;
++	/* v4l2 capture of a field: deliver one field of each pair */
++	bool v4l2_one_field;
+ 	unsigned int vpu_crash_cnt;
+ 	unsigned int frame_cnt;
+ 	unsigned int vdin_drop_num;

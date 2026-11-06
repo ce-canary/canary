@@ -5,15 +5,16 @@ Subject: [PATCH] AMLCapture: capture video from the vdin1 v4l2 node
 
 Kodi has no reader for the vdin1 V4L2 node, which delivers the video
 layer after the VPP, DV and HDR cores. The decoder's pictures carry no
-HDR statics. Only the frame metadata store holds them.
+HDR statics. Only the frame metadata store holds them. vdin reports its
+limits, stride and stops, and gives no frames while the output is muted.
 ---
  .../DVDCodecs/Video/AMLFrameMetadata.h        |  32 +
- xbmc/utils/AMLCapture.cpp                     | 768 ++++++++++++++++++
- xbmc/utils/AMLCapture.h                       | 110 +++
+ xbmc/utils/AMLCapture.cpp                     | 797 ++++++++++++++++++
+ xbmc/utils/AMLCapture.h                       | 116 +++
  xbmc/utils/AMLCaptureConvert.cpp              | 521 ++++++++++++
  xbmc/utils/AMLCaptureConvert.h                |  95 +++
  xbmc/utils/CMakeLists.txt                     |   8 +-
- 6 files changed, 1532 insertions(+), 2 deletions(-)
+ 6 files changed, 1567 insertions(+), 2 deletions(-)
  create mode 100644 xbmc/utils/AMLCapture.cpp
  create mode 100644 xbmc/utils/AMLCapture.h
  create mode 100644 xbmc/utils/AMLCaptureConvert.cpp
@@ -62,7 +63,7 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
 new file mode 100644
 --- /dev/null
 +++ b/xbmc/utils/AMLCapture.cpp
-@@ -0,0 +0,768 @@
+@@ -0,0 +0,797 @@
 +/*
 + *  Copyright (C) 2026 Team CoreELEC
 + *
@@ -107,15 +108,10 @@ new file mode 100644
 +namespace
 +{
 +
-+// the first frame after STREAMON came 3.0 to 4.97 output periods later on every tested SoC
++// the first frame after STREAMON comes within this many frame periods
 +constexpr int FRAME_WAIT_PERIODS = 10;
-+// vdin1 has 8 canvas ids and an NV12 buffer takes two
++// vdin1 writes one, holds the last, the reader holds one and one stays free
 +constexpr unsigned int CAPTURE_BUFFERS = 4;
-+// the vdin1 line buffer is 1920 pixels wide; a 2160p output is downscaled 2:1
-+constexpr int MAX_CAPTURE_WIDTH = 1920;
-+constexpr int MAX_CAPTURE_HEIGHT = 1080;
-+// vdin strides each line to 64 pixels but sizes the buffer from the width
-+constexpr int CAPTURE_WIDTH_ALIGN = 64;
 +// DV player-led, dv2hdr and sdr2hdr frames are already display-mapped
 +constexpr float MAPPED_PEAK_NITS = 1000.0f;
 +// the grade of a Dolby Vision TV-led signal when the stream carries no HDR statics
@@ -151,6 +147,8 @@ new file mode 100644
 +{
 +  std::string path;
 +  int input{-1};
++  //! the widest scaled capture
++  int maxWidth{0};
 +};
 +
 +AMLCaptureDevice Discover()
@@ -184,6 +182,12 @@ new file mode 100644
 +          device.input = static_cast<int>(input.index);
 +        }
 +      }
++      v4l2_frmsizeenum size{};
++      size.pixel_format = V4L2_PIX_FMT_NV12;
++      if (ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &size) == 0)
++        device.maxWidth = static_cast<int>(size.stepwise.max_width);
++      else
++        device.input = -1;
 +    }
 +    close(fd);
 +    if (device.input >= 0)
@@ -212,7 +216,6 @@ new file mode 100644
 +
 +std::mutex s_sessionLock;
 +std::weak_ptr<CAMLCapture> s_session;
-+
 +} // namespace
 +
 +class CAMLCapture::CStream
@@ -223,6 +226,7 @@ new file mode 100644
 +    FRAME,
 +    STOPPED,
 +    TIMEOUT,
++    LOST,
 +  };
 +
 +  //! failures log at `logLevel`; `busy` tells whether another vdin1 user holds the node
@@ -230,6 +234,8 @@ new file mode 100644
 +  ~CStream();
 +
 +  void Stop();
++  int GetBuffers() const { return static_cast<int>(m_maps.size()); }
++  float GetFramePeriodMs() const { return m_framePeriodMs; }
 +  bool Matches(int width, int height) const { return width == m_width && height == m_height; }
 +  //! Takes the newest frame vdin1 finished since the last dequeue, false when there is none or
 +  //! when that dequeue is older than `maxAge`
@@ -246,8 +252,14 @@ new file mode 100644
 +  int m_eventFd{-1};
 +  int m_width{0};
 +  int m_height{0};
++  // the size vdin1 agreed to deliver for the size asked for
++  int m_imageWidth{0};
++  int m_imageHeight{0};
++  int m_stride{0};
++  float m_framePeriodMs{0.0f};
 +  bool m_streaming{false};
 +  std::atomic<bool> m_stopped{false};
++  bool m_lost{false};
 +  std::vector<std::pair<void*, size_t>> m_maps;
 +  std::chrono::steady_clock::time_point m_dequeued;
 +};
@@ -290,15 +302,30 @@ new file mode 100644
 +  format.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
 +  format.fmt.pix_mp.field = V4L2_FIELD_NONE;
 +  format.fmt.pix_mp.num_planes = 1;
-+  const size_t frameSize = static_cast<size_t>(width) * height * 3 / 2;
-+  if (ioctl(stream->m_fd, VIDIOC_S_FMT, &format) < 0 ||
-+      format.fmt.pix_mp.width != static_cast<uint32_t>(width) ||
-+      format.fmt.pix_mp.height != static_cast<uint32_t>(height) ||
++  const int ioctlResult = ioctl(stream->m_fd, VIDIOC_S_FMT, &format);
++  stream->m_stride = static_cast<int>(format.fmt.pix_mp.plane_fmt[0].bytesperline);
++  stream->m_imageWidth = static_cast<int>(format.fmt.pix_mp.width);
++  stream->m_imageHeight = static_cast<int>(format.fmt.pix_mp.height);
++  const size_t frameSize = static_cast<size_t>(stream->m_stride) * stream->m_imageHeight * 3 / 2;
++  if (ioctlResult < 0 || format.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_NV12 ||
++      stream->m_stride < stream->m_imageWidth ||
 +      format.fmt.pix_mp.plane_fmt[0].sizeimage < frameSize)
 +  {
++    busy = ioctlResult < 0 && errno == EBUSY;
 +    CLog::Log(logLevel, "CAMLCapture::{}: NV12 {}x{} refused", __FUNCTION__, width, height);
 +    return {};
 +  }
++
++  v4l2_streamparm parm{};
++  parm.type = BUFFER_TYPE;
++  const v4l2_fract& period = parm.parm.capture.timeperframe;
++  if (ioctl(stream->m_fd, VIDIOC_G_PARM, &parm) < 0 || period.numerator == 0 ||
++      period.denominator == 0)
++  {
++    CLog::Log(logLevel, "CAMLCapture::{}: no frame period", __FUNCTION__);
++    return {};
++  }
++  stream->m_framePeriodMs = 1000.0f * period.numerator / period.denominator;
 +
 +  v4l2_requestbuffers request{};
 +  request.count = CAPTURE_BUFFERS;
@@ -416,7 +443,8 @@ new file mode 100644
 +  while (ret < 0 && errno == EINTR);
 +
 +  stopped = m_stopped || (fds[1].revents & POLLIN);
-+  return ret > 0 && !stopped && (fds[0].revents & POLLIN) && !(fds[0].revents & POLLERR);
++  m_lost = fds[0].revents & POLLERR;
++  return ret > 0 && !stopped && !m_lost && (fds[0].revents & POLLIN);
 +}
 +
 +bool CAMLCapture::CStream::TakeNewest(std::chrono::milliseconds maxAge, unsigned int& index)
@@ -456,7 +484,11 @@ new file mode 100644
 +                          .count();
 +    bool stopped = false;
 +    if (!HasFrame(static_cast<int>(std::max<int64_t>(left, 0)), stopped))
-+      return stopped ? Wake::STOPPED : Wake::TIMEOUT;
++    {
++      if (stopped)
++        return Wake::STOPPED;
++      return m_lost ? Wake::LOST : Wake::TIMEOUT;
++    }
 +
 +    if (Dequeue(index))
 +      return Wake::FRAME;
@@ -470,12 +502,12 @@ new file mode 100644
 +  // single-plane NV12: the chroma plane follows the luma plane at the same stride
 +  AMLCaptureImage image;
 +  image.format = AV_PIX_FMT_NV12;
-+  image.width = m_width;
-+  image.height = m_height;
++  image.width = m_imageWidth;
++  image.height = m_imageHeight;
 +  image.data[0] = static_cast<uint8_t*>(m_maps[index].first);
-+  image.data[1] = image.data[0] + static_cast<size_t>(m_width) * m_height;
-+  image.linesize[0] = m_width;
-+  image.linesize[1] = m_width;
++  image.data[1] = image.data[0] + static_cast<size_t>(m_stride) * m_imageHeight;
++  image.linesize[0] = m_stride;
++  image.linesize[1] = m_stride;
 +  return image;
 +}
 +
@@ -504,9 +536,8 @@ new file mode 100644
 +  const RESOLUTION_INFO screen = CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo();
 +  const int screenWidth = std::max(screen.iScreenWidth, 1);
 +  const int screenHeight = std::max(screen.iScreenHeight, 1);
-+  const float scale = std::min({1.0f, static_cast<float>(MAX_CAPTURE_WIDTH) / screenWidth,
-+                                static_cast<float>(MAX_CAPTURE_HEIGHT) / screenHeight});
-+  width = static_cast<int>(screenWidth * scale) & ~(CAPTURE_WIDTH_ALIGN - 1);
++  const float scale = std::min(1.0f, static_cast<float>(FindDevice().maxWidth) / screenWidth);
++  width = static_cast<int>(screenWidth * scale) & ~1;
 +  height = static_cast<int>(screenHeight * scale) & ~1;
 +}
 +
@@ -528,6 +559,7 @@ new file mode 100644
 +  {
 +    std::lock_guard lock(m_lock);
 +    m_displayLost = true;
++    m_displayEpoch++;
 +    stream = TakeStream();
 +  }
 +  Close(std::move(stream));
@@ -629,96 +661,94 @@ new file mode 100644
 +{
 +  std::lock_guard read(m_readLock);
 +
-+  const float fps = CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
-+  const int waitMs =
-+      static_cast<int>(std::ceil(FRAME_WAIT_PERIODS * 1000.0f / std::max(fps, 1.0f)));
-+  const std::chrono::milliseconds maxAge(
-+      static_cast<int>((CAPTURE_BUFFERS - 2) * 1000.0f / std::max(fps, 1.0f)));
-+  bool restarted = false;
-+  for (;;)
++  return ReadStream(width, height,
++                    [this, &use](CStream&, unsigned int, const AMLCaptureFrame& frame)
++                    { return use(frame, m_convert); });
++}
++
++bool CAMLCapture::ReadStream(int width, int height, const StreamFunc& use)
++{
++  std::shared_ptr<CStream> stream;
++  std::shared_ptr<CStream> stale;
++  AMLCaptureSource source;
++  // the store lock is never taken under m_lock
++  AMLFrameMetadataPtr meta = CAMLFrameMetadataStore::GetInstance().Get();
 +  {
-+    std::shared_ptr<CStream> stream;
-+    std::shared_ptr<CStream> stale;
-+    AMLCaptureSource source;
-+    // the store lock is never taken under m_lock
-+    AMLFrameMetadataPtr meta = CAMLFrameMetadataStore::GetInstance().Get();
-+    {
-+      std::lock_guard lock(m_lock);
-+      if (!CanRead())
-+        return false;
-+      for (const auto& [continuousWidth, continuousHeight] : m_continuousSizes)
-+      {
-+        width = std::max(width, continuousWidth);
-+        height = std::max(height, continuousHeight);
-+      }
-+      if (m_stream && !m_stream->Matches(width, height))
-+        stale = TakeStream();
-+      stream = m_stream;
-+      UpdateStatics(std::move(meta));
-+      source = m_source;
-+    }
-+    Close(std::move(stale));
-+
-+    if (!stream)
-+    {
-+      {
-+        std::unique_lock lock(m_lock);
-+        m_closed.wait(lock, [this] { return m_closing == 0; });
-+        if (!CanRead())
-+          return false;
-+      }
-+
-+      bool busy = false;
-+      const int logLevel = m_openFailed ? LOGDEBUG : LOGWARNING;
-+      stream = CStream::Open(width, height, logLevel, busy);
-+      if (!busy)
-+        m_openFailed = !stream;
-+
-+      std::lock_guard lock(m_lock);
-+      if (busy && !m_busy)
-+        CLog::Log(LOGWARNING, "CAMLCapture::{}: another vdin1 user holds the node", __FUNCTION__);
-+      m_busy = busy;
-+      if (!stream)
-+        return false;
-+      if (!CanRead())
-+        return false;
-+      m_stream = stream;
-+    }
-+
-+    unsigned int index = 0;
-+    const CStream::Wake wake =
-+        stream->TakeNewest(maxAge, index) ? CStream::Wake::FRAME : stream->Wait(waitMs, index);
-+    if (wake == CStream::Wake::FRAME)
-+    {
-+      AMLCaptureFrame frame;
-+      frame.color = GetSignal(source);
-+      frame.image = stream->Image(index);
-+      const bool ok = use(frame, m_convert);
-+      stream->Queue(index);
-+      return ok;
-+    }
-+    if (wake == CStream::Wake::STOPPED)
++    std::lock_guard lock(m_lock);
++    if (!CanRead())
 +      return false;
++    for (const auto& [continuousWidth, continuousHeight] : m_continuousSizes)
++    {
++      width = std::max(width, continuousWidth);
++      height = std::max(height, continuousHeight);
++    }
++    if (m_stream && !m_stream->Matches(width, height))
++      stale = TakeStream();
++    stream = m_stream;
++    UpdateStatics(std::move(meta));
++    source = m_source;
++  }
++  Close(std::move(stale));
 +
-+    // another vdin user can stop the stream underneath us: restart it once, then drop it
++  if (!stream)
++  {
++    uint32_t epoch = 0;
++    {
++      std::unique_lock lock(m_lock);
++      m_closed.wait(lock, [this] { return m_closing == 0; });
++      if (!CanRead())
++        return false;
++      epoch = m_displayEpoch;
++    }
++
++    bool busy = false;
++    const int logLevel = m_openFailed ? LOGDEBUG : LOGWARNING;
++    stream = CStream::Open(width, height, logLevel, busy);
++    if (!busy)
++      m_openFailed = !stream;
++
++    std::lock_guard lock(m_lock);
++    if (busy && !m_busy)
++      CLog::Log(LOGWARNING, "CAMLCapture::{}: another vdin1 user holds the node", __FUNCTION__);
++    m_busy = busy;
++    if (!stream)
++      return false;
++    // a stream opened across a mode set still holds the old mode
++    if (!CanRead() || epoch != m_displayEpoch)
++      return false;
++    m_stream = stream;
++  }
++
++  const float periodMs = stream->GetFramePeriodMs();
++  const int waitMs = static_cast<int>(std::ceil(FRAME_WAIT_PERIODS * periodMs));
++  const std::chrono::milliseconds maxAge(static_cast<int>((stream->GetBuffers() - 2) * periodMs));
++  unsigned int index = 0;
++  const CStream::Wake wake =
++      stream->TakeNewest(maxAge, index) ? CStream::Wake::FRAME : stream->Wait(waitMs, index);
++  if (wake == CStream::Wake::FRAME)
++  {
++    AMLCaptureFrame frame;
++    frame.color = GetSignal(source);
++    frame.image = stream->Image(index);
++    const bool ok = use(*stream, index, frame);
++    stream->Queue(index);
++    return ok;
++  }
++  // vdin1 stopped the stream without the reader, so the next read opens a new one
++  if (wake == CStream::Wake::LOST)
++  {
 +    {
 +      std::lock_guard lock(m_lock);
-+      if (m_stream != stream)
-+        return false;
-+      stale = TakeStream();
++      if (m_stream == stream)
++        stale = TakeStream();
 +    }
 +    stream.reset();
 +    Close(std::move(stale));
-+    if (restarted)
-+    {
-+      CLog::Log(LOGWARNING, "CAMLCapture::{}: no frame in {} ms, stream dropped", __FUNCTION__,
-+                waitMs);
-+      return false;
-+    }
-+    restarted = true;
-+    CLog::Log(LOGWARNING, "CAMLCapture::{}: no frame in {} ms, restarting the stream", __FUNCTION__,
-+              waitMs);
++    CLog::Log(LOGWARNING, "CAMLCapture::{}: vdin1 stopped the stream", __FUNCTION__);
++    return false;
 +  }
++  // vdin1 gives no frames while the output is muted, so a stream stays open through silence
++  return false;
 +}
 +
 +void CAMLCapture::UpdateStatics(AMLFrameMetadataPtr meta)
@@ -835,7 +865,7 @@ diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
 new file mode 100644
 --- /dev/null
 +++ b/xbmc/utils/AMLCapture.h
-@@ -0,0 +0,110 @@
+@@ -0,0 +0,116 @@
 +/*
 + *  Copyright (C) 2026 Team CoreELEC
 + *
@@ -878,8 +908,9 @@ new file mode 100644
 +//! DV and HDR cores, without the GUI.
 +//!
 +//! The renderer owns the session. The stream starts on the first read and stops when the last
-+//! lease ends, on OnLostDisplay and when the renderer drops the session. Only OnLostDisplay and
-+//! the destructor make ioctls on the calling thread; everything else runs on the consumer thread.
++//! lease ends, on OnLostDisplay, when vdin1 stops it and when the renderer drops the session. Only
++//! OnLostDisplay and the destructor make ioctls on the calling thread; everything else runs on
++//! the consumer thread.
 +class CAMLCapture : public IDispResource, public std::enable_shared_from_this<CAMLCapture>
 +{
 +public:
@@ -908,13 +939,17 @@ new file mode 100644
 +
 +  //! Consumer thread: take the newest frame of a stream of at least width x height, or of the
 +  //! continuous size when larger, else wait for the next one, and run `use` on it. A size change
-+  //! restarts the stream. A wait ends after a bound of output frame periods.
++  //! restarts the stream. A wait ends after a bound of frame periods.
 +  bool Read(int width, int height, const ReadFunc& use);
 +
 +private:
 +  class CStream;
++  using StreamFunc =
++      std::function<bool(CStream& stream, unsigned int index, const AMLCaptureFrame& frame)>;
 +
 +  void ReleaseLease(int width, int height);
++  //! m_readLock must be held; `use` runs on buffer `index`, which is queued again after it.
++  bool ReadStream(int width, int height, const StreamFunc& use);
 +  //! m_lock must be held
 +  bool CanRead() const;
 +  //! takes m_stream for Close; m_lock must be held
@@ -932,6 +967,7 @@ new file mode 100644
 +  int m_leases{0};
 +  std::vector<std::pair<int, int>> m_continuousSizes;
 +  bool m_displayLost{false};
++  uint32_t m_displayEpoch{0};
 +  //! another vdin1 user holds the node: no reopen before the next Configure
 +  bool m_busy{false};
 +  AMLCaptureSource m_source;

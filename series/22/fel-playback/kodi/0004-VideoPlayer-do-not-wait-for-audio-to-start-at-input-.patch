@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 6 Nov 2026 09:16:05 -0600
+Subject: [PATCH] VideoPlayer: do not wait for audio to start at input end
+
+Audio still starting at input end kept the clock from starting. No
+more packets follow, so it never got ready and video waited for it.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,7 +0,9 @@
+                  (!m_VideoPlayerAudio->AcceptsData() && m_processInfo->GetLevelVQ() < 10);
+     bool audio = m_CurrentAudio.id < 0 || (m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_WAITSYNC) ||
+                  (m_CurrentAudio.packets == 0 && m_CurrentVideo.packets > threshold) ||
+-                 (!m_VideoPlayerVideo->AcceptsData() && m_VideoPlayerAudio->GetLevel() < 10);
++                 (!m_VideoPlayerVideo->AcceptsData() && m_VideoPlayerAudio->GetLevel() < 10) ||
++                 (m_inputEnded && m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_STARTING &&
++                  !m_VideoPlayerAudio->HasData());
+ 
+     const bool syncAudio = m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_WAITSYNC &&
+                            (m_CurrentAudio.avsync == CCurrentStream::AV_SYNC_CONT ||

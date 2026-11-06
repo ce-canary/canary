@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 12:52:17 -0600
+Subject: [PATCH] vdin: negotiate the size a loopback capture can deliver
+
+A client had to know the scaler limits, and a size past them failed at
+STREAMON. Under vertical scaling vdin1 clamps its output width to the
+line buffer without telling the client. A 3840 wide request that also
+scaled vertically got frames written 1920 wide, which the client read
+as 3840 wide, and STREAMON reported success.
+---
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 50 +++++++++++++++++++---
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.h |  3 ++
+ 2 files changed, 47 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,8 +0,31 @@
+ static void vdin_v4l2_bound_size(struct vdin_dev_s *devp,
+ 				 struct v4l2_pix_format_mplane *pix_mp)
+ {
+-	pix_mp->width = clamp_t(u32, rounddown(pix_mp->width, 2), 2, VDIN_4K_SIZE >> 16);
+-	pix_mp->height = clamp_t(u32, rounddown(pix_mp->height, 2), 2, VDIN_4K_SIZE & 0xffff);
++	unsigned int src_w = VDIN_4K_SIZE >> 16;
++	unsigned int src_h = VDIN_4K_SIZE & 0xffff;
++	unsigned int min_w = 2;
++	unsigned int min_h = 2;
++
++	if (devp->index) {
++		src_w = get_current_vinfo()->width;
++		src_h = get_current_vinfo()->height;
++		min_w = roundup(src_w / VDIN_V4L2_MAX_SHRINK + 1, 2);
++		min_h = roundup(src_h / VDIN_V4L2_MAX_SHRINK + 1, 2);
++	}
++
++	pix_mp->width = min(pix_mp->width, src_w);
++	pix_mp->height = min(pix_mp->height, src_h);
++
++	/* a vertical scale runs through the line buffer: keep the shape */
++	if (devp->index && pix_mp->height != src_h &&
++	    pix_mp->width > devp->dtdata->vdin1_line_buff_size) {
++		pix_mp->height = pix_mp->height * devp->dtdata->vdin1_line_buff_size /
++				 pix_mp->width;
++		pix_mp->width = devp->dtdata->vdin1_line_buff_size;
++	}
++
++	pix_mp->width = max(rounddown(pix_mp->width, 2), min_w);
++	pix_mp->height = max(rounddown(pix_mp->height, 2), min_h);
+ }
+ 
+ /*
+@@ -0,6 +0,7 @@
+ 				  struct v4l2_frmsizeenum *fsize)
+ {
+ 	int ret = 0, i = 0;
++	struct vdin_dev_s *devp = video_drvdata(file);
+ 	struct vdin_v4l2_pix_fmt *fmt = NULL;
+ 	struct v4l2_frmsize_discrete *frmsize = NULL;
+ 
+@@ -0,6 +0,20 @@
+ 	}
+ 	if (!fmt)
+ 		return -EINVAL;
++	if (devp->index) {
++		if (fsize->index)
++			return -EINVAL;
++		/* widths of a scaled capture; S_FMT settles the exact size */
++		fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
++		fsize->stepwise.min_width = 2;
++		fsize->stepwise.max_width = devp->dtdata->vdin1_line_buff_size;
++		fsize->stepwise.step_width = 2;
++		fsize->stepwise.min_height = 2;
++		fsize->stepwise.max_height = VDIN_4K_SIZE & 0xffff;
++		fsize->stepwise.step_height = 2;
++		return 0;
++	}
++
+ 	if (fsize->index >= ARRAY_SIZE(vdin_v4l2_frmsize_dis))
+ 		return -EINVAL;
+ 
+@@ -0,7 +0,7 @@
+ 		vdin_cap_param.vsync_phase = 1;
+ 	}
+ 
+-	/* vdin can not do scale up */
++	/* S_FMT bounds the size, unless the output mode changed since */
+ 	if (devp->v4l2_fmt.fmt.pix_mp.width > vdin_cap_param.h_active ||
+ 		devp->v4l2_fmt.fmt.pix_mp.height > vdin_cap_param.v_active) {
+ 		dprintk(0, "%s,out of range!v4l2_fmt:%dx%d > active:%dx%d\n",
+@@ -0,9 +0,9 @@
+ 		return -EINVAL;
+ 	}
+ 
+-	/* the vdin scalers cannot shrink by 32 or more */
+-	if (devp->v4l2_fmt.fmt.pix_mp.width * 32 <= vdin_cap_param.h_active ||
+-		devp->v4l2_fmt.fmt.pix_mp.height * 32 <= vdin_cap_param.v_active) {
++	if (devp->v4l2_fmt.fmt.pix_mp.width * VDIN_V4L2_MAX_SHRINK <= vdin_cap_param.h_active ||
++	    devp->v4l2_fmt.fmt.pix_mp.height * VDIN_V4L2_MAX_SHRINK <=
++	    vdin_cap_param.v_active) {
+ 		dprintk(0, "%s,out of scale range!v4l2_fmt:%dx%d active:%dx%d\n",
+ 			__func__, devp->v4l2_fmt.fmt.pix_mp.width,
+ 			devp->v4l2_fmt.fmt.pix_mp.height, vdin_cap_param.h_active,
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.h b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.h
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.h
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.h
+@@ -0,6 +0,9 @@
+ #include "vdin_drv.h"
+ #include <linux/amlogic/meson_uvm_core.h>
+ 
++/* the vdin scalers can not shrink by this much or more */
++#define VDIN_V4L2_MAX_SHRINK	32
++
+ #define VDIN_DEV_VER		0x20240116
+ #define VDIN_DEV_VER2		"v4l2 base func ok"
+ #define VDIN_V4L_DV_NAME	"vdin_video"

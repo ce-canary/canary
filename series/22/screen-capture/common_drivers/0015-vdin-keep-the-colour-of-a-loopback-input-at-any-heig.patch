@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 12:33:06 -0600
+Subject: [PATCH] vdin: keep the colour of a loopback input at any height
+
+vdin chose a BT.601 to BT.709 conversion for an input under 720 lines.
+The height of the output says nothing about how a loopback input is
+coded, and the GUI stays BT.709. At 480p or 576p the capture would come
+out with shifted colours.
+---
+ drivers/media/vin/tvin/vdin/vdin_ctl.c     | 3 ++-
+ drivers/media/vin/tvin/vdin/vdin_ctl_s5.c  | 3 ++-
+ drivers/media/vin/tvin/vdin/vdin_ctl_t3x.c | 3 ++-
+ drivers/media/vin/tvin/vdin/vdin_drv.h     | 3 +++
+ 4 files changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_ctl.c b/drivers/media/vin/tvin/vdin/vdin_ctl.c
+--- a/drivers/media/vin/tvin/vdin/vdin_ctl.c
++++ b/drivers/media/vin/tvin/vdin/vdin_ctl.c
+@@ -0,7 +0,8 @@
+ 	case VDIN_FORMAT_CONVERT_YUV_YUV444:
+ 	case VDIN_FORMAT_CONVERT_YUV_NV12:
+ 	case VDIN_FORMAT_CONVERT_YUV_NV21:
+-		if ((fmt_info->scan_mode == TVIN_SCAN_MODE_PROGRESSIVE &&
++		if (IS_LOOPBACK_SRC(port) ||
++		    (fmt_info->scan_mode == TVIN_SCAN_MODE_PROGRESSIVE &&
+ 		     fmt_info->v_active >= 720) || /* 720p & above */
+ 		    (fmt_info->scan_mode == TVIN_SCAN_MODE_INTERLACED &&
+ 		     fmt_info->v_active >= 540)) { /* 1080i & above */
+diff --git a/drivers/media/vin/tvin/vdin/vdin_ctl_s5.c b/drivers/media/vin/tvin/vdin/vdin_ctl_s5.c
+--- a/drivers/media/vin/tvin/vdin/vdin_ctl_s5.c
++++ b/drivers/media/vin/tvin/vdin/vdin_ctl_s5.c
+@@ -0,7 +0,8 @@
+ 	case VDIN_FORMAT_CONVERT_YUV_YUV444:
+ 	case VDIN_FORMAT_CONVERT_YUV_NV12:
+ 	case VDIN_FORMAT_CONVERT_YUV_NV21:
+-		if ((fmt_info->scan_mode == TVIN_SCAN_MODE_PROGRESSIVE &&
++		if (IS_LOOPBACK_SRC(port) ||
++		    (fmt_info->scan_mode == TVIN_SCAN_MODE_PROGRESSIVE &&
+ 		     fmt_info->v_active >= 720) || /* 720p & above */
+ 		    (fmt_info->scan_mode == TVIN_SCAN_MODE_INTERLACED &&
+ 		     fmt_info->v_active >= 540)) { /* 1080i & above */
+diff --git a/drivers/media/vin/tvin/vdin/vdin_ctl_t3x.c b/drivers/media/vin/tvin/vdin/vdin_ctl_t3x.c
+--- a/drivers/media/vin/tvin/vdin/vdin_ctl_t3x.c
++++ b/drivers/media/vin/tvin/vdin/vdin_ctl_t3x.c
+@@ -0,7 +0,8 @@
+ 	case VDIN_FORMAT_CONVERT_YUV_YUV444:
+ 	case VDIN_FORMAT_CONVERT_YUV_NV12:
+ 	case VDIN_FORMAT_CONVERT_YUV_NV21:
+-		if ((fmt_info->scan_mode == TVIN_SCAN_MODE_PROGRESSIVE &&
++		if (IS_LOOPBACK_SRC(port) ||
++		    (fmt_info->scan_mode == TVIN_SCAN_MODE_PROGRESSIVE &&
+ 		     fmt_info->v_active >= 720) || /* 720p & above */
+ 		    (fmt_info->scan_mode == TVIN_SCAN_MODE_INTERLACED &&
+ 		     fmt_info->v_active >= 540)) { /* 1080i & above */
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.h b/drivers/media/vin/tvin/vdin/vdin_drv.h
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.h
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.h
+@@ -0,6 +0,9 @@
+ 		 (((src_) >= TVIN_PORT_HDMI0) && \
+ 		 ((src_) < TVIN_PORT_HDMI_MAX)); })
+ 
++#define IS_LOOPBACK_SRC(src)	\
++		((src) >= TVIN_PORT_VIU1_WB0_VD1 && (src) <= TVIN_PORT_VIU1_WB1_POST_BLEND)
++
+ #define IS_CVBS_SRC(src)	\
+ 		({typeof(src) src_ = src; \
+ 		 (((src_) >= TVIN_PORT_CVBS0) && \

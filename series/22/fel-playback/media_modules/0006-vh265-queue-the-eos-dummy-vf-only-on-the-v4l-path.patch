@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 22:11:22 -0600
+Subject: [PATCH] vh265: queue the eos dummy vf only on the v4l path
+
+Every end of stream queues the eos dummy vf, v4l or not. Outside v4l
+nothing needs it. The receiver gets a frame with no picture, and a
+queue that pairs dual layer frames must not see it.
+---
+ drivers/frame_provider/decoder/h265/vh265.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/frame_provider/decoder/h265/vh265.c b/drivers/frame_provider/decoder/h265/vh265.c
+--- a/drivers/frame_provider/decoder/h265/vh265.c
++++ b/drivers/frame_provider/decoder/h265/vh265.c
+@@ -0,7 +0,8 @@
+ 			__func__, hevc->curr_POC, pic);
+ 		flush_output(hevc, pic);
+ 		/* dummy vf with eos flag to backend */
+-		notify_v4l_eos(hw_to_vdec(hevc));
++		if (hevc->is_used_v4l)
++			notify_v4l_eos(hw_to_vdec(hevc));
+ #ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
+ 		hevc->shift_byte_count_lo
+ 			= READ_VREG(HEVC_SHIFT_BYTE_COUNT);

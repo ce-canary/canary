@@ -4,17 +4,17 @@ Date: Wed, 21 Oct 2026 18:22:41 -0500
 Subject: [PATCH] vdin: add a 10-bit 4:2:2 v4l2 capture format
 
 The v4l2 capture forced 8 bits, so a client could not read the 10-bit
-codes vdin1 receives from VD1. t3x sets its bit depth outside this
-path, so vdin1 is the only node that needs the format. A 2:1
-horizontal downscale without the pre-scaler drops every other column
-instead of averaging pixel pairs.
+codes vdin1 receives from VD1. t3x sets its bit depth outside this path.
+A 2:1 horizontal downscale without the pre-scaler drops every other
+column instead of averaging pixel pairs. The chroma of a full pack pair
+is the even pixel's or an average, depending on the vdin core.
 ---
- drivers/media/vin/tvin/vdin/vdin_ctl.c     | 16 +++++++--
+ drivers/media/vin/tvin/vdin/vdin_ctl.c     | 16 ++++++--
  drivers/media/vin/tvin/vdin/vdin_ctl.h     |  1 +
- drivers/media/vin/tvin/vdin/vdin_ctl_s5.c  | 10 ++++--
- drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 41 +++++++++++++++++++---
- include/uapi/amlogic/tvin.h                |  3 ++
- 5 files changed, 60 insertions(+), 11 deletions(-)
+ drivers/media/vin/tvin/vdin/vdin_ctl_s5.c  | 10 +++--
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 45 +++++++++++++++++++---
+ include/uapi/amlogic/tvin.h                |  5 +++
+ 5 files changed, 66 insertions(+), 11 deletions(-)
 
 diff --git a/drivers/media/vin/tvin/vdin/vdin_ctl.c b/drivers/media/vin/tvin/vdin/vdin_ctl.c
 --- a/drivers/media/vin/tvin/vdin/vdin_ctl.c
@@ -146,6 +146,17 @@ diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin
  		dprintk(0, "%s vdin%d v4l2 do not support pixelformat=%#x\n",
  			__func__, devp->index, fmt->fmt.pix_mp.pixelformat);
  		return -EINVAL;
+@@ -0,6 +0,10 @@
+ 	devp->v4l2_fmt.fmt.pix_mp.num_planes   = fmt->fmt.pix_mp.num_planes;
+ 
+ 	vdin_fill_pix_format(devp);
++	fmt->fmt.pix_mp.flags = 0;
++	if (fmt->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_AML_YUV422_10P &&
++	    devp->dtdata->hw_ver == VDIN_HW_ORG)
++		fmt->fmt.pix_mp.flags = V4L2_PIX_FMT_FLAG_AML_COSITED_CHROMA;
+ 	for (i = 0; i < fmt->fmt.pix_mp.num_planes; i++) {
+ 		fmt->fmt.pix_mp.plane_fmt[i].bytesperline =
+ 			devp->v4l2_fmt.fmt.pix_mp.plane_fmt[i].bytesperline;
 @@ -0,14 +0,27 @@
  static int vdin_vidioc_enum_fmt_vid_cap(struct file *file, void *priv,
  				   struct v4l2_fmtdesc *f)
@@ -190,12 +201,14 @@ diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin
 diff --git a/include/uapi/amlogic/tvin.h b/include/uapi/amlogic/tvin.h
 --- a/include/uapi/amlogic/tvin.h
 +++ b/include/uapi/amlogic/tvin.h
-@@ -0,6 +0,9 @@
+@@ -0,6 +0,11 @@
  	__u8 secure_memory_en; /* 0:not secure memory 1:secure memory */
  };
  
 +/* yuv422 10bit full pack, one plane */
 +#define V4L2_PIX_FMT_AML_YUV422_10P	v4l2_fourcc('A', 'Y', '2', 'P')
++/* the chroma of a pair is the even pixel's, not an average of the two */
++#define V4L2_PIX_FMT_FLAG_AML_COSITED_CHROMA	0x80
 +
  enum tvin_cn_type_e {
  	GRAPHICS,

@@ -4,10 +4,9 @@ Date: Fri, 16 Oct 2026 16:18:03 -0500
 Subject: [PATCH] amvideocap: remove the driver
 
 Every video frame toggle in the vsync interrupt polls amvideocap, and a
-capture request configures ge2d and queues its blit from there. Kodi's
-screenshot and the hyperion.ng Amlogic grabber are the last users of
-/dev/amvideocap0. Their replacements and the CoreELEC config change
-merge together with this one.
+capture request configures ge2d and queues its blit from there. The
+hyperion.ng Amlogic grabber is the last user of /dev/amvideocap0. Its
+replacement and the CoreELEC config change merge together with this one.
 ---
  .../boot/dts/amlogic/coreelec_common.dtsi     |    7 -
  drivers/media/video_sink/Kconfig              |    7 -

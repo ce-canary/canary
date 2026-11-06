@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 5 Nov 2026 22:11:12 -0600
+Subject: [PATCH] vh265: end the stream only on an empty report
+
+With input.eos set, every retry reads as end of stream once the write
+pointer is in sync. A picture with no free buffer also retries, so a
+drain flushes with frames still unread in the buffer, and those frames
+are lost. Only the decoder finding its input empty ends the stream.
+---
+ drivers/frame_provider/decoder/h265/vh265.c | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/frame_provider/decoder/h265/vh265.c b/drivers/frame_provider/decoder/h265/vh265.c
+--- a/drivers/frame_provider/decoder/h265/vh265.c
++++ b/drivers/frame_provider/decoder/h265/vh265.c
+@@ -0,6 +0,8 @@
+ 	unsigned char start_decoding_flag;
+ 	unsigned char rps_set_id;
+ 	unsigned char eos;
++	/* this run found the input empty with nothing left to fetch */
++	bool input_ended;
+ 	int pic_decoded_lcu_idx;
+ 	u8 over_decode;
+ 	u8 empty_flag;
+@@ -0,8 +0,7 @@
+ 
+ static void restore_decode_state(struct hevc_state_s *hevc)
+ {
+-	struct vdec_s *vdec = hw_to_vdec(hevc);
+-	if (!vdec_has_more_input(vdec)) {
++	if (hevc->input_ended) {
+ 		hevc->pic_decoded_lcu_idx =
+ 			READ_VREG(HEVC_PARSER_LCU_START) & 0xffffff;
+ 		return;
+@@ -0,6 +0,7 @@
+ 					(data_resend_policy & 0x1)) {
+ 					hevc->dec_result = DEC_RESULT_AGAIN;
+ 					amhevc_stop();
++					hevc->input_ended = !vdec_has_more_input(vdec);
+ 					restore_decode_state(hevc);
+ 				} else
+ 					hevc->dec_result = DEC_RESULT_GET_DATA;
+@@ -0,6 +0,7 @@
+ 			} else {
+ 				hevc->dec_result = DEC_RESULT_AGAIN;
+ 				amhevc_stop();
++				hevc->input_ended = !vdec_has_more_input(vdec);
+ 				restore_decode_state(hevc);
+ 			}
+ 
+@@ -0,7 +0,7 @@
+ 			stream base: stream buf empty or timeout
+ 			frame base: vdec_prepare_input fail
+ 		*/
+-		if (!vdec_has_more_input(vdec)) {
++		if (hevc->input_ended) {
+ 			hevc->dec_result = DEC_RESULT_EOS;
+ 			vdec_schedule_work(&hevc->work);
+ 			return;
+@@ -0,6 +0,7 @@
+ 	unsigned char check_sum = 0;
+ 
+ 	run_count[hevc->index]++;
++	hevc->input_ended = false;
+ 	hevc->vdec_cb_arg = arg;
+ 	hevc->vdec_cb = callback;
+ 	hevc->aux_data_dirty = 1;
+@@ -0,6 +0,7 @@
+ 		r = hevc->data_size;
+ 		if ((r < 0) || (hevc->chunk == NULL)) {
+ 			input_empty[hevc->index]++;
++			hevc->input_ended = !vdec_has_more_input(vdec);
+ 			hevc->dec_result = DEC_RESULT_AGAIN;
+ 			hevc_print(hevc, PRINT_FLAG_VDEC_DETAIL,
+ 				"%s: Insufficient data, r %d, hevc->chunk %p\n", __func__, r, hevc->chunk);
+@@ -0,6 +0,7 @@
+ 		r = vdec_prepare_input(vdec, &hevc->chunk);
+ 		if (r < 0) {
+ 			input_empty[hevc->index]++;
++			hevc->input_ended = !vdec_has_more_input(vdec);
+ 			hevc->dec_result = DEC_RESULT_AGAIN;
+ 			hevc_print(hevc, PRINT_FLAG_VDEC_DETAIL,
+ 				"ammvdec_vh265: Insufficient data\n");
