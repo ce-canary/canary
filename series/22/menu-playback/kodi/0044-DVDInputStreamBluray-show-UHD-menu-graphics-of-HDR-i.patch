@@ -71,7 +71,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
 +  }
    auto group = std::make_shared<CDVDOverlayGroup>();
    group->bForced = true;
-   m_player->OnDiscNavResult(static_cast<void*>(&group), BD_EVENT_MENU_OVERLAY);
+   group->SetDiscMenu(true);
 @@ -0,9 +0,47 @@
  #endif
  }
@@ -172,7 +172,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
 +    overlay->m_isHDROverlay = m_hdrVideo;
  
      overlay->palette.clear();
-     // the last row ends after w pixels, the next stride is not part of the source
+     overlay->linesize = ov->w * 4;
 diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
 --- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
 +++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
@@ -212,6 +212,6 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbm
  
    SPlane m_planes[2];
 +  CCriticalSection m_overlayLock;
-   enum EHoldState {
+   enum EHoldState
+   {
      HOLD_NONE = 0,
-     HOLD_HELD,

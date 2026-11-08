@@ -23,8 +23,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
 -      const bool menuJump = TakeMenuJump(joinsInLine());
 +      const bool menuJump = TakeMenuJump(joinsInLine(), result > 0);
  
-       /* Check for holding events */
-       switch(m_event.event) {
+       // Before the holding events, as a read crossing a clip boundary returns data with one
+       if (result > 0)
 @@ -0,13 +0,12 @@
        return;
      }

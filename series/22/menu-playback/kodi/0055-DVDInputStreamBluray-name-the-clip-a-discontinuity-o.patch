@@ -48,7 +48,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
  {
 -  m_nextClipKnown = false;
 +  m_nextClip = nullptr;
-   if(!m_navmode || m_hold == HOLD_EXIT || m_hold == HOLD_ERROR)
+   if (!m_navmode || m_aborted || m_hold == HOLD_ERROR || HasGivenUpReading())
      return NEXTSTREAM_NONE;
  
 @@ -0,16 +0,24 @@
@@ -133,7 +133,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbm
 +    const BLURAY_CLIP_INFO* GetClipAt(uint64_t titlePos) const;
  
      /*!
-      * \brief Read the clip information of a play item of the playlist being played.
+      * \brief Whether so many reads in a row have failed that the disc is taken to have gone.
 @@ -0,7 +0,7 @@
      int64_t m_heldDue{-2};
      int64_t m_reportedTime{-1};

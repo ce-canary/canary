@@ -91,7 +91,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
 +void CDVDInputStreamBluray::PollHeldJoin()
 +{
 +  const BD_EVENT held = m_event;
-+  while (true)
++  while (!m_aborted)
 +  {
 +    if (bd_read_ext(m_bd, nullptr, 0, &m_event) < 0)
 +    {

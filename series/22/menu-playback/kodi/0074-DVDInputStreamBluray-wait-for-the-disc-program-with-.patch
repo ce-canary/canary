@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 7 Nov 2026 11:09:30 -0600
+Subject: [PATCH] DVDInputStreamBluray: wait for the disc program with no
+ playlist
+
+A BD-J title that ran with no playlist made the read return nothing,
+and the player slept and read again with no end. A disc program that
+waited there for a key hung the player before it reported its start,
+so its page never showed and no key reached it. The player also
+reported video and the menu state only once a stream opened.
+---
+ .../DVDInputStreams/DVDInputStreamBluray.cpp      | 10 +++++++++-
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp            | 15 +++++++++++++--
+ 2 files changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,7 +0,15 @@
+     break;
+ 
+   case BD_EVENT_IDLE:
+-    KODI::TIME::Sleep(100ms);
++    // the disc program plays no playlist until its next act, as after a released title end
++    if (m_navmode && m_event.param == 0)
++    {
++      if (!m_titleEndWait)
++        ReleaseTitle();
++      m_titleEndWait = true;
++    }
++    else
++      KODI::TIME::Sleep(100ms);
+     break;
+ 
+   case BD_EVENT_SOUND_EFFECT:
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,7 +0,9 @@
+   // a playlist item transition (e.g. music video to audio-only track) reuses this
+   // running player instance without a CloseFile(), so a stale true from the previous
+   // item must be cleared here if no stream was opened for the current item
+-  if (m_CurrentVideo.id < 0)
++
++  // a Blu-ray disc in menu mode presents video and menus for the whole playback
++  if (m_CurrentVideo.id < 0 && !m_blurayMenu)
+     m_HasVideo = false;
+   if (m_CurrentAudio.id < 0)
+     m_HasAudio = false;
+@@ -0,7 +0,8 @@
+     }
+   }
+ 
+-  if (!OpenDemuxStream())
++  // a disc program may start with no playlist, which the main loop waits for
++  if (!OpenDemuxStream() && !IsBlurayTitleEndWait())
+   {
+     m_bAbortRequest = true;
+     m_error = true;
+@@ -0,6 +0,11 @@
+       // no demuxer opens while the disc program has a released title end to act on
+       if (next == CDVDInputStream::NEXTSTREAM_RETRY && IsBlurayTitleEndWait())
+       {
++        // the playback starts with the disc program, as on a disc player
++        if (!m_State.streamsReady)
++          ReportAVStarted();
++        // the menu state routes the remote's keys to the disc program's page
++        UpdatePlayState(200);
+         CThread::Sleep(10ms);
+         continue;
+       }
+@@ -0,6 +0,9 @@
+ 
+ void CVideoPlayer::ReportAVStarted()
+ {
++  if (m_blurayMenu)
++    m_HasVideo = true;
++
+   // Activate the fullscreen-video skin now that streams are ready, so
+   // video frames will fully paint the swap chain from the first frame
+   // the skin is visible.

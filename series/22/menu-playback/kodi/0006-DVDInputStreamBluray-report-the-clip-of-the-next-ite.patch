@@ -16,12 +16,12 @@ at none until its play item event arrives.
 diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
 --- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
 +++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
-@@ -0,23 +0,59 @@
+@@ -0,15 +0,43 @@
  
  CDVDInputStream::ENextStream CDVDInputStreamBluray::NextStream()
  {
 +  m_nextClipKnown = false;
-   if(!m_navmode || m_hold == HOLD_EXIT || m_hold == HOLD_ERROR)
+   if (!m_navmode || m_aborted || m_hold == HOLD_ERROR || HasGivenUpReading())
      return NEXTSTREAM_NONE;
  
 +  // m_clip names the next item after a play item event, or after a seek within it
@@ -60,7 +60,9 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
 -    ProcessEvent();
 +    processEvent();
  
-   if(m_hold == HOLD_STILL)
+   // The last read error can be queued with the events of a clip boundary
+   if (HasGivenUpReading())
+@@ -0,9 +0,17 @@
      return NEXTSTREAM_RETRY;
  
    m_hold = HOLD_DATA;

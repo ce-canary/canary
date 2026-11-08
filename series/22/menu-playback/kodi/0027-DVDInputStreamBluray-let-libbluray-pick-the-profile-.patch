@@ -8,8 +8,8 @@ Kodi preset player profile 6 for every disc before open. That stops
 libbluray's per-disc 3D setup, so 3D discs see a non-3D player and refuse
 to play.
 ---
- .../DVDInputStreams/DVDInputStreamBluray.cpp  | 69 +++++++++++++++++++
- 1 file changed, 69 insertions(+)
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 66 +++++++++++++++++++
+ 1 file changed, 66 insertions(+)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
 --- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
@@ -35,12 +35,11 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
  #include <cstring>
  #include <iterator>
  #include <limits>
-@@ -0,6 +0,63 @@
- using namespace KODI;
- using namespace std::chrono_literals;
- 
-+namespace
-+{
+@@ -0,6 +0,60 @@
+ /*! libbluray skips an aligned unit (6144 bytes) it cannot read and reports each one. This many in
+     a row, about 6 MB, is a disc that has gone rather than a damaged patch to play past */
+ constexpr unsigned int MAX_CONSECUTIVE_READ_ERRORS{1000};
++
 +#if (BLURAY_VERSION >= BLURAY_VERSION_CODE(1, 1, 0))
 +// HDMI frame packing stacks both views with one frame's vertical blanking between them
 +constexpr int FRAME_PACKED_1080_HEIGHT = 2205;
@@ -94,11 +93,9 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
 +                        prefer3D ? BLURAY_OUTPUT_PREFER_3D : BLURAY_OUTPUT_PREFER_2D);
 +}
 +#endif
-+} // namespace
-+
+ } // namespace
+ 
  static int read_blocks(void* handle, void* buf, int lba, int num_blocks)
- {
-   CDVDInputStreamBluray* blurayStream = reinterpret_cast<CDVDInputStreamBluray*>(handle);
 @@ -0,6 +0,12 @@
      return false;
    }

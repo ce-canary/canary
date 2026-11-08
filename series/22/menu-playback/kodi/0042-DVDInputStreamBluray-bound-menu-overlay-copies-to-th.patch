@@ -4,13 +4,12 @@ Date: Tue, 27 Oct 2026 23:52:49 -0500
 Subject: [PATCH] DVDInputStreamBluray: bound menu overlay copies to their
  source
 
-The BD-J copy took stride * h pixels from a dirty rect whose last row
-ends w pixels in, so a rect on the bottom row of the plane read past it.
 In HDMV a run longer than the space left wrote past the image, and an
-object crossing the plane edge was drawn outside the plane.
+object crossing the plane edge was drawn outside the plane. A rect of
+zero size or off the plane was drawn as given.
 ---
- .../DVDInputStreams/DVDInputStreamBluray.cpp  | 31 ++++++++++++++++---
- 1 file changed, 27 insertions(+), 4 deletions(-)
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 23 ++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
 --- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
@@ -63,18 +62,3 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
      plane.o.push_back(overlay);
    }
  
-@@ -0,9 +0,11 @@
-     SOverlay overlay = std::make_shared<CDVDOverlayImage>();
- 
-     overlay->palette.clear();
--    size_t bytes = static_cast<size_t>(ov->stride * ov->h * 4);
--    overlay->pixels.resize(bytes);
--    memcpy(overlay->pixels.data(), ov->argb, bytes);
-+    // the last row ends after w pixels, the next stride is not part of the source
-+    const size_t stride = ov->stride;
-+    overlay->pixels.assign(stride * ov->h * 4, 0);
-+    if (ov->h > 0)
-+      memcpy(overlay->pixels.data(), ov->argb, ((ov->h - 1) * stride + ov->w) * 4);
- 
-     overlay->linesize = ov->stride * 4;
-     overlay->x = ov->x;

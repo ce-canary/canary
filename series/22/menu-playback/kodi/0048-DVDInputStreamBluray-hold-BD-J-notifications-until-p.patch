@@ -259,7 +259,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbm
 +    bool AbandonsItem(bool menuJump, bool fromStill) const;
  
      /*!
-      * \brief Read the clip information of a play item of the playlist being played.
+      * \brief Whether so many reads in a row have failed that the disc is taken to have gone.
 @@ -0,6 +0,13 @@
      bool m_titleEndWait{false};
      bool m_menuInput{false};

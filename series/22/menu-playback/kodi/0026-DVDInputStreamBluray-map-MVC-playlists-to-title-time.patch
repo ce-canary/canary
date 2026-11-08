@@ -159,8 +159,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
                HoldClipStart(buf, result);
                return 0;
 @@ -0,7 +0,7 @@
-       ProcessEvent();
-     }
+       // take for the end of the title
+     } while (result == 0 && m_readErrors > readErrors);
      // the read starts the new clip, which the demuxer being reset must not consume
 -    if (discontinuity && result > 0 && !m_hasMVCExtension)
 +    if (discontinuity && result > 0)

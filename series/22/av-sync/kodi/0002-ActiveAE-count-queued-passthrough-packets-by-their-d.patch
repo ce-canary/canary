@@ -268,14 +268,14 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp b/xbmc/cor
      }
      frames -= written;
 @@ -0,7 +0,7 @@
-   }
- 
-   if (m_requestedFormat.m_dataFormat == AE_FMT_RAW)
+     // sync error measurements are off by the whole sink delay.
+     if (!m_needIecPack && totalFrames == 0)
+       m_sink->GetDelay(status);
 -    m_stats->UpdateSinkDelay(status, samples->pool ? 1 : 0);
 +    m_stats->UpdateSinkDelay(status, rawPackets, rawPauseMs);
+   }
  
    return status.delay * 1000;
- }
 diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.cpp
 --- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.cpp
 +++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.cpp

@@ -28,8 +28,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
 -        m_menuInput = false;
 +      const bool menuJump = TakeMenuJump(joinsInLine());
  
-       /* Check for holding events */
-       switch(m_event.event) {
+       // Before the holding events, as a read crossing a clip boundary returns data with one
+       if (result > 0)
 @@ -0,9 +0,7 @@
              // a hold without data keeps the time the demuxer being closed already has
              if (result == 0)
@@ -47,7 +47,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
  
 +void CDVDInputStreamBluray::PollEvents()
 +{
-+  if (!m_bd || !m_navmode)
++  if (!m_bd || !m_navmode || m_aborted)
 +    return;
 +
 +  // a move away from the held clip start shows only in the read position until the next stream
@@ -66,7 +66,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
 +  }
 +
 +  // a clip start being handed on is checked by its next read
-+  if (m_hold == HOLD_STILL || m_hold == HOLD_ERROR || m_hold == HOLD_EXIT || !m_clipStart.empty())
++  if (m_hold == HOLD_STILL || m_hold == HOLD_ERROR || !m_clipStart.empty())
 +    return;
 +
 +  while (true)
@@ -117,7 +117,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
 +    }
 +
 +    ProcessEvent();
-+    if (m_hold == HOLD_STILL || m_hold == HOLD_ERROR || m_hold == HOLD_EXIT || m_hold == HOLD_HELD)
++    if (m_hold == HOLD_STILL || m_hold == HOLD_ERROR || m_aborted || m_hold == HOLD_HELD)
 +      return;
 +  }
 +}
@@ -168,7 +168,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbm
 +  bool IsReadHeld() const
 +  {
 +    return m_navmode && (m_hold == HOLD_HELD || m_hold == HOLD_STILL || m_hold == HOLD_ERROR ||
-+                         m_hold == HOLD_EXIT || m_titleEndWait);
++                         m_aborted || m_titleEndWait);
 +  }
 +
    //! the clip the item opened by the last NextStream starts with, when its events named it
@@ -182,4 +182,4 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbm
 +    bool AbandonsItem(bool menuJump) const;
  
      /*!
-      * \brief Read the clip information of a play item of the playlist being played.
+      * \brief Whether so many reads in a row have failed that the disc is taken to have gone.

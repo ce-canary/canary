@@ -4,22 +4,22 @@ Date: Wed, 28 Oct 2026 15:36:11 -0500
 Subject: [PATCH] VideoPlayer: draw Blu-ray menu pages from one store at GUI
  rate
 
-Blu-ray menu pages share the subtitle overlay store, where a subtitle
-open, a subtitle page, a flush or a forced caption ends them. A page
-also reaches the renderer only with the next decoded picture. A
-libbluray that releases each page when its picture is shown then has
-it drawn a picture late, and later still on a still menu.
+A Blu-ray menu page reaches the renderer only with the next decoded
+picture, as a subtitle does. While no picture is presented, before the
+first video or after a flush, no page is drawn. A libbluray that
+releases each page when its picture is shown also has it drawn a
+picture late, and later still on a still menu.
 ---
- .../VideoPlayer/DVDSubtitles/CMakeLists.txt   |  2 +
- .../VideoPlayer/DVDSubtitles/DVDMenuPlane.cpp | 34 ++++++++
- .../VideoPlayer/DVDSubtitles/DVDMenuPlane.h   | 34 ++++++++
- xbmc/cores/VideoPlayer/VideoPlayer.cpp        |  8 +-
- xbmc/cores/VideoPlayer/VideoPlayer.h          |  3 +
- .../VideoRenderers/OverlayRenderer.cpp        | 79 +++++++++++++++++++
- .../VideoRenderers/OverlayRenderer.h          | 10 +++
- .../VideoRenderers/RenderManager.cpp          |  2 +
- .../VideoRenderers/RenderManager.h            |  5 ++
- 9 files changed, 175 insertions(+), 2 deletions(-)
+ .../VideoPlayer/DVDSubtitles/CMakeLists.txt   |   2 +
+ .../VideoPlayer/DVDSubtitles/DVDMenuPlane.cpp |  34 ++++++
+ .../VideoPlayer/DVDSubtitles/DVDMenuPlane.h   |  34 ++++++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        |   8 +-
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |   3 +
+ .../VideoRenderers/OverlayRenderer.cpp        | 105 ++++++++++++++++++
+ .../VideoRenderers/OverlayRenderer.h          |  15 +++
+ .../VideoRenderers/RenderManager.cpp          |  13 +++
+ .../VideoRenderers/RenderManager.h            |   5 +
+ 9 files changed, 217 insertions(+), 2 deletions(-)
  create mode 100644 xbmc/cores/VideoPlayer/DVDSubtitles/DVDMenuPlane.cpp
  create mode 100644 xbmc/cores/VideoPlayer/DVDSubtitles/DVDMenuPlane.h
 
@@ -222,6 +222,14 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp b/xbmc/co
      {
        it = m_textureCache.erase(it);
 @@ -0,6 +0,7 @@
+ {
+   std::unique_lock lock(m_section);
+ 
++  SetMenuAlone(false);
+   CheckCompositeState();
+ 
+   // during HDR composite the m_isHDROverlay overlays render via
+@@ -0,6 +0,7 @@
          Render(o.get());
      }
    }
@@ -229,7 +237,15 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp b/xbmc/co
  
    ReleaseUnused();
  }
-@@ -0,12 +0,74 @@
+@@ -0,6 +0,7 @@
+ 
+   std::unique_lock lock(m_section);
+ 
++  SetMenuAlone(false);
+   CheckCompositeState();
+ 
+   const RenderStereoView stereoView =
+@@ -0,12 +0,98 @@
        Render(o.get());
      }
    }
@@ -275,6 +291,30 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp b/xbmc/co
 +  }
 +  if (shown || !m_menu.empty())
 +    MarkDirty();
++}
++
++void CRenderer::RenderMenuPlane(const CRect& view)
++{
++  std::unique_lock lock(m_section);
++  if (m_menu.empty())
++    return;
++
++  CRect rect{view};
++  SetVideoRect(rect, rect, rect);
++  SetMenuAlone(true);
++  CheckCompositeState();
++  RenderMenu(false);
++  ReleaseUnused();
++}
++
++// cached textures keep the placement of the rects they were built for
++void CRenderer::SetMenuAlone(bool alone)
++{
++  if (m_menuAlone == alone)
++    return;
++
++  m_menuAlone = alone;
++  ReleaseCache();
 +}
 +
 +// the HDR pass draws the HDR pages of an HDR composite, the GUI pass all others
@@ -325,7 +365,7 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h b/xbmc/core
  class CDVDOverlay;
  class CDVDOverlayLibass;
  class CDVDOverlayImage;
-@@ -0,6 +0,11 @@
+@@ -0,6 +0,14 @@
       */
      void PrepareOverlays(int idx);
  
@@ -334,29 +374,47 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h b/xbmc/core
 +    //! \brief Take a new Blu-ray menu page from the menu plane, on the GUI thread
 +    void PrepareMenu();
 +
++    //! \brief Draw the Blu-ray menu page alone over \p view, while no picture is presented
++    void RenderMenuPlane(const CRect& view);
++
      /*!
       * \brief Release resources
       */
-@@ -0,6 +0,7 @@
+@@ -0,6 +0,8 @@
      };
  
      void Render(COverlay* o);
 +    void RenderMenu(bool hdrOverlays);
++    void SetMenuAlone(bool alone);
      std::shared_ptr<COverlay> Convert(SElement& e);
      // Build a COverlay (cached or freshly created) from the libass output
      // already produced by PrepareOverlays. Does not call ass_render_frame.
-@@ -0,5 +0,8 @@
+@@ -0,5 +0,9 @@
      // to detect arrival/disappearance transitions (image/SPU have no
      // per-frame change signal of their own, unlike libass detect_change).
      int m_prevImageSpuCount{0};
 +    std::shared_ptr<CDVDMenuPlane> m_menuPlane;
 +    std::vector<SElement> m_menu;
 +    uint64_t m_menuSequence{0};
++    bool m_menuAlone{false};
    };
  }
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,7 +0,12 @@
+     std::unique_lock lock(m_statelock);
+ 
+     if (m_renderState == STATE_UNCONFIGURED)
++    {
++      lock.unlock();
++      // a Blu-ray menu page shows before the first video configures the renderer
++      m_overlays.PrepareMenu();
+       return;
++    }
+     else if (m_renderState == STATE_CONFIGURING)
+     {
+       lock.unlock();
 @@ -0,6 +0,8 @@
      m_bRenderGUI = true;
    }
@@ -366,6 +424,21 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/core
    m_playerPort->UpdateGuiRender(IsGuiLayer() || !m_pRenderer->VideoBypassesFramebuffer() ||
                                  firstFrame);
  
+@@ -0,8 +0,14 @@
+ 
+   {
+     std::unique_lock lock(m_statelock);
++    // with no picture to present a Blu-ray menu page shows alone
+     if (GuiSource() == -1 || (m_renderState != STATE_CONFIGURED))
++    {
++      lock.unlock();
++      if (gui)
++        m_overlays.RenderMenuPlane(CServiceBroker::GetWinSystem()->GetGfxContext().GetViewWindow());
+       return;
++    }
+   }
+ 
+   if (!gui && m_pRenderer->IsGuiLayer())
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h

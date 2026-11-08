@@ -25,7 +25,7 @@ diff --git a/xbmc/application/Application.cpp b/xbmc/application/Application.cpp
 +  surface->TakePixels(request->spec, result);
    result.content = CaptureContent::COMPOSITE; // this tap is the composite half
  
-   captureService->Complete(request, result);
+   if (!player.CompositeVideoCapture(result))
 diff --git a/xbmc/utils/IScreenshotSurface.h b/xbmc/utils/IScreenshotSurface.h
 --- a/xbmc/utils/IScreenshotSurface.h
 +++ b/xbmc/utils/IScreenshotSurface.h

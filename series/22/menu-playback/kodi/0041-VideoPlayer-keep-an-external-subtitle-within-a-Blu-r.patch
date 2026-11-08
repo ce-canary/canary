@@ -42,8 +42,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
      /* when a title ends, playlist WILL eventually change */
 +    m_playlistLeft = true;
      if (m_navmode)
-     {
-       // the player still plays the title out of its queues until the next stream
+       ReleaseTitle();
+     break;
 @@ -0,6 +0,7 @@
  
      m_menu = false;

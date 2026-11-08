@@ -44,8 +44,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
          break;
      }
 @@ -0,6 +0,27 @@
-   while(bd_get_event(m_bd, &m_event))
-     processEvent();
+   if (HasGivenUpReading())
+     return NEXTSTREAM_NONE;
  
 +  // an HDMV program runs only in a read and stops at its first queued event; run it to its next
 +  // suspension so the play item of the playlist it starts is known before the old stream closes;
@@ -63,7 +63,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
 +      if (m_event.event == BD_EVENT_NONE)
 +        break;
 +      processEvent();
-+      if (m_hold == HOLD_ERROR)
++      if (m_hold == HOLD_ERROR || m_aborted)
 +        return NEXTSTREAM_NONE;
 +    }
 +  }

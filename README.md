@@ -10,12 +10,13 @@ These builds are for testing and early feature previews. Despite extensive testi
 
 **Status: active.**
 
-- CoreELEC 22: latest build `22.0-Piers_canary_20261106`, based on the nightly of `20261106`.
+- CoreELEC 22: latest build `22.0-Piers_canary_20261107`, based on the nightly of `20261108`.
 
 - **Blu-ray menu playback:** full disc menus with more seamless clip transitions.
 - **A/V sync:** vastly tighter audio and video sync with stability across playback events.
 - **Screen capture:** screenshots and Hyperion ambilight for all HDR formats and output modes.
 - **Dolby Vision FEL playback:** FEL titles play through to the end, and Blu-ray menus no longer turn black on FEL clips.
+- **Dolby Vision output:** Dolby Vision no longer turns purple when playback starts from a refresh rate the TV can't show in Dolby Vision.
 
 When everything here has landed in CoreELEC, this section will say there is no active canary. Use the normal nightly until the next testflight starts.
 
@@ -30,9 +31,9 @@ That's the only manual step. New canary builds then show up in the CoreELEC sett
 
 Canary builds run on the same devices as the matching CoreELEC nightly. Make a backup first.
 
-## Blu-ray menus
+## Blu-ray menu playback
 
-Java (BD-J) menus need CoreELEC's normal "JRE for BD-J menus" add-on, as on any CE build.
+Play a disc with its full menus, HDMV and Java (BD-J) alike, with more seamless clip transitions. Java menus need CoreELEC's normal "JRE for BD-J menus" add-on, as on any CE build.
 
 ### Top menu button
 
@@ -57,7 +58,7 @@ To use another button, save this as `/storage/.kodi/userdata/keymaps/topmenu.xml
 
 ## A/V sync
 
-Nothing to set up. Sync is now zeroed and doesn't shift around during playback. Your TV, AVR and speakers still add their own delay, so you may want to calibrate for your home theater with [Audio Offset Manager: Evolved](https://github.com/matthane/script.audiooffsetmanager.evolved), available in the official Kodi repo or from GitHub.
+Sync is now zeroed and doesn't shift around during playback. Nothing to set up. Your TV, AVR and speakers still add their own delay, so you may want to calibrate for your home theater with [Audio Offset Manager: Evolved](https://github.com/matthane/script.audiooffsetmanager.evolved), available in the official Kodi repo or from GitHub.
 
 ## Screen capture
 
@@ -87,6 +88,14 @@ Hyperion gets its picture from Kodi, so it needs no grabber of its own.
 
 Your LED layout and other settings work as before.
 
+## Dolby Vision FEL playback
+
+Dolby Vision FEL titles play through to the end, and Blu-ray menus no longer turn black when a menu plays an FEL clip. Nothing to set up.
+
+## Dolby Vision output
+
+Dolby Vision no longer turns purple when playback starts from a refresh rate the TV can't show in Dolby Vision, for example right after a 120 Hz SDR clip or menu. The output now picks the right Dolby Vision colour format for the mode it switches to. Nothing to set up.
+
 ## Going back to a nightly
 
 Copy a nightly `.tar` to `/storage/.update` and reboot. Your normal add-ons and settings stay as they were.
@@ -101,10 +110,11 @@ Follow CoreELEC's [guide to reporting an issue](https://discourse.coreelec.org/t
 
 | Feature | Kodi | common_drivers | media_modules-aml | CoreELEC | History |
 |---|---|---|---|---|---|
-| Blu-ray menu playback | [72 commits](https://github.com/ce-canary/xbmc/compare/base/22...topic/22/menu-playback) | [5 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/av-sync...topic/22/menu-playback) | none | [17 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/screen-capture...topic/22/menu-playback) | [history](https://github.com/ce-canary/canary/commits/main/series/22/menu-playback) |
-| A/V sync | [45 commits](https://github.com/ce-canary/xbmc/compare/topic/22/menu-playback...topic/22/av-sync) | [3 commits](https://github.com/ce-canary/common_drivers/compare/base/22...topic/22/av-sync) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/av-sync) |
+| Blu-ray menu playback | [74 commits](https://github.com/ce-canary/xbmc/compare/base/22...topic/22/menu-playback) | [5 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/av-sync...topic/22/menu-playback) | none | [17 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/screen-capture...topic/22/menu-playback) | [history](https://github.com/ce-canary/canary/commits/main/series/22/menu-playback) |
+| A/V sync | [45 commits](https://github.com/ce-canary/xbmc/compare/topic/22/menu-playback...topic/22/av-sync) | [3 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/dv-output...topic/22/av-sync) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/av-sync) |
 | Screen capture | [21 commits](https://github.com/ce-canary/xbmc/compare/topic/22/av-sync...topic/22/screen-capture) | [23 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/menu-playback...topic/22/screen-capture) | none | [6 commits](https://github.com/ce-canary/CoreELEC/compare/base/22...topic/22/screen-capture) | [history](https://github.com/ce-canary/canary/commits/main/series/22/screen-capture) |
 | Dolby Vision FEL playback | [6 commits](https://github.com/ce-canary/xbmc/compare/topic/22/screen-capture...topic/22/fel-playback) | none | [8 commits](https://github.com/ce-canary/media_modules-aml/compare/base/22...topic/22/fel-playback) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/fel-playback) |
+| Dolby Vision output | none | [2 commits](https://github.com/ce-canary/common_drivers/compare/base/22...topic/22/dv-output) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/dv-output) |
 | Canary-only changes | none | none | none | [3 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/menu-playback...topic/22/canary-only) | [history](https://github.com/ce-canary/canary/commits/main/series/22/canary-only) |
 
 Each link shows that feature's commits and combined diff for the current build. History shows how a feature changed between builds.

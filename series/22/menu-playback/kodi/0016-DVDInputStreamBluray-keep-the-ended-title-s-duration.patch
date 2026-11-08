@@ -8,16 +8,16 @@ read reaches the end of the title. The player still has the end of the
 title queued and plays it with no duration, so pause is refused. A
 seek in that queue would act on the next title.
 ---
- .../DVDInputStreams/DVDInputStreamBluray.cpp  | 10 +++++++-
- .../DVDInputStreams/DVDInputStreamBluray.h    |  2 ++
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 15 ++++++++++--
+ .../DVDInputStreams/DVDInputStreamBluray.h    |  3 +++
  xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 23 +++++++++++++++++++
  xbmc/cores/VideoPlayer/VideoPlayer.h          |  3 +++
- 4 files changed, 37 insertions(+), 1 deletion(-)
+ 4 files changed, 42 insertions(+), 2 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
 --- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
 +++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
-@@ -0,6 +0,7 @@
+@@ -0,9 +0,18 @@
  
    m_titleInfo = nullptr;
    m_clip = nullptr;
@@ -25,16 +25,23 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
    FreeClipInfo();
  }
  
-@@ -0,7 +0,12 @@
++// the player still plays the title out of its queues until the next stream
++void CDVDInputStreamBluray::ReleaseTitle()
++{
++  const int totalTime = GetTotalTime();
++  FreeTitleInfo();
++  m_endedTitleTime = totalTime;
++}
++
+ void CDVDInputStreamBluray::FreeClipInfo()
+ {
+   if (m_clipInfo)
+@@ -0,7 +0,7 @@
      CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - BD_EVENT_END_OF_TITLE {}", m_event.param);
      /* when a title ends, playlist WILL eventually change */
      if (m_navmode)
-+    {
-+      // the player still plays the title out of its queues until the next stream
-+      const int totalTime = GetTotalTime();
-       FreeTitleInfo();
-+      m_endedTitleTime = totalTime;
-+    }
+-      FreeTitleInfo();
++      ReleaseTitle();
      break;
  
    case BD_EVENT_TITLE:
@@ -48,7 +55,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
  
  int CDVDInputStreamBluray::GetTime()
 @@ -0,6 +0,8 @@
-   if(!m_navmode || m_hold == HOLD_EXIT || m_hold == HOLD_ERROR)
+   if (!m_navmode || m_aborted || m_hold == HOLD_ERROR || HasGivenUpReading())
      return NEXTSTREAM_NONE;
  
 +  m_endedTitleTime = 0;
@@ -67,6 +74,14 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbm
  
    //! the clip the item opened by the last NextStream starts with, when its events named it
    const BLURAY_CLIP_INFO* GetNextItemClip() const;
+@@ -0,6 +0,7 @@
+     bool OpenStream(CFileItem &item);
+     void SetupPlayerSettings();
+     void FreeTitleInfo();
++    void ReleaseTitle();
+     void FreeClipInfo();
+     int ReadData(uint8_t* buf, int buf_size);
+     void HoldClipStart(const uint8_t* buf, int size);
 @@ -0,6 +0,7 @@
      uint64_t m_readPos{0};
      std::vector<ClipSpan> m_clipSpans;

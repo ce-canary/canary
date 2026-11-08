@@ -46,9 +46,9 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/x
 +      if (menuJump)
 +        m_menuInput = false;
 +
-       /* Check for holding events */
-       switch(m_event.event) {
-         case BD_EVENT_PLAYITEM:
+       // Before the holding events, as a read crossing a clip boundary returns data with one
+       if (result > 0)
+         m_readErrors = 0;
 @@ -0,6 +0,10 @@
              // a hold without data keeps the time the demuxer being closed already has
              if (result == 0)

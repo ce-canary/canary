@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 7 Nov 2026 11:04:43 -0600
+Subject: [PATCH] VideoPlayer: move the AV start report into a helper
+
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 35 ++++++++++++++------------
+ xbmc/cores/VideoPlayer/VideoPlayer.h   |  1 +
+ 2 files changed, 20 insertions(+), 16 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,24 @@
+   return true;
+ }
+ 
++void CVideoPlayer::ReportAVStarted()
++{
++  // Activate the fullscreen-video skin now that streams are ready, so
++  // video frames will fully paint the swap chain from the first frame
++  // the skin is visible.
++  if (m_playerOptions.fullscreen)
++  {
++    CServiceBroker::GetAppMessenger()->PostMsg(TMSG_SWITCHTOFULLSCREEN);
++  }
++
++  IPlayerCallback *cb = &m_callback;
++  CFileItem fileItem = m_item;
++  m_outboundEvents->Submit([=]() {
++    cb->OnAVStarted(fileItem);
++  });
++  m_State.streamsReady = true;
++}
++
+ void CVideoPlayer::HandlePlaySpeed()
+ {
+   const bool isInMenu = IsInMenuInternal();
+@@ -0,22 +0,7 @@
+       m_syncTimer.Set(3000ms);
+ 
+       if (!m_State.streamsReady)
+-      {
+-        // Activate the fullscreen-video skin now that streams are ready, so
+-        // video frames will fully paint the swap chain from the first frame
+-        // the skin is visible.
+-        if (m_playerOptions.fullscreen)
+-        {
+-          CServiceBroker::GetAppMessenger()->PostMsg(TMSG_SWITCHTOFULLSCREEN);
+-        }
+-
+-        IPlayerCallback *cb = &m_callback;
+-        CFileItem fileItem = m_item;
+-        m_outboundEvents->Submit([=]() {
+-          cb->OnAVStarted(fileItem);
+-        });
+-        m_State.streamsReady = true;
+-      }
++        ReportAVStarted();
+     }
+     else
+     {
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+ 
+   void HandleMessages();
+   void HandlePlaySpeed();
++  void ReportAVStarted();
+   bool IsInMenuInternal() const;
+   void SynchronizeDemuxer();
+   bool IsNearStreamEnd(std::chrono::milliseconds time) const;
