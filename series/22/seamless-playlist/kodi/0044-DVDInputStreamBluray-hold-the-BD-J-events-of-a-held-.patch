@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 23:26:06 -0600
+Subject: [PATCH] DVDInputStreamBluray: hold the BD-J events of a held join
+
+While a BD-J join is held, the events the disc program queues stay in
+libbluray until the next stream. A stop that starts no new playlist
+leaves the read position alone, so it was seen only after the old item
+had played out.
+---
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 76 +++++++++++++------
+ .../DVDInputStreams/DVDInputStreamBluray.h    |  2 +
+ 2 files changed, 55 insertions(+), 23 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,8 +0,13 @@
+   // a move away from the held clip start shows only in the read position until the next stream
+   if (m_hold == HOLD_HELD)
+   {
+-    if (IsJoinHeld() && m_title && !m_title->bdj)
+-      PollHeldJoin();
++    if (IsJoinHeld() && m_title)
++    {
++      if (m_title->bdj)
++        HoldProgramEvents();
++      else
++        PollHeldJoin();
++    }
+     if (!m_clipStart.empty() && bd_tell(m_bd) != m_clipStartEnd)
+     {
+       m_clipStart.clear();
+@@ -0,30 +0,11 @@
+       break;
+     }
+     CheckPresentedLeft();
++    if (ProcessPlayingItemEvent())
++      continue;
+ 
+     switch (m_event.event)
+     {
+-      case BD_EVENT_AUDIO_STREAM:
+-      case BD_EVENT_PG_TEXTST:
+-      case BD_EVENT_PG_TEXTST_STREAM:
+-      case BD_EVENT_IG_STREAM:
+-      case BD_EVENT_SECONDARY_AUDIO:
+-      case BD_EVENT_SECONDARY_AUDIO_STREAM:
+-      case BD_EVENT_SECONDARY_VIDEO:
+-      case BD_EVENT_SECONDARY_VIDEO_SIZE:
+-      case BD_EVENT_SECONDARY_VIDEO_STREAM:
+-      case BD_EVENT_MENU:
+-      case BD_EVENT_POPUP:
+-      case BD_EVENT_UO_MASK_CHANGED:
+-      case BD_EVENT_SOUND_EFFECT:
+-      case BD_EVENT_KEY_INTEREST_TABLE:
+-        if (m_heldEvents.empty())
+-        {
+-          ProcessEvent();
+-          continue;
+-        }
+-        break;
+-
+       case BD_EVENT_SEEK:
+       case BD_EVENT_TITLE:
+       case BD_EVENT_PLAYLIST:
+@@ -0,6 +0,50 @@
+   m_event = held;
+ }
+ 
++// a BD-J program acts on its own thread while a join is held; its events stay behind the held
++// event, and a stop or jump leaves the held item
++void CDVDInputStreamBluray::HoldProgramEvents()
++{
++  const BD_EVENT held = m_event;
++  while (bd_get_event(m_bd, &m_event))
++  {
++    CheckPresentedLeft();
++    if (!ProcessPlayingItemEvent())
++      m_heldEvents.push(m_event);
++  }
++  m_event = held;
++}
++
++// a stream or menu change applies to the playing item at once, unless an event before it waits
++bool CDVDInputStreamBluray::ProcessPlayingItemEvent()
++{
++  if (!m_heldEvents.empty())
++    return false;
++
++  switch (m_event.event)
++  {
++    case BD_EVENT_AUDIO_STREAM:
++    case BD_EVENT_PG_TEXTST:
++    case BD_EVENT_PG_TEXTST_STREAM:
++    case BD_EVENT_IG_STREAM:
++    case BD_EVENT_SECONDARY_AUDIO:
++    case BD_EVENT_SECONDARY_AUDIO_STREAM:
++    case BD_EVENT_SECONDARY_VIDEO:
++    case BD_EVENT_SECONDARY_VIDEO_SIZE:
++    case BD_EVENT_SECONDARY_VIDEO_STREAM:
++    case BD_EVENT_MENU:
++    case BD_EVENT_POPUP:
++    case BD_EVENT_UO_MASK_CHANGED:
++    case BD_EVENT_SOUND_EFFECT:
++    case BD_EVENT_KEY_INTEREST_TABLE:
++      ProcessEvent();
++      return true;
++
++    default:
++      return false;
++  }
++}
++
+ bool CDVDInputStreamBluray::TakeHeldEvent()
+ {
+   if (m_heldEvents.empty())
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,8 @@
+     void HoldClipStart(const uint8_t* buf, int size);
+     void DropClipStartOnJump();
+     void PollHeldJoin();
++    void HoldProgramEvents();
++    bool ProcessPlayingItemEvent();
+     bool TakeHeldEvent();
+     bool ProcessHeldEvents();
+     bool TakeMenuJump(bool joinsInLine, bool dataRead);

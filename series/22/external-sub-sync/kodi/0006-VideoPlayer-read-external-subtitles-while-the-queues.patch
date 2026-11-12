@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 11 Nov 2026 12:40:24 -0600
+Subject: [PATCH] VideoPlayer: read external subtitles while the queues are
+ full
+
+External PGS and VobSub files are only read when the audio and video
+queues have room. With the queues full most of the time, dense
+sections are fed slower than they are shown and fall seconds behind.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 24 ++++++++++++++++++++++++
+ xbmc/cores/VideoPlayer/VideoPlayer.h   |  1 +
+ 2 files changed, 25 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,28 @@
+   return true;
+ }
+ 
++void CVideoPlayer::ProcessSubtitleDemuxer()
++{
++  // a display set is several packets, so this covers a few sets per call
++  constexpr int MAX_PACKETS = 16;
++
++  for (int i = 0; i < MAX_PACKETS && m_pSubtitleDemuxer && !m_bAbortRequest &&
++                  m_VideoPlayerSubtitle->AcceptsData();
++       ++i)
++  {
++    DemuxPacket* packet = nullptr;
++    CDemuxStream* stream = nullptr;
++    ReadSubtitlePacket(packet, stream);
++    if (!packet)
++      break;
++
++    if (stream)
++      ProcessPacket(stream, packet);
++    else
++      CDVDDemuxUtils::FreeDemuxPacket(packet);
++  }
++}
++
+ bool CVideoPlayer::ReadPacket(DemuxPacket*& packet, CDemuxStream*& stream)
+ {
+ 
+@@ -0,6 +0,8 @@
+           m_pDemuxer->SetSpeed(DVD_PLAYSPEED_PAUSE);
+         m_demuxerSpeed = DVD_PLAYSPEED_PAUSE;
+       }
++      // subtitle files are not limited by the a/v queues
++      ProcessSubtitleDemuxer();
+       CThread::Sleep(10ms);
+       continue;
+     }
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+   void SendPlayerMessage(std::shared_ptr<CDVDMsg> pMsg, unsigned int target);
+ 
+   bool ReadSubtitlePacket(DemuxPacket*& packet, CDemuxStream*& stream);
++  void ProcessSubtitleDemuxer();
+   bool ReadPacket(DemuxPacket*& packet, CDemuxStream*& stream);
+   void HandleDynamicBufferLevel();
+   bool IsValidStream(const CCurrentStream& stream);

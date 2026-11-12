@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 16:30:44 -0600
+Subject: [PATCH] VideoDatabase: date a played stream when first played, not by
+ stat
+
+A stream added outside a library scan, as by the watched-state save of
+a played stream, got its date added from a stat of the file. For http
+that is a HEAD request, and a stream has no file date worth one. A
+plugin item already takes the time it was first played.
+---
+ xbmc/video/VideoDatabase.cpp | 23 ++++++++++++++++++-----
+ 1 file changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/xbmc/video/VideoDatabase.cpp b/xbmc/video/VideoDatabase.cpp
+--- a/xbmc/video/VideoDatabase.cpp
++++ b/xbmc/video/VideoDatabase.cpp
+@@ -0,11 +0,14 @@
+                             int playCount /* = 0 */,
+                             const CDateTime& lastPlayed /* = CDateTime() */)
+ {
++  // a stream first seen outside a scan is added when played, as a plugin item is
++  const bool addedNow{!dateAdded.IsValid() && URIUtils::IsInternetStream(strFileNameAndPath)};
++
+   return AddOrUpdateFile(strFileNameAndPath, parentPath,
+                          FileRecord{
+                              .m_playCount = playCount,
+                              .m_lastPlayed = lastPlayed,
+-                             .m_dateAdded = dateAdded,
++                             .m_dateAdded = addedNow ? CDateTime::GetCurrentDateTime() : dateAdded,
+                          },
+                          FileExistsAction::ACTION_NONE);
+ }
+@@ -0,8 +0,13 @@
+ 
+ int CVideoDatabase::AddFile(const CVideoInfoTag& details, const std::string& parentPath /* = "" */)
+ {
+-  return AddFile(details.GetPath(), parentPath, details.m_dateAdded, details.GetPlayCount(),
+-                 details.m_lastPlayed);
++  return AddOrUpdateFile(details.GetPath(), parentPath,
++                         FileRecord{
++                             .m_playCount = details.GetPlayCount(),
++                             .m_lastPlayed = details.m_lastPlayed,
++                             .m_dateAdded = details.m_dateAdded,
++                         },
++                         FileExistsAction::ACTION_NONE);
+ }
+ 
+ void CVideoDatabase::UpdateFileDateAdded(CVideoInfoTag& details)
+@@ -0,8 +0,13 @@
+   {
+     // DynPath may contain a disc (eg. bluray://) path
+     CVideoInfoTag* tag{item.GetVideoInfoTag()};
+-    idFile =
+-        AddFile(item.GetDynPath(), "", tag->m_dateAdded, tag->GetPlayCount(), tag->m_lastPlayed);
++    idFile = AddOrUpdateFile(item.GetDynPath(), "",
++                             FileRecord{
++                                 .m_playCount = tag->GetPlayCount(),
++                                 .m_lastPlayed = tag->m_lastPlayed,
++                                 .m_dateAdded = tag->m_dateAdded,
++                             },
++                             FileExistsAction::ACTION_NONE);
+     tag->m_iFileId = idFile;
+   }
+   else

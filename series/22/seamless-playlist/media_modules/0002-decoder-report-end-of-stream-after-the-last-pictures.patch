@@ -1,0 +1,168 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 10:21:47 -0600
+Subject: [PATCH] decoder: report end of stream after the last pictures are
+ flushed
+
+The last pictures of an item are dropped when the drain reads end of
+stream before the flush. These decoders set STAT_EOS before they stop
+the core and flush their pictures, so userspace can end its drain while
+the flushed pictures are still on their way out.
+---
+ drivers/frame_provider/decoder/avs2/vavs2.c           | 3 ++-
+ drivers/frame_provider/decoder/avs3/vavs3.c           | 3 ++-
+ drivers/frame_provider/decoder/h264_multi/vmh264.c    | 3 ++-
+ drivers/frame_provider/decoder/h266/vh266.c           | 3 ++-
+ drivers/frame_provider/decoder/mpeg12/vmpeg12_multi.c | 3 ++-
+ drivers/frame_provider/decoder/mpeg4/vmpeg4_multi.c   | 3 ++-
+ drivers/frame_provider/decoder/vav1/vav1.c            | 3 ++-
+ drivers/frame_provider/decoder/vp9/vvp9.c             | 3 ++-
+ 8 files changed, 16 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/frame_provider/decoder/avs2/vavs2.c b/drivers/frame_provider/decoder/avs2/vavs2.c
+--- a/drivers/frame_provider/decoder/avs2/vavs2.c
++++ b/drivers/frame_provider/decoder/avs2/vavs2.c
+@@ -0,13 +0,14 @@
+ 				"%s: set input underrun status to true\n", __func__);
+ 		}
+ 	} else if (dec->dec_result == DEC_RESULT_EOS) {
+-		dec->stat |= STAT_EOS;
+ 		avs2_print(dec, 0, "%s: end of stream\n", __func__);
+ 		dec->eos = 1;
+ 		if ( dec->avs2_dec.hc.cur_pic != NULL) {
+ 			avs2_post_process(&dec->avs2_dec);
+ 			avs2_prepare_display_buf(dec);
+ 		}
++		/* userspace ends its drain on this, so only after the flush */
++		dec->stat |= STAT_EOS;
+ 		vdec_vframe_dirty(hw_to_vdec(dec), dec->chunk);
+ 		vdec_code_rate(vdec, READ_VREG(HEVC_SHIFT_BYTE_COUNT) - dec->start_shift_bytes);
+ 	} else if (dec->dec_result == DEC_RESULT_FORCE_EXIT) {
+diff --git a/drivers/frame_provider/decoder/avs3/vavs3.c b/drivers/frame_provider/decoder/avs3/vavs3.c
+--- a/drivers/frame_provider/decoder/avs3/vavs3.c
++++ b/drivers/frame_provider/decoder/avs3/vavs3.c
+@@ -0,7 +0,6 @@
+ 		avs3_print(dec, 0,
+ 			"%s: end of stream\n",
+ 			__func__);
+-		dec->stat |= STAT_EOS;
+ 		dec->eos = 1;
+ 		if (dec->avs3_dec.cur_pic != NULL) {
+ 			avs3_bufmgr_post_process(&dec->avs3_dec);
+@@ -0,6 +0,8 @@
+ 		avs3_ctx->info.pic_header.decode_order_index =
+ 			avs3_ctx->info.pic_header.decode_order_index + DOI_CYCLE_LENGTH;
+ 		avs3_prepare_display_buf(dec);
++		/* userspace ends its drain on this, so only after the flush */
++		dec->stat |= STAT_EOS;
+ 		vdec_vframe_dirty(hw_to_vdec(dec), dec->chunk);
+ 		vdec_code_rate(vdec, READ_VREG(HEVC_SHIFT_BYTE_COUNT) - dec->start_shift_bytes);
+ 	} else if (dec->dec_result == DEC_RESULT_FORCE_EXIT) {
+diff --git a/drivers/frame_provider/decoder/h264_multi/vmh264.c b/drivers/frame_provider/decoder/h264_multi/vmh264.c
+--- a/drivers/frame_provider/decoder/h264_multi/vmh264.c
++++ b/drivers/frame_provider/decoder/h264_multi/vmh264.c
+@@ -0,7 +0,6 @@
+ 		hw->next_again_flag = 1;
+ 	} else if (hw->dec_result == DEC_RESULT_EOS) {
+ 		struct h264_dpb_stru *p_H264_Dpb = &hw->dpb;
+-		hw->stat |= STAT_EOS;
+ 		dpb_print(DECODE_ID(hw), PRINT_FLAG_VDEC_STATUS,
+ 			"%s: end of stream\n",
+ 			__func__);
+@@ -0,6 +0,8 @@
+ 			amhevc_stop();
+ 		hw->eos = 1;
+ 		flush_dpb(p_H264_Dpb);
++		/* userspace ends its drain on this, so only after the flush */
++		hw->stat |= STAT_EOS;
+ 		notify_v4l_eos(hw_to_vdec(hw));
+ 		mutex_lock(&hw->chunks_mutex);
+ 		vdec_vframe_dirty(hw_to_vdec(hw), hw->chunk);
+diff --git a/drivers/frame_provider/decoder/h266/vh266.c b/drivers/frame_provider/decoder/h266/vh266.c
+--- a/drivers/frame_provider/decoder/h266/vh266.c
++++ b/drivers/frame_provider/decoder/h266/vh266.c
+@@ -0,11 +0,12 @@
+ 			}
+ 		}
+ 	} else if (hevc->dec_result == DEC_RESULT_EOS) {
+-		hevc->stat |= STAT_EOS;
+ 		hevc->eos = 1;
+ 		check_pic_decoded_error(hevc,
+ 			hevc->pic_decoded_lcu_idx);
+ 		flush_output(hevc);
++		/* userspace ends its drain on this, so only after the flush */
++		hevc->stat |= STAT_EOS;
+ 		/* dummy vf with eos flag to backend */
+ 		notify_v4l_eos(hw_to_vdec(hevc));
+ 		mutex_lock(&hevc->chunks_mutex);
+diff --git a/drivers/frame_provider/decoder/mpeg12/vmpeg12_multi.c b/drivers/frame_provider/decoder/mpeg12/vmpeg12_multi.c
+--- a/drivers/frame_provider/decoder/mpeg12/vmpeg12_multi.c
++++ b/drivers/frame_provider/decoder/mpeg12/vmpeg12_multi.c
+@@ -0,7 +0,6 @@
+ 			hw->stat &= ~STAT_ISR_REG;
+ 		}
+ 	} else if (hw->dec_result == DEC_RESULT_EOS) {
+-		hw->stat |= STAT_EOS;
+ 		if (hw->stat & STAT_VDEC_RUN) {
+ 			amvdec_stop();
+ 			hw->stat &= ~STAT_VDEC_RUN;
+@@ -0,6 +0,8 @@
+ 		hw->chunk = NULL;
+ 		vdec_clean_input(vdec);
+ 		flush_output(hw);
++		/* userspace ends its drain on this, so only after the flush */
++		hw->stat |= STAT_EOS;
+ 		notify_v4l_eos(vdec);
+ 
+ 		debug_print(DECODE_ID(hw), 0,
+diff --git a/drivers/frame_provider/decoder/mpeg4/vmpeg4_multi.c b/drivers/frame_provider/decoder/mpeg4/vmpeg4_multi.c
+--- a/drivers/frame_provider/decoder/mpeg4/vmpeg4_multi.c
++++ b/drivers/frame_provider/decoder/mpeg4/vmpeg4_multi.c
+@@ -0,7 +0,6 @@
+ 			hw->stat &= ~STAT_ISR_REG;
+ 		}
+ 	} else if (hw->dec_result == DEC_RESULT_EOS) {
+-		hw->stat |= STAT_EOS;
+ 		hw->eos = 1;
+ 		if (hw->stat & STAT_VDEC_RUN) {
+ 			amvdec_stop();
+@@ -0,6 +0,8 @@
+ 		hw->chunk = NULL;
+ 		vdec_clean_input(vdec);
+ 		flush_output(hw);
++		/* userspace ends its drain on this, so only after the flush */
++		hw->stat |= STAT_EOS;
+ 
+ 		notify_v4l_eos(vdec);
+ 
+diff --git a/drivers/frame_provider/decoder/vav1/vav1.c b/drivers/frame_provider/decoder/vav1/vav1.c
+--- a/drivers/frame_provider/decoder/vav1/vav1.c
++++ b/drivers/frame_provider/decoder/vav1/vav1.c
+@@ -0,9 +0,10 @@
+ 		av1_print(hw, PRINT_FLAG_VDEC_STATUS,
+ 			"%s: end of stream\n",
+ 			__func__);
+-		hw->stat |= STAT_EOS;
+ 		hw->eos = 1;
+ 		av1_postproc(hw);
++		/* userspace ends its drain on this, so only after the flush */
++		hw->stat |= STAT_EOS;
+ 
+ 		notify_v4l_eos(hw_to_vdec(hw));
+ 
+diff --git a/drivers/frame_provider/decoder/vp9/vvp9.c b/drivers/frame_provider/decoder/vp9/vvp9.c
+--- a/drivers/frame_provider/decoder/vp9/vvp9.c
++++ b/drivers/frame_provider/decoder/vp9/vvp9.c
+@@ -0,10 +0,11 @@
+ 		vp9_print(pbi, PRINT_FLAG_VDEC_STATUS,
+ 			"%s: end of stream\n",
+ 			__func__);
+-		pbi->stat |= STAT_EOS;
+ 		pbi->eos = 1;
+ 		if (cm->new_fb_idx != INVALID_IDX)
+ 			vp9_bufmgr_postproc(pbi);
++		/* userspace ends its drain on this, so only after the flush */
++		pbi->stat |= STAT_EOS;
+ 
+ 		notify_v4l_eos(hw_to_vdec(pbi));
+ 

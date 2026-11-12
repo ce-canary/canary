@@ -1,0 +1,246 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 19:27:17 -0600
+Subject: [PATCH] libbluray: report the first visible BD-J graphics of a title
+
+A player cannot tell when a BD-J title first shows graphics. The
+overlay stays open across titles and is flushed from Java threads
+outside the event queue, so a flush is not ordered with the title
+and playlist events.
+---
+ ...he-first-visible-graphics-of-a-title.patch | 227 ++++++++++++++++++
+ 1 file changed, 227 insertions(+)
+ create mode 100644 packages/multimedia/libbluray/patches/libbluray-23-bdj-report-the-first-visible-graphics-of-a-title.patch
+
+diff --git a/packages/multimedia/libbluray/patches/libbluray-23-bdj-report-the-first-visible-graphics-of-a-title.patch b/packages/multimedia/libbluray/patches/libbluray-23-bdj-report-the-first-visible-graphics-of-a-title.patch
+new file mode 100644
+--- /dev/null
++++ b/packages/multimedia/libbluray/patches/libbluray-23-bdj-report-the-first-visible-graphics-of-a-title.patch
+@@ -0,0 +0,227 @@
++From cc6d957e78fabcb73d7ec177a8b653bfe3442e75 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Tue, 10 Nov 2026 19:27:05 -0600
++Subject: [PATCH] bdj: report the first visible graphics of a title
++
++A player cannot tell when a BD-J title first shows graphics. The
++overlay stays open across titles, and its flushes come from Java
++threads outside the event queue, so they are not ordered with the
++title and playlist events.
++---
++ .../bdj/java/java/awt/BDRootWindow.java       |  8 ++
++ .../bdj/java/org/videolan/BDJLoader.java      |  1 +
++ src/libbluray/bluray.c                        | 86 ++++++++++++++++++-
++ src/libbluray/bluray.h                        |  3 +
++ 4 files changed, 96 insertions(+), 2 deletions(-)
++
++diff --git a/src/libbluray/bdj/java/java/awt/BDRootWindow.java b/src/libbluray/bdj/java/java/awt/BDRootWindow.java
++index 91b86c7f24..9f31b6c61f 100644
++--- a/src/libbluray/bdj/java/java/awt/BDRootWindow.java
+++++ b/src/libbluray/bdj/java/java/awt/BDRootWindow.java
++@@ -146,6 +146,14 @@ public class BDRootWindow extends Frame {
++         }
++     }
++ 
+++    /* flush the whole plane, so a new title starts on the graphics it inherits */
+++    public void syncAll() {
+++        synchronized (this) {
+++            dirty.add(new Rectangle(0, 0, getWidth(), getHeight()));
+++            sync();
+++        }
+++    }
+++
++     private static class RefreshTimerTask extends TimerTask {
++         public RefreshTimerTask(BDRootWindow window) {
++             this.window = window;
++diff --git a/src/libbluray/bdj/java/org/videolan/BDJLoader.java b/src/libbluray/bdj/java/org/videolan/BDJLoader.java
++index 0050adb449..846b76f481 100644
++--- a/src/libbluray/bdj/java/org/videolan/BDJLoader.java
+++++ b/src/libbluray/bdj/java/org/videolan/BDJLoader.java
++@@ -269,6 +269,7 @@ public class BDJLoader {
++ 
++             // change psr
++             Libbluray.writePSR(RegisterAccess.PSR_TITLE_NR, title.getTitleNum());
+++            gui.syncAll();
++ 
++             // notify AppsDatabase
++             ((BDJAppsDatabase)BDJAppsDatabase.getAppsDatabase()).newDatabase(bdjo, proxys);
++diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
++index ec0664bffb..bc243f978d 100644
++--- a/src/libbluray/bluray.c
+++++ b/src/libbluray/bluray.c
++@@ -177,6 +177,12 @@ struct bluray {
++     BDJ_CONFIG      bdj_config;
++     uint8_t         bdj_wait_start;  /* BD-J has selected playlist (prefetch) but not yet started playback */
++     uint8_t         bdj_started;     /* BD-J has started playback and not stopped it */
+++    uint8_t         bdj_psr_write;   /* BD-J is writing PSR 4 (the loader is its only BD-J writer) */
+++
+++    /* first visible BD-J graphics of a title started by the BD-J loader */
+++    BD_MUTEX        gfx_mutex;
+++    uint8_t         gfx_pending;     /* not reported since the title start */
+++    uint8_t         gfx_scan_all;    /* next flush scans the whole plane */
++ 
++     /* notifications, menu pages and the title end of the read, held until presented */
++     uint8_t         pres_hold;       /* requested by the player */
++@@ -266,6 +272,7 @@ const char *bd_event_name(uint32_t event)
++         EVENT_ENTRY(BD_EVENT_STEREOSCOPIC_STATUS);
++         EVENT_ENTRY(BD_EVENT_KEY_INTEREST_TABLE);
++         EVENT_ENTRY(BD_EVENT_UO_MASK_CHANGED);
+++        EVENT_ENTRY(BD_EVENT_BDJ_GRAPHICS);
++ #undef EVENT_ENTRY
++     }
++     return NULL;
++@@ -1429,9 +1436,11 @@ int bdpriv_reg_write(BLURAY *bd, int psr, int reg, uint32_t value, uint32_t psr_
++         if (psr < 102) {
++             /* avoid deadlocks (psr_write triggers callbacks that may lock this mutex) */
++             bd_mutex_lock(&bd->mutex);
+++            bd->bdj_psr_write = reg == PSR_TITLE_NUMBER;
++         }
++         int res = bd_psr_write_bits(bd->regs, reg, value, psr_value_mask);
++         if (psr < 102) {
+++            bd->bdj_psr_write = 0;
++             bd_mutex_unlock(&bd->mutex);
++         }
++         return res;
++@@ -1454,6 +1463,65 @@ void bdpriv_unlock_osd_buffer(BLURAY *bd)
++ /*
++  * handle graphics updates from BD-J layer
++  */
+++
+++static int _argb_visible(const unsigned *img, int stride, int x0, int y0, int x1, int y1)
+++{
+++    int x, y;
+++
+++    for (y = y0; y <= y1; y++) {
+++        const unsigned *line = img + y * stride;
+++        for (x = x0; x <= x1; x++) {
+++            if (line[x] & 0xff000000) {
+++                return 1;
+++            }
+++        }
+++    }
+++    return 0;
+++}
+++
+++static void _check_bdj_graphics(BLURAY *bd, const unsigned *img, int w, int h,
+++                                int x0, int y0, int x1, int y1)
+++{
+++    bd_mutex_lock(&bd->gfx_mutex);
+++
+++    if (bd->gfx_pending) {
+++        int stride = w;
+++        int scan_all = bd->gfx_scan_all;
+++
+++        if (bd->argb_buffer && (bd->argb_buffer->width < w || bd->argb_buffer->height < h)) {
+++            /* the app buffer holds only the dirty area, at its origin */
+++            stride = bd->argb_buffer->width;
+++            x1 -= x0;
+++            y1 -= y0;
+++            x0 = 0;
+++            y0 = 0;
+++            scan_all = 0;
+++        } else if (bd->argb_buffer) {
+++            stride = bd->argb_buffer->width;
+++        }
+++
+++        /* once a scan found the plane clear, only a flushed region can show something */
+++        if (scan_all) {
+++            x0 = 0;
+++            y0 = 0;
+++            x1 = w - 1;
+++            y1 = h - 1;
+++        }
+++
+++        if (_argb_visible(img, stride, x0, y0, x1, y1)) {
+++            if (_queue_event(bd, BD_EVENT_BDJ_GRAPHICS, 1)) {
+++                bd->gfx_pending = 0;
+++            } else {
+++                bd->gfx_scan_all = 1;
+++            }
+++        } else if (scan_all) {
+++            bd->gfx_scan_all = 0;
+++        }
+++    }
+++
+++    bd_mutex_unlock(&bd->gfx_mutex);
+++}
+++
++ void bdpriv_bdj_osd_cb(BLURAY *bd, const unsigned *img, int w, int h,
++                    int x0, int y0, int x1, int y1)
++ {
++@@ -1509,6 +1577,8 @@ void bdpriv_bdj_osd_cb(BLURAY *bd, const unsigned *img, int w, int h,
++         bd->argb_buffer->dirty[BD_OVERLAY_IG].y1 = y1;
++     }
++ 
+++    _check_bdj_graphics(bd, img, w, h, x0, y0, x1, y1);
+++
++     /* draw */
++     aov.cmd = BD_ARGB_OVERLAY_DRAW;
++     bd->argb_overlay_proc(bd->argb_overlay_proc_handle, &aov);
++@@ -1968,6 +2038,7 @@ BLURAY *bd_init(void)
++ 
++     bd_mutex_init(&bd->mutex);
++     bd_mutex_init(&bd->argb_buffer_mutex);
+++    bd_mutex_init(&bd->gfx_mutex);
++ 
++     env = getenv("LIBBLURAY_PERSISTENT_STORAGE");
++     if (env) {
++@@ -2097,6 +2168,7 @@ void bd_close(BLURAY *bd)
++ 
++     bd_mutex_destroy(&bd->mutex);
++     bd_mutex_destroy(&bd->argb_buffer_mutex);
+++    bd_mutex_destroy(&bd->gfx_mutex);
++ 
++     BD_DEBUG(DBG_BLURAY, "BLURAY destroyed!\n");
++ 
++@@ -3852,6 +3924,16 @@ static void _set_scr(BLURAY *bd, int64_t pts)
++     }
++ }
++ 
+++static void _queue_title_event(BLURAY *bd, uint32_t title)
+++{
+++    /* graphics count from the title start by the BD-J loader: until then the plane belongs to the title before */
+++    bd_mutex_lock(&bd->gfx_mutex);
+++    bd->gfx_pending = bd->bdj_psr_write;
+++    bd->gfx_scan_all = 1;
+++    _queue_event(bd, BD_EVENT_TITLE, title);
+++    bd_mutex_unlock(&bd->gfx_mutex);
+++}
+++
++ static void _process_psr_restore_event(BLURAY *bd, const BD_PSR_EVENT *ev)
++ {
++     /* PSR restore events are handled internally.
++@@ -3866,7 +3948,7 @@ static void _process_psr_restore_event(BLURAY *bd, const BD_PSR_EVENT *ev)
++             return;
++         case PSR_TITLE_NUMBER:
++             /* pass to the application */
++-            _queue_event(bd, BD_EVENT_TITLE, ev->new_val);
+++            _queue_title_event(bd, ev->new_val);
++             return;
++         case PSR_CHAPTER:
++             /* will be selected automatically */
++@@ -3914,7 +3996,7 @@ static void _process_psr_write_event(BLURAY *bd, const BD_PSR_EVENT *ev)
++             _queue_event(bd, BD_EVENT_ANGLE,    ev->new_val);
++             break;
++         case PSR_TITLE_NUMBER:
++-            _queue_event(bd, BD_EVENT_TITLE,    ev->new_val);
+++            _queue_title_event(bd, ev->new_val);
++             break;
++         case PSR_PLAYLIST:
++             _bdj_event  (bd, BDJ_EVENT_PLAYLIST,ev->new_val);
++diff --git a/src/libbluray/bluray.h b/src/libbluray/bluray.h
++index c608a62a69..984681cb35 100644
++--- a/src/libbluray/bluray.h
+++++ b/src/libbluray/bluray.h
++@@ -878,6 +878,9 @@ typedef enum {
++     /** UO mask changed */
++     BD_EVENT_UO_MASK_CHANGED        = 33,  /**< bitmask, BLURAY_UO_* */
++ 
+++    /** BD-J graphics shown for the first time since the BD-J loader started the title */
+++    BD_EVENT_BDJ_GRAPHICS           = 34,  /**< 1 */
+++
++     /*BD_EVENT_LAST = 33, */
++ 
++ } bd_event_e;
++-- 
++2.43.0
++

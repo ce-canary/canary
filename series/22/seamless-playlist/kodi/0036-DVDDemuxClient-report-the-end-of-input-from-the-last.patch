@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 10:41:24 -0600
+Subject: [PATCH] DVDDemuxClient: report the end of input from the last read
+
+An add-on demuxer never reports the end of its input. The player
+drains its video at the end of an item without an end of input, so
+the decoder holds its last pictures until the drain times out.
+---
+ xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp | 5 +++++
+ xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.h   | 3 +++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp
+@@ -0,6 +0,7 @@
+ 
+   m_displayTime = 0;
+   m_dtsAtDisplayTime = DVD_NOPTS_VALUE;
++  m_atEnd = false;
+   return true;
+ }
+ 
+@@ -0,6 +0,7 @@
+ 
+   m_displayTime = 0;
+   m_dtsAtDisplayTime = DVD_NOPTS_VALUE;
++  m_atEnd = false;
+ }
+ 
+ bool CDVDDemuxClient::ParsePacket(DemuxPacket* pkt)
+@@ -0,6 +0,8 @@
+   ReleaseUnclaimedStreams();
+ 
+   m_packet.reset(m_IDemux->ReadDemux());
++  // a live input that returns nothing has paused, it has not ended
++  m_atEnd = !m_packet && !m_pInput->IsRealtime();
+   if (!m_packet)
+   {
+     return nullptr;
+@@ -0,6 +0,7 @@
+     CLog::Log(LOGDEBUG, LOGVIDEO, "CDVDDemuxClient::SeekTime: {:.3f}", timems / 1000.0);
+     m_displayTime = 0;
+     m_dtsAtDisplayTime = DVD_NOPTS_VALUE;
++    m_atEnd = false;
+     ReleaseUnclaimedStreams();
+     return m_IDemux->SeekTime(timems, backwards, startpts);
+   }
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.h b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.h
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.h
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.h
+@@ -0,6 +0,7 @@
+   void PreOpenStream(int id);
+   void SetVideoResolution(unsigned int width, unsigned int height) override;
+   bool IsStreaming() const override;
++  bool IsAtEnd() const override { return m_atEnd; }
+ 
+ protected:
+   void RequestStreams();
+@@ -0,6 +0,8 @@
+   std::unique_ptr<DemuxPacket> m_packet;
+   int m_videoStreamPlaying = -1;
+   std::set<int> m_preOpened;
++  // the last read returned nothing, a later read may return data again
++  bool m_atEnd{false};
+ 
+ private:
+   static inline bool CodecHasExtraData(AVCodecID id);

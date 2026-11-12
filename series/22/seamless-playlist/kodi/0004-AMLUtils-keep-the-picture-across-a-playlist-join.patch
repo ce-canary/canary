@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 15:16:22 -0600
+Subject: [PATCH] AMLUtils: keep the picture across a playlist join
+
+Only a Blu-ray item join armed the presentation hold. At a playlist
+join the old decoder closed unarmed and the video layer went black
+until the next item showed its first picture.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 1 +
+ xbmc/utils/AMLUtils.cpp                | 6 ++++++
+ xbmc/utils/AMLUtils.h                  | 2 ++
+ 3 files changed, 9 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,7 @@
+       // the next item of a join opens its decoder once the old one closed, as at a disc join
+       if (m_joinPending && m_CurrentVideo.id >= 0)
+       {
++        aml_continue_presentation(hint);
+         CloseStream(m_CurrentVideo, true);
+         m_joinPending = false;
+       }
+diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
+--- a/xbmc/utils/AMLUtils.cpp
++++ b/xbmc/utils/AMLUtils.cpp
+@@ -0,6 +0,12 @@
+   CAMLCodec::ContinuePresentation(format);
+ }
+ 
++void aml_continue_presentation(const CDVDStreamInfo& next)
++{
++  CAMLCodec::ContinuePresentation(
++      NextVideoFormat{next.codec, aml_video_output(next).hdrType, next.interlaced});
++}
++
+ void aml_end_presentation(bool stop)
+ {
+   CAMLCodec::EndPresentation(stop);
+diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
+--- a/xbmc/utils/AMLUtils.h
++++ b/xbmc/utils/AMLUtils.h
+@@ -0,6 +0,8 @@
+ std::chrono::steady_clock::time_point aml_display_reset_end();
+ // `next` is the clip of the next item, nullptr when unknown
+ void aml_continue_presentation(const BLURAY_CLIP_INFO* next);
++// `next` is the stream the next decoder opens with
++void aml_continue_presentation(const CDVDStreamInfo& next);
+ void aml_end_presentation(bool stop);
+ // `taken` also drops a picture a next decoder took before its first frame
+ void aml_drop_kept_picture(bool taken);

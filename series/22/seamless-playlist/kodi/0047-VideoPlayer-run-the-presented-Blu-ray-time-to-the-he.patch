@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 23:43:31 -0600
+Subject: [PATCH] VideoPlayer: run the presented Blu-ray time to the held item
+ end
+
+The presented title time follows the picture on the plane, which stays
+at the last picture while a held play item runs on to its out time. The
+time on screen stood still for the whole gap, and disc notifications due
+inside it waited for the next item.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,15 @@
+       return DVD_NOPTS_VALUE;
+     presented = m_clock.GetClock();
+   }
++  // once video has played out, the last picture of a held play item is shown at the clock until
++  // the item ends, one title tick before the next item starts
++  if (const auto itemEnd = GetBlurayItemEnd())
++  {
++    if (m_videoDrained && !m_VideoPlayerVideo->HasData() && m_VideoPlayerVideo->IsEOS())
++      presented = std::max(presented, m_clock.GetClock());
++    const double tick = DVD_TIME_BASE * av_q2d(CDVDDemuxUtils::BLURAY_CLIP_TIME_BASE);
++    return std::min(presented + m_offset_pts, *itemEnd - tick);
++  }
+   return presented + m_offset_pts;
+ }
+ 

@@ -1,0 +1,177 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 10:57:40 -0600
+Subject: [PATCH] AMLCodec: skip the release of a picture from before a reset
+
+A picture dequeued before a reset can be released after it. amlvideo
+takes a buffer back by popping its queue up to that index, and the
+indices run on across the reset. The stale release pops the new
+decoder's pictures with it.
+---
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp     | 16 +++++++++++++---
+ .../cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h |  6 +++++-
+ .../DVDCodecs/Video/DVDVideoCodecAmlogic.cpp     |  6 ++++--
+ .../DVDCodecs/Video/DVDVideoCodecAmlogic.h       |  5 ++++-
+ .../VideoRenderers/HwDecRender/RendererAML.cpp   |  9 +++++----
+ 5 files changed, 31 insertions(+), 11 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,6 +0,10 @@
+   m_dll->codec_pause(&am_private->vcodec);
+ 
+   // reset the decoder
++  {
++    std::lock_guard<std::mutex> lock(m_resetMutex);
++    m_resetEpoch++;
++  }
+   m_dll->codec_reset(&am_private->vcodec);
+   ClearInputEnd();
+   m_inputWritten = false;
+@@ -0,13 +0,19 @@
+   return true;
+ }
+ 
+-int CAMLCodec::ReleaseFrame(const uint32_t index, bool drop)
++bool CAMLCodec::ReleaseFrame(const uint32_t index, uint32_t resetEpoch, bool drop)
+ {
+   int ret;
+   v4l2_buffer vbuf = v4l2_buffer();
+   vbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+   vbuf.index = index;
+ 
++  // amlvideo takes a buffer back by popping its queue up to the index, so a picture from before
++  // a reset would take the new pictures with it
++  std::lock_guard<std::mutex> resetLock(m_resetMutex);
++  if (resetEpoch != m_resetEpoch)
++    return false;
++
+   PosixFilePtr amlVideoFile;
+   {
+     std::lock_guard<std::mutex> lock(m_amlVideoFileMutex);
+@@ -0,7 +0,7 @@
+   }
+ 
+   if (!amlVideoFile)
+-    return 0;
++    return false;
+ 
+   if (drop)
+     vbuf.flags |= V4L2_BUF_FLAG_DONE;
+@@ -0,7 +0,7 @@
+   }
+   else if (!drop && m_handback)
+     HandBack();
+-  return ret;
++  return ret >= 0;
+ }
+ 
+ float CAMLCodec::GetBufferLevel(int new_chunk, int &data_len, int &free_len, int &size)
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+@@ -0,11 +0,12 @@
+   void          SetVideoRate(int videoRate);
+   uint64_t      GetOMXPts() const { return m_cur_pts; }
+   uint32_t      GetBufferIndex() const { return m_bufferIndex; };
++  uint32_t      GetResetEpoch() const { return m_resetEpoch; }
+   float         GetBufferLevel(int new_chunk, int &data_len, int &free_len, int &size);
+   static float  OMXPtsToSeconds(int omxpts);
+   static int    OMXDurationToNs(int duration);
+   int           GetAmlDuration() const;
+-  int           ReleaseFrame(const uint32_t index, bool bDrop = false);
++  bool          ReleaseFrame(const uint32_t index, uint32_t resetEpoch, bool bDrop = false);
+   bool          IsOpen() const { return m_opened; }
+   bool          IsRealtimeStream() const { return m_processInfo.IsRealtimeStream(); }
+   double        GetPresentHold() const { return m_presentHold; }
+@@ -0,6 +0,9 @@
+ 
+   PosixFilePtr     m_amlVideoFile;
+   std::mutex       m_amlVideoFileMutex;
++  // a reset drops the queue its pictures came from; the video thread writes the epoch
++  std::mutex       m_resetMutex;
++  uint32_t         m_resetEpoch{0};
+   std::string      m_defaultVfmMap;
+ 
+   static std::atomic_flag  m_pollSync;
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+@@ -0,7 +0,8 @@
+   std::unique_lock<CCriticalSection> lock(m_criticalSection);
+   if (m_videoBuffers[id]->m_amlCodec)
+   {
+-    m_videoBuffers[id]->m_amlCodec->ReleaseFrame(m_videoBuffers[id]->m_bufferIndex, true);
++    m_videoBuffers[id]->m_amlCodec->ReleaseFrame(m_videoBuffers[id]->m_bufferIndex,
++                                                 m_videoBuffers[id]->m_resetEpoch, true);
+     m_videoBuffers[id]->m_amlCodec = nullptr;
+   }
+   m_freeBuffers.push_back(id);
+@@ -0,7 +0,8 @@
+     m_metadataSequencer.Consume(pVideoPicture->pts, m_frameMeta);
+     pVideoPicture->videoBuffer = m_videoBufferPool->Get();
+     static_cast<CAMLVideoBuffer*>(pVideoPicture->videoBuffer)->Set(this, m_Codec,
+-     m_Codec->GetOMXPts(), m_Codec->GetAmlDuration(), m_Codec->GetBufferIndex(), m_metadataToken,
++     m_Codec->GetOMXPts(), m_Codec->GetAmlDuration(), m_Codec->GetBufferIndex(),
++     m_Codec->GetResetEpoch(), m_metadataToken,
+      m_frameMeta, m_output.sdrWhite, m_output.sdrGamma);;
+   }
+ 
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h
+@@ -0,13 +0,15 @@
+ public:
+   CAMLVideoBuffer(int id) : CVideoBuffer(id) {};
+   void Set(CDVDVideoCodecAmlogic *codec, std::shared_ptr<CAMLCodec> amlcodec, uint64_t omxPts, int amlDuration, uint32_t bufferIndex,
+-           uint32_t metadataToken, AMLFrameMetadataPtr metadata, float sdrWhite, float sdrGamma)
++           uint32_t resetEpoch, uint32_t metadataToken, AMLFrameMetadataPtr metadata,
++           float sdrWhite, float sdrGamma)
+   {
+     m_codec = codec;
+     m_amlCodec = amlcodec;
+     m_omxPts = omxPts;
+     m_amlDuration = amlDuration;
+     m_bufferIndex = bufferIndex;
++    m_resetEpoch = resetEpoch;
+     m_metadataToken = metadataToken;
+     m_metadata = std::move(metadata);
+     m_sdrWhite = sdrWhite;
+@@ -0,6 +0,7 @@
+   uint64_t m_omxPts;
+   int m_amlDuration;
+   uint32_t m_bufferIndex;
++  uint32_t m_resetEpoch{0};
+   uint32_t m_metadataToken{0};
+   AMLFrameMetadataPtr m_metadata;
+   float m_sdrWhite{0.0f};
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+@@ -0,7 +0,7 @@
+     {
+       if (amli->m_amlCodec)
+       {
+-        amli->m_amlCodec->ReleaseFrame(amli->m_bufferIndex, true);
++        amli->m_amlCodec->ReleaseFrame(amli->m_bufferIndex, amli->m_resetEpoch, true);
+         amli->m_amlCodec = nullptr; // Released
+       }
+       amli->Release();
+@@ -0,12 +0,13 @@
+     // a new decoder can start at the pts the previous one ended on
+     if (pts != m_prevVPts || m_prevCodec.lock() != amli->m_amlCodec)
+     {
+-      const bool dropFrame =
+-          m_prevVPts == DVD_NOPTS_VALUE && amli->m_amlCodec->IsRealtimeStream();
++      bool dropFrame = m_prevVPts == DVD_NOPTS_VALUE && amli->m_amlCodec->IsRealtimeStream();
++      // a picture amvideo did not take is not shown
++      if (!amli->m_amlCodec->ReleaseFrame(amli->m_bufferIndex, amli->m_resetEpoch, dropFrame))
++        dropFrame = true;
+       if (drop)
+         *drop = dropFrame;
+ 
+-      amli->m_amlCodec->ReleaseFrame(amli->m_bufferIndex, dropFrame);
+       if (!dropFrame)
+       {
+         m_releasedToken = amli->m_metadataToken;

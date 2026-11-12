@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 21:50:48 -0600
+Subject: [PATCH] InputStreamAddon: do not close an input that never opened
+
+The destructor closes the input, and Close uses the add-on interface that
+only Open allocates. An input destroyed before it opened, or closed twice,
+dereferences a null interface.
+---
+ xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp
+@@ -0,6 +0,9 @@
+ 
+ void CInputStreamAddon::Close()
+ {
++  if (!m_ifc.inputstream)
++    return;
++
+   if (m_ifc.inputstream->toAddon->close)
+     m_ifc.inputstream->toAddon->close(m_ifc.inputstream);
+   DestroyInstance();

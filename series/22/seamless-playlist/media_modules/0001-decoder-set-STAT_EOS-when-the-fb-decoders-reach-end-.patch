@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 10:09:57 -0600
+Subject: [PATCH] decoder: set STAT_EOS when the fb decoders reach end of
+ stream
+
+The front/back decoders on S5 and T3X flush their pictures at end of
+stream but never set STAT_EOS, as the other decoders do. A player that
+drains on this status waits out its timeout at every end of input.
+---
+ drivers/frame_provider/decoder/avs2_fb/vavs2_fb.c | 2 ++
+ drivers/frame_provider/decoder/h265_fb/vh265_fb.c | 2 ++
+ drivers/frame_provider/decoder/vav1_fb/vav1_fb.c  | 2 ++
+ drivers/frame_provider/decoder/vp9_fb/vvp9_fb.c   | 2 ++
+ 4 files changed, 8 insertions(+)
+
+diff --git a/drivers/frame_provider/decoder/avs2_fb/vavs2_fb.c b/drivers/frame_provider/decoder/avs2_fb/vavs2_fb.c
+--- a/drivers/frame_provider/decoder/avs2_fb/vavs2_fb.c
++++ b/drivers/frame_provider/decoder/avs2_fb/vavs2_fb.c
+@@ -0,6 +0,8 @@
+ 			avs2_post_process(&dec->avs2_dec);
+ 			avs2_prepare_display_buf(dec);
+ 		}
++		/* userspace ends its drain on this, so only after the flush */
++		dec->stat |= STAT_EOS;
+ 		vdec_vframe_dirty(hw_to_vdec(dec), dec->chunk);
+ 		vdec_code_rate(vdec, READ_VREG(HEVC_SHIFT_BYTE_COUNT) - dec->start_shift_bytes);
+ 	} else if (dec->dec_result == DEC_RESULT_FORCE_EXIT) {
+diff --git a/drivers/frame_provider/decoder/h265_fb/vh265_fb.c b/drivers/frame_provider/decoder/h265_fb/vh265_fb.c
+--- a/drivers/frame_provider/decoder/h265_fb/vh265_fb.c
++++ b/drivers/frame_provider/decoder/h265_fb/vh265_fb.c
+@@ -0,6 +0,8 @@
+ 			"%s: end of stream, last dec poc %d => 0x%pf\n",
+ 			__func__, hevc->curr_POC, pic);
+ 		flush_output(hevc, pic);
++		/* userspace ends its drain on this, so only after the flush */
++		hevc->stat |= STAT_EOS;
+ 
+ #ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
+ 		hevc->shift_byte_count_lo
+diff --git a/drivers/frame_provider/decoder/vav1_fb/vav1_fb.c b/drivers/frame_provider/decoder/vav1_fb/vav1_fb.c
+--- a/drivers/frame_provider/decoder/vav1_fb/vav1_fb.c
++++ b/drivers/frame_provider/decoder/vav1_fb/vav1_fb.c
+@@ -0,6 +0,8 @@
+ 			__func__);
+ 		hw->eos = 1;
+ 		av1_postproc(hw);
++		/* userspace ends its drain on this, so only after the flush */
++		hw->stat |= STAT_EOS;
+ 
+ 		vdec_vframe_dirty(hw_to_vdec(hw), hw->chunk);
+ 		vdec_code_rate(vdec, READ_VREG(HEVC_SHIFT_BYTE_COUNT) - hw->start_shift_bytes);
+diff --git a/drivers/frame_provider/decoder/vp9_fb/vvp9_fb.c b/drivers/frame_provider/decoder/vp9_fb/vvp9_fb.c
+--- a/drivers/frame_provider/decoder/vp9_fb/vvp9_fb.c
++++ b/drivers/frame_provider/decoder/vp9_fb/vvp9_fb.c
+@@ -0,6 +0,8 @@
+ 		pbi->eos = 1;
+ 		if (cm->new_fb_idx != INVALID_IDX)
+ 			vp9_bufmgr_postproc(pbi);
++		/* userspace ends its drain on this, so only after the flush */
++		pbi->stat |= STAT_EOS;
+ 
+ 		vdec_vframe_dirty(hw_to_vdec(pbi), pbi->chunk);
+ 		vdec_code_rate(vdec, READ_VREG(HEVC_SHIFT_BYTE_COUNT) - pbi->start_shift_bytes);

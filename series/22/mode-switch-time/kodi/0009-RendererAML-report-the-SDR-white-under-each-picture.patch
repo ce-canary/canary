@@ -1,0 +1,154 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 11 Nov 2026 20:23:03 -0600
+Subject: [PATCH] RendererAML: report the SDR white under each picture
+
+The SDR white belongs to the decoder of each picture, and the picture
+on screen can come from a decoder that is already closed or replaced.
+---
+ .../DVDCodecs/Video/DVDVideoCodecAmlogic.cpp   |  2 +-
+ .../DVDCodecs/Video/DVDVideoCodecAmlogic.h     |  6 +++++-
+ .../VideoPlayer/VideoRenderers/BaseRenderer.h  | 13 +++++++++++++
+ .../VideoRenderers/HwDecRender/RendererAML.cpp | 18 ++++++++++++++++++
+ .../VideoRenderers/HwDecRender/RendererAML.h   |  5 +++++
+ 5 files changed, 42 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+@@ -0,7 +0,7 @@
+     pVideoPicture->videoBuffer = m_videoBufferPool->Get();
+     static_cast<CAMLVideoBuffer*>(pVideoPicture->videoBuffer)->Set(this, m_Codec,
+      m_Codec->GetOMXPts(), m_Codec->GetAmlDuration(), m_Codec->GetBufferIndex(), m_metadataToken,
+-     m_frameMeta);;
++     m_frameMeta, m_output.sdrWhite, m_output.sdrGamma);;
+   }
+ 
+   // check for mpeg2 aspect ratio changes
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h
+@@ -0,7 +0,7 @@
+ public:
+   CAMLVideoBuffer(int id) : CVideoBuffer(id) {};
+   void Set(CDVDVideoCodecAmlogic *codec, std::shared_ptr<CAMLCodec> amlcodec, uint64_t omxPts, int amlDuration, uint32_t bufferIndex,
+-           uint32_t metadataToken, AMLFrameMetadataPtr metadata)
++           uint32_t metadataToken, AMLFrameMetadataPtr metadata, float sdrWhite, float sdrGamma)
+   {
+     m_codec = codec;
+     m_amlCodec = amlcodec;
+@@ -0,6 +0,8 @@
+     m_bufferIndex = bufferIndex;
+     m_metadataToken = metadataToken;
+     m_metadata = std::move(metadata);
++    m_sdrWhite = sdrWhite;
++    m_sdrGamma = sdrGamma;
+   }
+ 
+   CDVDVideoCodecAmlogic* m_codec;
+@@ -0,6 +0,8 @@
+   uint32_t m_bufferIndex;
+   uint32_t m_metadataToken{0};
+   AMLFrameMetadataPtr m_metadata;
++  float m_sdrWhite{0.0f};
++  float m_sdrGamma{0.0f};
+ };
+ 
+ class CAMLVideoBufferPool : public IVideoBufferPool
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h b/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
+@@ -0,6 +0,16 @@
+ 
+ struct VideoPicture;
+ 
++// how the composited HDR output shows SDR, for overlays drawn over the video
++struct HdrOverlayMapping
++{
++  int transfer{0}; // composited transfer (AVCOL_TRC_*), 0 when the GUI is not composited
++  float sdrWhite{0.0f}; // nits of SDR white on a PQ output, 0 when unknown
++  float sdrGamma{0.0f};
++
++  bool operator==(const HdrOverlayMapping&) const = default;
++};
++
+ namespace KODI::RENDERING::CAPTURE
+ {
+ struct CaptureSpec;
+@@ -0,6 +0,9 @@
+   // Gets debug info from render buffer
+   virtual DEBUG_INFO_VIDEO GetDebugInfo(int idx) { return {}; }
+ 
++  // how the output shows SDR under the picture in buffer idx
++  virtual HdrOverlayMapping GetOverlayMapping(int idx) { return {}; }
++
+ protected:
+   void CalcDestRect(float offsetX,
+                     float offsetY,
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+@@ -0,6 +0,7 @@
+     winSystem->ReleaseHdrGuiSession(m_hdrGuiOwner);
+     m_hdrGuiOwner = 0;
+   }
++  m_hdrGuiTransfer = m_hdrGuiOwner != 0 ? color_transfer : 0;
+ 
+   if (!m_capture)
+     m_capture = CAMLCapture::Get();
+@@ -0,11 +0,28 @@
+   return info;
+ }
+ 
++HdrOverlayMapping CRendererAML::GetOverlayMapping(int idx)
++{
++  HdrOverlayMapping mapping;
++  mapping.transfer = m_hdrGuiTransfer;
++  if (idx >= 0)
++  {
++    mapping.sdrWhite = m_buffers[idx].sdrWhite;
++    mapping.sdrGamma = m_buffers[idx].sdrGamma;
++  }
++  return mapping;
++}
++
+ void CRendererAML::AddVideoPicture(const VideoPicture &picture, int index)
+ {
+   ReleaseBuffer(index);
+ 
+   BUFFER &buf(m_buffers[index]);
++  // kept past ReleaseBuffer: the frame on screen outlives its released buffer
++  CAMLVideoBuffer *amli(dynamic_cast<CAMLVideoBuffer*>(picture.videoBuffer));
++  buf.sdrWhite = amli ? amli->m_sdrWhite : 0.0f;
++  buf.sdrGamma = amli ? amli->m_sdrGamma : 0.0f;
++
+   if (picture.videoBuffer)
+   {
+     buf.videoBuffer = picture.videoBuffer;
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
+@@ -0,6 +0,8 @@
+   virtual bool Supports(ESCALINGMETHOD method) const override { return false; };
+   virtual bool Supports(ERENDERFEATURE feature) const override;
+ 
++  virtual HdrOverlayMapping GetOverlayMapping(int idx) override;
++
+ private:
+   void Reset();
+   std::shared_ptr<CAMLCodec> QueueFrame(int index, bool setVideoRect, bool* drop = nullptr);
+@@ -0,11 +0,14 @@
+     BUFFER() : videoBuffer(nullptr) {};
+     CVideoBuffer *videoBuffer;
+     int duration;
++    float sdrWhite{0.0f};
++    float sdrGamma{0.0f};
+   } m_buffers[m_numRenderBuffers];
+ 
+   uint64_t m_prevVPts;
+   std::weak_ptr<CAMLCodec> m_prevCodec;
+   uint64_t m_hdrGuiOwner{0};
++  int m_hdrGuiTransfer{0};
+   bool m_bConfigured;
+ 
+   std::atomic<bool> m_vsyncPresent{false};

@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 22:22:01 -0600
+Subject: [PATCH] ApplicationPlay: resolve the path of a given item
+
+Only GatherPlaybackDetails can resolve an item's path, and only for the
+item it plays, so no other caller can resolve an item the way playback
+does.
+---
+ xbmc/application/ApplicationPlay.cpp | 18 +++++++++---------
+ xbmc/application/ApplicationPlay.h   |  7 ++++---
+ 2 files changed, 13 insertions(+), 12 deletions(-)
+
+diff --git a/xbmc/application/ApplicationPlay.cpp b/xbmc/application/ApplicationPlay.cpp
+--- a/xbmc/application/ApplicationPlay.cpp
++++ b/xbmc/application/ApplicationPlay.cpp
+@@ -0,27 +0,27 @@
+ using namespace KODI;
+ using namespace XFILE;
+ 
+-bool CApplicationPlay::ResolvePath()
++bool CApplicationPlay::ResolvePath(CFileItem& item)
+ {
+   // Get bluray:// path for resolution if present
+-  if (m_item.HasVideoInfoTag() && m_item.GetVideoInfoTag()->GetPath().starts_with("bluray://"))
+-    m_item.SetDynPath(m_item.GetVideoInfoTag()->m_strFileNameAndPath);
++  if (item.HasVideoInfoTag() && item.GetVideoInfoTag()->GetPath().starts_with("bluray://"))
++    item.SetDynPath(item.GetVideoInfoTag()->m_strFileNameAndPath);
+ 
+   // Translate/Resolve the url if needed - recursively, but only limited times.
+-  std::string lastDynPath{m_item.GetDynPath()};
++  std::string lastDynPath{item.GetDynPath()};
+   size_t itemResolveAttempt{0};
+   while (itemResolveAttempt < MAX_ITEM_RESOLVE_ATTEMPTS)
+   {
+     itemResolveAttempt++;
+ 
+-    if (const std::unique_ptr<IDirectory> dir{CDirectoryFactory::Create(m_item)};
+-        dir && !dir->Resolve(m_item))
++    if (const std::unique_ptr<IDirectory> dir{CDirectoryFactory::Create(item)};
++        dir && !dir->Resolve(item))
+     {
+-      CLog::LogF(LOGERROR, "Error resolving item. Item '{}' is not playable.", m_item.GetDynPath());
++      CLog::LogF(LOGERROR, "Error resolving item. Item '{}' is not playable.", item.GetDynPath());
+       return false;
+     }
+ 
+-    std::string newDynPath{m_item.GetDynPath()};
++    std::string newDynPath{item.GetDynPath()};
+     if (newDynPath == lastDynPath)
+       break; // done
+ 
+@@ -0,7 +0,7 @@
+   if (PLAYLIST::IsPlayList(m_item) && !m_item.IsGame())
+     return GatherPlaybackDetailsResult::RESULT_ERROR; // non-game playlists not supported
+ 
+-  if (!ResolvePath())
++  if (!ResolvePath(m_item))
+     return GatherPlaybackDetailsResult::RESULT_ERROR;
+ 
+   if (!isStack)
+diff --git a/xbmc/application/ApplicationPlay.h b/xbmc/application/ApplicationPlay.h
+--- a/xbmc/application/ApplicationPlay.h
++++ b/xbmc/application/ApplicationPlay.h
+@@ -0,13 +0,14 @@
+    */
+   const CPlayerOptions& GetPlayerOptions() const { return m_options; }
+ 
+-private:
+   /*!
+-   * \brief Resolves m_item's vfs dynpath to an actual file path.
++   * \brief Resolves an item's vfs dynpath to an actual file path.
++   * \param item The item to resolve
+    * \return true if resolved successfully, false otherwise
+    */
+-  bool ResolvePath();
++  static bool ResolvePath(CFileItem& item);
+ 
++private:
+   /*!
+    * \brief Determines if there is a resume point for m_item, updates the player options accordingly.
+    * Also resolves a removable media path if needed

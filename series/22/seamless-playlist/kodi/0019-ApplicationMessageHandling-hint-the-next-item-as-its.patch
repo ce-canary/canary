@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 22:23:24 -0600
+Subject: [PATCH] ApplicationMessageHandling: hint the next item as its play
+ resolves it
+
+The prefetch hint passes the next playlist entry as it is listed. A
+.strm or other playlist file entry plays as the item it expands to, and
+a directory can resolve an entry to another path. The player then opens
+ahead an input that the play never opens.
+---
+ .../ApplicationMessageHandling.cpp            | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/application/ApplicationMessageHandling.cpp b/xbmc/application/ApplicationMessageHandling.cpp
+--- a/xbmc/application/ApplicationMessageHandling.cpp
++++ b/xbmc/application/ApplicationMessageHandling.cpp
+@@ -0,6 +0,7 @@
+ #include "application/AppInboundProtocol.h"
+ #include "application/Application.h"
+ #include "application/ApplicationEnums.h"
++#include "application/ApplicationPlay.h"
+ #include "application/ApplicationPlayer.h"
+ #include "application/ApplicationPowerHandling.h"
+ #include "application/ApplicationSkinHandling.h"
+@@ -0,6 +0,7 @@
+ #include "interfaces/generic/ScriptInvocationManager.h"
+ #include "interfaces/json-rpc/JSONUtils.h"
+ #include "interfaces/python/XBPython.h"
++#include "jobs/JobManager.h"
+ #include "messaging/ApplicationMessenger.h"
+ #include "messaging/ThreadMessage.h"
+ #include "messaging/helpers/DialogOKHelper.h"
+@@ -0,7 +0,22 @@
+         if (URIUtils::IsPlugin(file.GetDynPath()) || !VIDEO::IsVideo(file))
+           return true;
+ 
+-        m_app.GetComponent<CApplicationPlayer>()->PrefetchNextFile(file);
++        // the item the play resolves to, on a job as a playlist file or a resolver can read the
++        // network; a plugin runs Python and a PVR item prepares its playback when resolved
++        CServiceBroker::GetJobManager()->Submit(
++            [entry = std::make_shared<CFileItem>(file),
++             appPlayer = m_app.GetComponent<CApplicationPlayer>()]()
++            {
++              PLAYLIST::CPlayList items;
++              items.Add(entry);
++              items.ExpandNested(0);
++              CFileItem item{*items[0]};
++              if (URIUtils::IsPlugin(item.GetDynPath()) || URIUtils::IsPVR(item.GetDynPath()) ||
++                  !CApplicationPlay::ResolvePath(item))
++                return;
++              appPlayer->PrefetchNextFile(item);
++            },
++            CJob::PRIORITY_NORMAL);
+         return true;
+       }
+ 

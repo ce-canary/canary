@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 11 Nov 2026 12:40:14 -0600
+Subject: [PATCH] VideoPlayer: move the subtitle file read into
+ ReadSubtitlePacket
+
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 51 ++++++++++++++------------
+ xbmc/cores/VideoPlayer/VideoPlayer.h   |  1 +
+ 2 files changed, 29 insertions(+), 23 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,35 +0,40 @@
+     SynchronizeDemuxer();
+ }
+ 
++bool CVideoPlayer::ReadSubtitlePacket(DemuxPacket*& packet, CDemuxStream*& stream)
++{
++  packet = m_pSubtitleDemuxer->Read();
++  if (!packet)
++    return false;
++
++  UpdateCorrection(packet, m_offset_pts);
++  if (packet->iStreamId < 0)
++    return true;
++
++  stream = m_pSubtitleDemuxer->GetStream(packet->demuxerId, packet->iStreamId);
++  if (!stream)
++  {
++    CLog::Log(LOGERROR, "{} - Error demux packet doesn't belong to a valid stream", __FUNCTION__);
++    return false;
++  }
++  if (stream->source == STREAM_SOURCE_NONE)
++  {
++    m_SelectionStreams.Clear(StreamType::NONE, STREAM_SOURCE_DEMUX_SUB);
++    m_SelectionStreams.Update(nullptr, m_pSubtitleDemuxer.get());
++    UpdateContent();
++  }
++  return true;
++}
++
+ bool CVideoPlayer::ReadPacket(DemuxPacket*& packet, CDemuxStream*& stream)
+ {
+ 
+   // check if we should read from subtitle demuxer
+   if (m_pSubtitleDemuxer && m_VideoPlayerSubtitle->AcceptsData())
+   {
+-    packet = m_pSubtitleDemuxer->Read();
+-
+-    if(packet)
+-    {
+-      UpdateCorrection(packet, m_offset_pts);
+-      if(packet->iStreamId < 0)
+-        return true;
+-
+-      stream = m_pSubtitleDemuxer->GetStream(packet->demuxerId, packet->iStreamId);
+-      if (!stream)
+-      {
+-        CLog::Log(LOGERROR, "{} - Error demux packet doesn't belong to a valid stream",
+-                  __FUNCTION__);
+-        return false;
+-      }
+-      if (stream->source == STREAM_SOURCE_NONE)
+-      {
+-        m_SelectionStreams.Clear(StreamType::NONE, STREAM_SOURCE_DEMUX_SUB);
+-        m_SelectionStreams.Update(NULL, m_pSubtitleDemuxer.get());
+-        UpdateContent();
+-      }
+-      return true;
+-    }
++    const bool valid = ReadSubtitlePacket(packet, stream);
++    if (packet)
++      return valid;
+   }
+ 
+   // read a data frame from stream.
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+   IDVDStreamPlayer* GetStreamPlayer(unsigned int player);
+   void SendPlayerMessage(std::shared_ptr<CDVDMsg> pMsg, unsigned int target);
+ 
++  bool ReadSubtitlePacket(DemuxPacket*& packet, CDemuxStream*& stream);
+   bool ReadPacket(DemuxPacket*& packet, CDemuxStream*& stream);
+   void HandleDynamicBufferLevel();
+   bool IsValidStream(const CCurrentStream& stream);

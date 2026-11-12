@@ -1,0 +1,171 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 08:48:37 -0600
+Subject: [PATCH] VideoPlayer: choose the display mode for a stream's largest
+ size
+
+The display mode is chosen for the size of the stream's first picture.
+An adaptive stream that starts below its top representation gets a
+mode too small for its later pictures, and a later size change can
+switch the mode mid-play.
+---
+ xbmc/cores/DataCacheCore.cpp                    | 14 ++++++++++++++
+ xbmc/cores/DataCacheCore.h                      |  6 ++++++
+ xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp  |  6 ++++++
+ xbmc/cores/VideoPlayer/Process/ProcessInfo.h    |  1 +
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp          |  9 ++++++++-
+ .../VideoRenderers/RenderManager.cpp            | 17 ++++++++++++-----
+ 6 files changed, 47 insertions(+), 6 deletions(-)
+
+diff --git a/xbmc/cores/DataCacheCore.cpp b/xbmc/cores/DataCacheCore.cpp
+--- a/xbmc/cores/DataCacheCore.cpp
++++ b/xbmc/cores/DataCacheCore.cpp
+@@ -0,6 +0,20 @@
+   return m_playerVideoInfo.m_isInterlaced;
+ }
+ 
++void CDataCacheCore::SetVideoMaxSize(int width, int height)
++{
++  std::unique_lock lock(m_videoPlayerSection);
++
++  m_playerVideoInfo.maxSize = CSizeInt(width, height);
++}
++
++CSizeInt CDataCacheCore::GetVideoMaxSize()
++{
++  std::unique_lock lock(m_videoPlayerSection);
++
++  return m_playerVideoInfo.maxSize;
++}
++
+ void CDataCacheCore::SetDiscFormat(const DiscFormat& format)
+ {
+   std::unique_lock lock(m_videoPlayerSection);
+diff --git a/xbmc/cores/DataCacheCore.h b/xbmc/cores/DataCacheCore.h
+--- a/xbmc/cores/DataCacheCore.h
++++ b/xbmc/cores/DataCacheCore.h
+@@ -0,6 +0,7 @@
+ 
+ #include "EdlEdit.h"
+ #include "threads/CriticalSection.h"
++#include "utils/Geometry.h"
+ 
+ #include <atomic>
+ #include <chrono>
+@@ -0,6 +0,10 @@
+    */
+   bool IsVideoInterlaced();
+ 
++  // the largest size the video stream may switch to, empty if it declares none
++  void SetVideoMaxSize(int width, int height);
++  CSizeInt GetVideoMaxSize();
++
+   void SetDiscFormat(const DiscFormat& format);
+   DiscFormat GetDiscFormat();
+ 
+@@ -0,6 +0,7 @@
+     int liveBitRate;
+     int queueLevel;
+     int queueDataLevel;
++    CSizeInt maxSize;
+     DiscFormat discFormat;
+   } m_playerVideoInfo;
+ 
+diff --git a/xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp b/xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp
+--- a/xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp
++++ b/xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp
+@@ -0,6 +0,12 @@
+   return m_IsHdr10Plus;
+ }
+ 
++void CProcessInfo::SetVideoMaxSize(int width, int height)
++{
++  if (m_dataCache)
++    m_dataCache->SetVideoMaxSize(width, height);
++}
++
+ void CProcessInfo::SetDiscFormat(const DiscFormat& format)
+ {
+   if (m_dataCache)
+diff --git a/xbmc/cores/VideoPlayer/Process/ProcessInfo.h b/xbmc/cores/VideoPlayer/Process/ProcessInfo.h
+--- a/xbmc/cores/VideoPlayer/Process/ProcessInfo.h
++++ b/xbmc/cores/VideoPlayer/Process/ProcessInfo.h
+@@ -0,6 +0,7 @@
+   bool GetDoviIsFEL();
+   void SetIsHdr10Plus(bool isHdr10Plus);
+   bool GetIsHdr10Plus();
++  void SetVideoMaxSize(int width, int height);
+   void SetDiscFormat(const DiscFormat& format);
+   virtual EINTERLACEMETHOD GetFallbackDeintMethod();
+   virtual void SetSwDeinterlacingMethods();
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,7 @@
+   m_pInputStream.reset();
+   m_blurayMenu = false;
+   m_processInfo->SetDiscFormat({});
++  m_processInfo->SetVideoMaxSize(0, 0);
+ 
+   // Flushes keep disc menu overlays, and the closed input stream can no longer remove them
+   m_overlayContainer.Clear();
+@@ -0,7 +0,11 @@
+     /* check so that dmuxer hints or extra data hasn't changed */
+     /* if they have, reopen stream */
+ 
+-    if (current.hint != CDVDStreamInfo(*stream, true))
++    CDVDStreamInfo hint(*stream, true);
++    // a new largest size alone reopens nothing and counts at the next mode choice
++    if (stream->type == StreamType::VIDEO)
++      m_processInfo->SetVideoMaxSize(hint.maxWidth, hint.maxHeight);
++    if (current.hint != hint)
+     {
+       m_SelectionStreams.Clear(StreamType::NONE, STREAM_SOURCE_DEMUX);
+       m_SelectionStreams.Update(m_pInputStream, m_pDemuxer.get());
+@@ -0,6 +0,8 @@
+   if (hint.flags & AV_DISPOSITION_ATTACHED_PIC)
+     return false;
+ 
++  m_processInfo->SetVideoMaxSize(hint.maxWidth, hint.maxHeight);
++
+   // set desired refresh rate
+   if (m_CurrentVideo.id < 0 && m_playerOptions.fullscreen &&
+       CServiceBroker::GetWinSystem()->GetGfxContext().IsFullScreenRoot() && hint.fpsrate != 0 &&
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,22 +0,29 @@
+ constexpr double UNKNOWN_RELEASE_LEAD_MS = 100.0;
+ 
+ // the size the output mode is chosen for; a smaller clip of a disc takes the size of its main
+-// title
++// title, and a stream that may switch to a larger size takes that size
+ CSizeInt GetModeSize(const VideoPicture& picture, float fps)
+ {
+   const CSizeInt size(static_cast<int>(picture.iWidth), static_cast<int>(picture.iHeight));
+-  const DiscFormat disc = CServiceBroker::GetDataCacheCore().GetDiscFormat();
+-  if (!picture.stereoMode.empty() || disc.width <= size.Width() || disc.height <= size.Height())
++  CDataCacheCore& dataCache = CServiceBroker::GetDataCacheCore();
++  const DiscFormat disc = dataCache.GetDiscFormat();
++  CSizeInt modeSize = size;
++  for (const CSizeInt& larger : {CSizeInt(disc.width, disc.height), dataCache.GetVideoMaxSize()})
++  {
++    if (larger.Width() > modeSize.Width() && larger.Height() > modeSize.Height())
++      modeSize = larger;
++  }
++  if (!picture.stereoMode.empty() || modeSize == size)
+     return size;
+ 
+   // Dolby Vision at 2160p50/60 needs the sink's 2160p60 capability
+   if (picture.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && fps > 30.0f &&
+-      disc.height >= 2160 &&
++      modeSize.Height() >= 2160 &&
+       CServiceBroker::GetWinSystem()->GetDisplayHDRCapabilities().SupportsDolbyVision() !=
+           DolbyVisionFormat::DOLBYVISION_TYPE_4K60)
+     return size;
+ 
+-  return CSizeInt(disc.width, disc.height);
++  return modeSize;
+ }
+ } // namespace
+ 

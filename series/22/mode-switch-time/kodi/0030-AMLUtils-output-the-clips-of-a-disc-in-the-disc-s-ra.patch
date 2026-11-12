@@ -1,0 +1,182 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 08:28:44 -0600
+Subject: [PATCH] AMLUtils: output the clips of a disc in the disc's range
+
+Each clip a disc's menus played was output in its own range, with the
+user mappings applied. An SDR extra between Dolby Vision or HDR10 clips
+switched the TV to SDR and back. A disc's main title gave no range to
+keep.
+---
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  |  8 +-
+ xbmc/utils/AMLCapture.cpp                     |  9 ++-
+ xbmc/utils/AMLUtils.cpp                       | 74 +++++++++++++++----
+ xbmc/utils/AMLUtils.h                         |  4 +
+ 4 files changed, 75 insertions(+), 20 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,10 +0,14 @@
+   else
+   {
+     int forceOutput = FORCE_OUTPUT_DISABLED;
++    // the HDR10 clips of a disc session follow the source, only its SDR clips are lifted
++    const bool sdr2hdr = aml_disc_output_hdr_type()
++                             ? hints.hdrType == StreamHdrType::HDR_TYPE_NONE
++                             : settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_SDR2HDR);
+ 
+     outputWrites.emplace_back("dv_enable", 0);
+-    if (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_SDR2HDR) &&
+-        m_output.hdrType == StreamHdrType::HDR_TYPE_HDR10 && !m_processInfo.GetIsHdr10Plus())
++    if (sdr2hdr && m_output.hdrType == StreamHdrType::HDR_TYPE_HDR10 &&
++        !m_processInfo.GetIsHdr10Plus())
+       forceOutput = FORCE_OUTPUT_BT2020_PQ;
+     else if (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_HDR2SDR))
+       forceOutput = FORCE_OUTPUT_BT709;
+diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
+--- a/xbmc/utils/AMLCapture.cpp
++++ b/xbmc/utils/AMLCapture.cpp
+@@ -0,10 +0,13 @@
+ 
+   bool sourcePQ = source.transfer == AVCOL_TRC_SMPTE2084;
+   bool sourceHLG = source.transfer == AVCOL_TRC_ARIB_STD_B67;
+-  // hdr2sdr and sdr2hdr rewrite the stream colour to the output colour; the demuxer keeps the type
++  // hdr2sdr and sdr2hdr give the picture the output colour; the stream keeps the source type
+   const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+-  if (!source.dolbyVision && (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_HDR2SDR) ||
+-                              settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_SDR2HDR)))
++  const auto discTarget = aml_disc_output_hdr_type();
++  const bool sdr2hdr = discTarget ? *discTarget == StreamHdrType::HDR_TYPE_HDR10
++                                  : settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_SDR2HDR);
++  if (!source.dolbyVision &&
++      (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_HDR2SDR) || sdr2hdr))
+   {
+     const auto& components = CServiceBroker::GetAppComponents();
+     const auto appPlayer = components.GetComponent<CApplicationPlayer>();
+diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
+--- a/xbmc/utils/AMLUtils.cpp
++++ b/xbmc/utils/AMLUtils.cpp
+@@ -0,6 +0,7 @@
+ #include "utils/log.h"
+ #include "utils/StringUtils.h"
+ #include "ServiceBroker.h"
++#include "cores/DataCacheCore.h"
+ #include "cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h"
+ #include "utils/RegExp.h"
+ #include "settings/Settings.h"
+@@ -0,7 +0,9 @@
+   return ((!!user_convert_to_sdr) == 1);
+ }
+ 
+-bool aml_convert_to_hdr(StreamHdrType hdrType)
++namespace
++{
++bool UserMapsToHdr(StreamHdrType hdrType)
+ {
+   const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+   bool user_convert_to_hdr = false;
+@@ -0,6 +0,57 @@
+   return ((convert_to_hdr && !!user_convert_to_hdr) == 1);
+ }
+ 
++bool UserMapsToDv(StreamHdrType hdrType)
++{
++  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
++  bool dv_user_enabled(!settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_DISABLE));
++  bool user_convert_to_dv;
++
++  if (hdrType == StreamHdrType::HDR_TYPE_NONE)
++    user_convert_to_dv = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_SDR2DV);
++  else
++    user_convert_to_dv = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_HDR2DV);
++
++  bool convert_to_dv = (!!aml_support_dolby_vision() &&
++                        static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())
++                            ->GetAmlDisplay()->aml_display_support_dv());
++
++  return ((convert_to_dv && !!user_convert_to_dv && !!dv_user_enabled) == 1);
++}
++} // namespace
++
++std::optional<StreamHdrType> aml_disc_output_hdr_type()
++{
++  const DiscFormat disc = CServiceBroker::GetDataCacheCore().GetDiscFormat();
++  if (disc.width == 0)
++    return std::nullopt;
++
++  StreamHdrType hdrType = disc.hdrType;
++  // the demuxer opens the base layer of a Dolby Vision stream while Dolby Vision is off
++  if (hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && !aml_dolby_vision_enabled())
++    hdrType = StreamHdrType::HDR_TYPE_HDR10;
++  if (hdrType == StreamHdrType::HDR_TYPE_HDR10 &&
++      !CServiceBroker::GetWinSystem()->GetDisplayHDRCapabilities().SupportsHDR10())
++    hdrType = StreamHdrType::HDR_TYPE_NONE;
++
++  // a mapping to sdr leaves no range to keep
++  if (UserMapsToDv(hdrType) ||
++      (hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && !aml_convert_to_sdr(hdrType) &&
++       (!aml_convert_to_sdr_by_vs_engine(hdrType) || aml_convert_to_hdr_by_vs_engine(hdrType))))
++    return StreamHdrType::HDR_TYPE_DOLBYVISION;
++  if (hdrType == StreamHdrType::HDR_TYPE_HDR10 && !aml_convert_to_sdr(hdrType) &&
++      !aml_convert_to_sdr_by_vs_engine(hdrType))
++    return hdrType;
++  return std::nullopt;
++}
++
++bool aml_convert_to_hdr(StreamHdrType hdrType)
++{
++  if (const auto target = aml_disc_output_hdr_type())
++    return hdrType == StreamHdrType::HDR_TYPE_NONE && *target == StreamHdrType::HDR_TYPE_HDR10;
++  return UserMapsToHdr(hdrType);
++}
++
+ bool aml_convert_to_sdr_by_vs_engine(StreamHdrType hdrType)
+ {
+   const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+@@ -0,20 +0,10 @@
+ 
+ bool aml_convert_to_dv_by_vs_engine(StreamHdrType hdrType)
+ {
+-  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+-  bool dv_user_enabled(!settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_DISABLE));
+-  bool user_convert_to_dv;
+-
+-  if (hdrType == StreamHdrType::HDR_TYPE_NONE)
+-    user_convert_to_dv = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_SDR2DV);
+-  else
+-    user_convert_to_dv = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_HDR2DV);
+-
+-  bool convert_to_dv = (!!aml_support_dolby_vision() &&
+-                        static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())
+-                            ->GetAmlDisplay()->aml_display_support_dv());
+-
+-  return ((convert_to_dv && !!user_convert_to_dv && !!dv_user_enabled) == 1);
++  if (const auto target = aml_disc_output_hdr_type())
++    return hdrType != StreamHdrType::HDR_TYPE_DOLBYVISION &&
++           *target == StreamHdrType::HDR_TYPE_DOLBYVISION;
++  return UserMapsToDv(hdrType);
+ }
+ 
+ static float aml_hdr_module_sdr_white()
+diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
+--- a/xbmc/utils/AMLUtils.h
++++ b/xbmc/utils/AMLUtils.h
+@@ -0,6 +0,7 @@
+ #include "utils/StreamDetails.h"
+ 
+ #include <chrono>
++#include <optional>
+ 
+ extern "C"
+ {
+@@ -0,6 +0,9 @@
+ bool aml_convert_to_sdr_by_vs_engine(StreamHdrType hdrType);
+ bool aml_convert_to_hdr_by_vs_engine(StreamHdrType hdrType);
+ bool aml_convert_to_dv_by_vs_engine(StreamHdrType hdrType);
++// the engine every clip of a Blu-ray menu session runs through, the disc's range before a user's
++// mapping lowers it; none outside a session or where the clips are mapped to sdr
++std::optional<StreamHdrType> aml_disc_output_hdr_type();
+ 
+ // what the decoder puts out for a source under the conversion settings
+ struct AMLVideoOutput

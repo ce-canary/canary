@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 22:17:38 -0600
+Subject: [PATCH] AddonInstanceHandler: tell the first instance when it is
+ created
+
+The handler decides whether an instance is the add-on's first when it is
+constructed, without the lock that creating and destroying instances
+hold. The last other instance can be destroyed in between, which unloads
+the add-on, so its create runs as the first while told it is not.
+---
+ xbmc/addons/binary-addons/AddonInstanceHandler.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/xbmc/addons/binary-addons/AddonInstanceHandler.cpp b/xbmc/addons/binary-addons/AddonInstanceHandler.cpp
+--- a/xbmc/addons/binary-addons/AddonInstanceHandler.cpp
++++ b/xbmc/addons/binary-addons/AddonInstanceHandler.cpp
+@@ -0,7 +0,6 @@
+   m_info.type = m_type;
+   m_info.kodi = this;
+   m_info.parent = m_parentInstance;
+-  m_info.first_instance = m_addon && !m_addon->Initialized();
+   m_info.functions = &m_callbacks;
+   m_info.functions->get_instance_user_path = get_instance_user_path;
+   m_info.functions->is_instance_setting_using_default = is_instance_setting_using_default;
+@@ -0,6 +0,7 @@
+ 
+   std::unique_lock lock(m_cdSec);
+ 
++  m_info.first_instance = !m_addon->Initialized();
+   ADDON_STATUS status = m_addon->CreateInstance(&m_ifc);
+   if (status != ADDON_STATUS_OK)
+   {

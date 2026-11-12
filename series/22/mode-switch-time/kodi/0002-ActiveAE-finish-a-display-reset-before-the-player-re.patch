@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 8 Nov 2026 20:35:57 -0600
+Subject: [PATCH] ActiveAE: finish a display reset before the player resumes
+
+The engine took a display reset as an async message. The player resumed
+its clock and audio right after the display reset returned, while the
+engine was still reopening the sink. The start sync then found the
+audio late by the rest of the reopen and skipped it.
+---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp      | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,6 +0,7 @@
+             ReleaseHold();
+           return;
+         case CActiveAEControlProtocol::DISPLAYRESET:
++          msg->Reply(CActiveAEControlProtocol::ACC);
+           return;
+         case CActiveAEControlProtocol::APPFOCUSED:
+           m_sink.m_controlPort.SendOutMessage(CSinkControlProtocol::APPFOCUSED, msg->data, sizeof(bool));
+@@ -0,7 +0,10 @@
+         {
+         case CActiveAEControlProtocol::DISPLAYRESET:
+           if (m_extSuspended)
++          {
++            msg->Reply(CActiveAEControlProtocol::ACC);
+             return;
++          }
+           CLog::Log(LOGDEBUG,"CActiveAE - display reset event");
+           displayReset = true;
+           [[fallthrough]];
+@@ -0,8 +0,6 @@
+             ValidateOutputDevices(false);
+           }
+           Configure();
+-          if (!displayReset)
+-            msg->Reply(CActiveAEControlProtocol::ACC);
+           if (!m_extError)
+           {
+             m_state = AE_TOP_CONFIGURED_PLAY;
+@@ -0,6 +0,8 @@
+           }
+           m_stats.SetSuspended(false);
+           m_extDeferData = false;
++          // the caller resumes playback once this returns
++          msg->Reply(CActiveAEControlProtocol::ACC);
+           return;
+         case CActiveAEControlProtocol::DEVICECHANGE:
+         case CActiveAEControlProtocol::DEFAULTDEVICECHANGE:
+@@ -0,7 +0,11 @@
+ 
+ void CActiveAE::OnResetDisplay()
+ {
+-  m_controlPort.SendOutMessage(CActiveAEControlProtocol::DISPLAYRESET);
++  Message* reply;
++  if (m_controlPort.SendOutMessageSync(CActiveAEControlProtocol::DISPLAYRESET, &reply, 5s))
++    reply->Release();
++  else
++    CLog::Log(LOGERROR, "ActiveAE::{} - timed out", __FUNCTION__);
+ }
+ 
+ void CActiveAE::OnAppFocusChange(bool focus)

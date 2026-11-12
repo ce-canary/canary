@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 00:41:36 -0600
+Subject: [PATCH] DVDDemuxClient: let a stream open before the player claims it
+
+A stream of an inputstream add-on opens only when the player picks it,
+so nothing can start its first downloads ahead of the open. A stream
+opened ahead that the player then does not pick would stay enabled and
+keep downloading.
+---
+ .../DVDDemuxers/DVDDemuxClient.cpp            | 23 +++++++++++++++++++
+ .../VideoPlayer/DVDDemuxers/DVDDemuxClient.h  |  6 +++++
+ 2 files changed, 29 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp
+@@ -0,6 +0,8 @@
+   if (m_packet)
+     return m_packet.release();
+ 
++  ReleaseUnclaimedStreams();
++
+   m_packet.reset(m_IDemux->ReadDemux());
+   if (!m_packet)
+   {
+@@ -0,6 +0,7 @@
+     CLog::Log(LOGDEBUG, LOGVIDEO, "CDVDDemuxClient::SeekTime: {:.3f}", timems / 1000.0);
+     m_displayTime = 0;
+     m_dtsAtDisplayTime = DVD_NOPTS_VALUE;
++    ReleaseUnclaimedStreams();
+     return m_IDemux->SeekTime(timems, backwards, startpts);
+   }
+   return false;
+@@ -0,6 +0,7 @@
+ 
+ bool CDVDDemuxClient::EnableStream(int id, bool enable)
+ {
++  m_preOpened.erase(id);
+   if (m_IDemux)
+     return m_IDemux->EnableStream(id, enable);
+ 
+@@ -0,6 +0,8 @@
+ 
+ void CDVDDemuxClient::OpenStream(int id)
+ {
++  m_preOpened.erase(id);
++
+   // OpenStream may change some parameters
+   // in this case we need to reset our stream properties
+   if (m_IDemux)
+@@ -0,6 +0,23 @@
+   }
+ }
+ 
++void CDVDDemuxClient::ReleaseUnclaimedStreams()
++{
++  for (const int id : m_preOpened)
++  {
++    m_IDemux->EnableStream(id, false);
++    if (id == m_videoStreamPlaying)
++      m_videoStreamPlaying = -1;
++  }
++  m_preOpened.clear();
++}
++
++void CDVDDemuxClient::PreOpenStream(int id)
++{
++  OpenStream(id);
++  m_preOpened.insert(id);
++}
++
+ void CDVDDemuxClient::SetVideoResolution(unsigned int width, unsigned int height)
+ {
+   if (m_IDemux)
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.h b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.h
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.h
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.h
+@@ -0,6 +0,7 @@
+ #include "DVDInputStreams/DVDInputStream.h"
+ 
+ #include <map>
++#include <set>
+ #include <vector>
+ 
+ extern "C" {
+@@ -0,6 +0,9 @@
+   std::string GetStreamCodecName(int iStreamId) override;
+   bool EnableStream(int id, bool enable) override;
+   void OpenStream(int id) override;
++  // Opens a stream ahead of the player, which then claims it with OpenStream. The first Read or
++  // seek disables each one it did not claim
++  void PreOpenStream(int id);
+   void SetVideoResolution(unsigned int width, unsigned int height) override;
+   bool IsStreaming() const override;
+ 
+@@ -0,6 +0,7 @@
+   void DisposeStreams();
+   std::shared_ptr<CDemuxStream> GetStreamInternal(int iStreamId);
+   bool IsVideoReady();
++  void ReleaseUnclaimedStreams();
+ 
+   std::shared_ptr<CDVDInputStream> m_pInput;
+   std::shared_ptr<CDVDInputStream::IDemux> m_IDemux;
+@@ -0,6 +0,7 @@
+   double m_dtsAtDisplayTime;
+   std::unique_ptr<DemuxPacket> m_packet;
+   int m_videoStreamPlaying = -1;
++  std::set<int> m_preOpened;
+ 
+ private:
+   static inline bool CodecHasExtraData(AVCodecID id);

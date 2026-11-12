@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 08:24:33 -0600
+Subject: [PATCH] AMLUtils: predict the held hdr type with the decoder's output
+
+The hold predicted the hdr type of the next item with its own copy of
+the mapping that sets the decoder's output, so the two could drift
+apart.
+---
+ xbmc/utils/AMLUtils.cpp | 12 ++++--------
+ 1 file changed, 4 insertions(+), 8 deletions(-)
+
+diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
+--- a/xbmc/utils/AMLUtils.cpp
++++ b/xbmc/utils/AMLUtils.cpp
+@@ -0,16 +0,12 @@
+          format == BLURAY_VIDEO_FORMAT_1080I;
+ }
+ 
+-// the hdr type OpenStream converts a demuxer hdr type to before it opens the decoder
++// the hdr type the decoder of a stream of the demuxer's `hdrType` puts out
+ StreamHdrType GetOpenedHdrType(StreamHdrType hdrType)
+ {
+-  if (aml_convert_to_dv_by_vs_engine(hdrType))
+-    return StreamHdrType::HDR_TYPE_DOLBYVISION;
+-  if (aml_convert_to_sdr(hdrType))
+-    return StreamHdrType::HDR_TYPE_NONE;
+-  if (aml_convert_to_hdr(hdrType))
+-    return StreamHdrType::HDR_TYPE_HDR10;
+-  return hdrType;
++  CDVDStreamInfo source;
++  source.hdrType = hdrType;
++  return aml_video_output(source).hdrType;
+ }
+ 
+ // the format the decoder will be opened with for the video of `clip`

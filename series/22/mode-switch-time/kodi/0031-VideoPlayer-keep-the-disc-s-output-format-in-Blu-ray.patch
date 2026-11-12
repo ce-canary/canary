@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 08:29:31 -0600
+Subject: [PATCH] VideoPlayer: keep the disc's output format in Blu-ray menu
+ playback
+
+In Blu-ray menu playback every clip set its own output mode and range.
+Moving from a menu to the main feature through SDR or 1080p clips
+switched the TV several times, each with a blank screen.
+---
+ addons/resource.language.en_gb/resources/strings.po | 12 +++++++++++-
+ system/settings/settings.xml                        | 10 ++++++++++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp              |  4 ++++
+ xbmc/settings/Settings.h                            |  1 +
+ 4 files changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/addons/resource.language.en_gb/resources/strings.po b/addons/resource.language.en_gb/resources/strings.po
+--- a/addons/resource.language.en_gb/resources/strings.po
++++ b/addons/resource.language.en_gb/resources/strings.po
+@@ -0,7 +0,17 @@
+ msgid "Intended for Dolby Vision enabled displays. HDR content will be tone mapped by Dolby Vision VS-Engine."
+ msgstr ""
+ 
+-#empty strings from id 14318 to 15010
++#: system/settings/settings.xml
++msgctxt "#14318"
++msgid "Keep the disc's output format"
++msgstr ""
++
++#: system/settings/settings.xml
++msgctxt "#14319"
++msgid "In Blu-ray menu playback, keep the main feature's resolution and dynamic range for every video where the display supports it. The refresh rate still follows each video."
++msgstr ""
++
++#empty strings from id 14320 to 15010
+ 
+ #: system/settings/settings.xml
+ msgctxt "#14400"
+diff --git a/system/settings/settings.xml b/system/settings/settings.xml
+--- a/system/settings/settings.xml
++++ b/system/settings/settings.xml
+@@ -0,6 +0,16 @@
+             <dependency type="enable" setting="coreelec.amlogic.disabledolbyvision" operator="is">false</dependency>
+           </dependencies>
+         </setting>
++        <setting id="coreelec.amlogic.keepdiscoutput" type="boolean" label="14318" help="14319">
++          <requirement>
++            <and>
++              <condition>HAVE_AMCODEC</condition>
++              <condition>HAVE_LIBBLURAY</condition>
++            </and>
++          </requirement>
++          <default>true</default>
++          <control type="toggle" />
++        </setting>
+         <setting id="coreelec.amlogic.disabledolbyvision" type="boolean" label="14422" help="14423">
+           <requirement>HAVE_AMCODEC</requirement>
+           <default>false</default>
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,7 @@
+     throw std::runtime_error("m_pInputStream reference count is greater than 1");
+   m_pInputStream.reset();
+   m_blurayMenu = false;
++  m_processInfo->SetDiscFormat({});
+ 
+   // Flushes keep disc menu overlays, and the closed input stream can no longer remove them
+   m_overlayContainer.Clear();
+@@ -0,6 +0,9 @@
+   // a settings load before this point put the per-file subtitle state over the disc's
+   if (m_blurayMenu)
+     m_VideoPlayerVideo->EnableSubtitle(GetBlurayInputStream()->IsPgEnabled());
++  if (m_blurayMenu && CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(
++                          CSettings::SETTING_COREELEC_AMLOGIC_KEEPDISCOUTPUT))
++    m_processInfo->SetDiscFormat(GetBlurayInputStream()->GetDiscFormat());
+ #endif
+ 
+   // find any available external subtitles for non dvd files
+diff --git a/xbmc/settings/Settings.h b/xbmc/settings/Settings.h
+--- a/xbmc/settings/Settings.h
++++ b/xbmc/settings/Settings.h
+@@ -0,6 +0,7 @@
+   static constexpr auto SETTING_COREELEC_AMLOGIC_DV2HDR = "coreelec.amlogic.dv2hdr";
+   static constexpr auto SETTING_COREELEC_AMLOGIC_SDR2DV = "coreelec.amlogic.sdr2dv";
+   static constexpr auto SETTING_COREELEC_AMLOGIC_HDR2DV = "coreelec.amlogic.hdr2dv";
++  static constexpr auto SETTING_COREELEC_AMLOGIC_KEEPDISCOUTPUT = "coreelec.amlogic.keepdiscoutput";
+   static constexpr auto SETTING_COREELEC_AMLOGIC_LIMIT_CD = "coreelec.amlogic.limitcd";
+   static constexpr auto SETTING_COREELEC_AMLOGIC_FORCE_CS = "coreelec.amlogic.forcecs";
+   static constexpr auto SETTING_COREELEC_AMLOGIC_DISABLEGUISCALING = "coreelec.amlogic.disableguiscaling";

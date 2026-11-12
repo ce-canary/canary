@@ -1,0 +1,184 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 8 Nov 2026 23:47:18 -0600
+Subject: [PATCH] RendererAML: place the video of a new stream before its first
+ frame
+
+The video layer of a new stream was enabled only by the first render
+pass, which runs after the first frame is released. amvideo turns the
+layer on at the first frame only if it was enabled before, and a
+Dolby Vision start can wait a vsync while it is still off.
+---
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp      | 15 ++++++++++++---
+ xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h |  2 ++
+ .../VideoPlayer/VideoRenderers/BaseRenderer.h     |  2 ++
+ .../VideoRenderers/HwDecRender/RendererAML.cpp    | 12 ++++++++++++
+ .../VideoRenderers/HwDecRender/RendererAML.h      |  2 ++
+ .../VideoPlayer/VideoRenderers/RenderManager.cpp  | 12 ++++++++++--
+ .../VideoPlayer/VideoRenderers/RenderManager.h    |  3 ++-
+ 7 files changed, 42 insertions(+), 6 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,11 +0,14 @@
+   }
+ }
+ 
+-void CAMLCodec::ShowMainVideo(const bool show)
++namespace
+ {
+-  static std::mutex saved_mutex;
+-  static int saved_disable_video = -1;
++std::mutex saved_mutex;
++int saved_disable_video = -1;
++} // namespace
+ 
++void CAMLCodec::ShowMainVideo(const bool show)
++{
+   std::lock_guard<std::mutex> lock(saved_mutex);
+   int disable_video = show ? 0:1;
+   if (saved_disable_video == disable_video)
+@@ -0,6 +0,12 @@
+   saved_disable_video = disable_video;
+ }
+ 
++bool CAMLCodec::IsMainVideoHidden()
++{
++  std::lock_guard<std::mutex> lock(saved_mutex);
++  return saved_disable_video == 1;
++}
++
+ void CAMLCodec::SetVideoZoom(const float zoom)
+ {
+   // input zoom range is 0.5 to 2.0 with a default of 1.0.
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+@@ -0,6 +0,8 @@
+   //! output stays set up for the next decoder, and a picture under a held HDR10 or Dolby Vision
+   //! output leaves that forced output to the hold or the decoder that took it
+   static void   DropKeptPicture(bool taken);
++  //! Whether Kodi last switched the video layer off
++  static bool   IsMainVideoHidden();
+   //! Makes this decoder the newest, and the one that takes or ends a held output no decoder
+   //! claimed
+   void          ClaimHold();
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h b/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
+@@ -0,6 +0,8 @@
+   virtual int GetPresentLatency() const { return -1; }
+   //! Milliseconds a stage after the release holds a frame for its successor (a deinterlacer)
+   virtual double GetPresentHold() const { return 0.0; }
++  //! Places the video of a configured stream in the final output mode, before its first frame
++  virtual void PlaceConfiguredVideo() {}
+   // Render info, can be called before configure
+   virtual CRenderInfo GetRenderInfo() { return CRenderInfo(); }
+   virtual void Update() = 0;
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+@@ -0,6 +0,7 @@
+ 
+   CAMLVideoBuffer* amli = dynamic_cast<CAMLVideoBuffer*>(picture.videoBuffer);
+   m_presentHold = amli && amli->m_amlCodec ? amli->m_amlCodec->GetPresentHold() : 0.0;
++  m_configCodec = amli ? amli->m_amlCodec : nullptr;
+ 
+   int color_transfer = 0;
+   const bool dv_graphics =
+@@ -0,6 +0,17 @@
+   m_pendingGeometry = m_prevCodec.lock();
+ }
+ 
++// amvideo turns a layer on at the first frame only when it was enabled before it
++void CRendererAML::PlaceConfiguredVideo()
++{
++  const std::shared_ptr<CAMLCodec> codec = m_configCodec.lock();
++  if (!codec || !codec->IsOpen() || !CAMLCodec::IsMainVideoHidden())
++    return;
++
++  ManageRenderArea();
++  codec->SetVideoRect(m_sourceRect, m_destRect);
++}
++
+ void CRendererAML::RenderUpdate(int index, int index2, bool clear, unsigned int flags, unsigned int alpha)
+ {
+   ManageRenderArea();
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
+@@ -0,6 +0,7 @@
+   virtual void WakeVsyncPresent() override;
+   virtual int GetPresentLatency() const override;
+   virtual double GetPresentHold() const override;
++  virtual void PlaceConfiguredVideo() override;
+ 
+   // Feature support
+   virtual bool Supports(ESCALINGMETHOD method) const override { return false; };
+@@ -0,6 +0,7 @@
+ 
+   uint64_t m_prevVPts;
+   std::weak_ptr<CAMLCodec> m_prevCodec;
++  std::weak_ptr<CAMLCodec> m_configCodec;
+   uint64_t m_hdrGuiOwner{0};
+   int m_hdrGuiTransfer{0};
+   bool m_bConfigured;
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,7 +0,10 @@
+       // the video thread waits for m_stateEvent, so no frame of this stream is queued yet
+       const CGraphicContext& gfx = CServiceBroker::GetWinSystem()->GetGfxContext();
+       if (gfx.IsFullScreenVideo() && gfx.IsFullScreenRoot())
+-        SwitchResolution();
++      {
++        if (SwitchResolution())
++          m_pRenderer->PlaceConfiguredVideo();
++      }
+       StartPresentThread();
+       // the release lead a waiter reads depends on whether the vsync presenter runs
+       m_stateEvent.Set();
+@@ -0,16 +0,20 @@
+   }
+ }
+ 
+-void CRenderManager::SwitchResolution()
++bool CRenderManager::SwitchResolution()
+ {
+   const RenderStereoMode user_stereo_mode =
+     CServiceBroker::GetGUI()->GetStereoscopicsManager().GetStereoModeByUser();
+   STEREOSCOPIC_PLAYBACK_MODE playbackMode =
+     static_cast<STEREOSCOPIC_PLAYBACK_MODE>(CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(CSettings::SETTING_VIDEOPLAYER_STEREOSCOPICPLAYBACKMODE));
++  bool deferred = false;
+   if (!m_picture.stereoMode.empty() &&
+       playbackMode == STEREOSCOPIC_PLAYBACK_MODE_ASK &&
+       user_stereo_mode == RenderStereoMode::UNDEFINED)
++  {
+     m_bTriggerUpdateResolution = false;
++    deferred = true;
++  }
+ 
+   if (m_bTriggerUpdateResolution &&
+     CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(CSettings::SETTING_VIDEOPLAYER_ADJUSTREFRESHRATE) != ADJUST_REFRESHRATE_OFF && m_fps > 0.0f)
+@@ -0,6 +0,7 @@
+   }
+   m_bTriggerUpdateResolution = false;
+   m_playerPort->VideoParamsChange();
++  return !deferred;
+ }
+ 
+ void CRenderManager::TriggerUpdateResolution(float fps, int width, int height, std::string &stereomode)
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -0,7 +0,8 @@
+   //! Video-only tap: serve VIDEO capture requests from the just-presented frame.
+   void ServiceVideoCaptures();
+ 
+-  void SwitchResolution();
++  //! false when the switch waits for the user to pick a stereo mode
++  bool SwitchResolution();
+   void UpdateLatencyTweak();
+   //! Release lead in ms without the video delay; needs m_pRenderer
+   double CalcReleaseLead();

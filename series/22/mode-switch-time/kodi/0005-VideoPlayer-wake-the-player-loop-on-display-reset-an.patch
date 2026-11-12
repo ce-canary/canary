@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 8 Nov 2026 22:58:43 -0600
+Subject: [PATCH] VideoPlayer: wake the player loop on display reset and
+ messages
+
+The player thread sleeps 50 ms while the display is lost and up to
+100 ms per pass while the input is retried or has ended. A start sync
+posted in that window waits for the sleep to end, so the first frame
+sits on screen for up to 100 ms before the clock starts. Short clips
+that are fully buffered, such as Blu-ray menu intros, hit this.
+---
+ xbmc/cores/VideoPlayer/DVDMessageQueue.cpp | 12 ++++++++++++
+ xbmc/cores/VideoPlayer/DVDMessageQueue.h   |  1 +
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp     |  7 ++++---
+ xbmc/cores/VideoPlayer/VideoPlayer.h       |  1 +
+ 4 files changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDMessageQueue.cpp b/xbmc/cores/VideoPlayer/DVDMessageQueue.cpp
+--- a/xbmc/cores/VideoPlayer/DVDMessageQueue.cpp
++++ b/xbmc/cores/VideoPlayer/DVDMessageQueue.cpp
+@@ -0,6 +0,18 @@
+   }
+ }
+ 
++void CDVDMessageQueue::WaitForMessage(std::chrono::milliseconds timeout)
++{
++  std::unique_lock lock(m_section);
++
++  if (m_bAbortRequest || !m_messages.empty() || !m_prioMessages.empty())
++    return;
++
++  m_hEvent.Reset();
++  lock.unlock();
++  m_hEvent.Wait(timeout);
++}
++
+ int CDVDMessageQueue::GetLevel(bool dataLevel) const
+ {
+   std::unique_lock lock(m_section);
+diff --git a/xbmc/cores/VideoPlayer/DVDMessageQueue.h b/xbmc/cores/VideoPlayer/DVDMessageQueue.h
+--- a/xbmc/cores/VideoPlayer/DVDMessageQueue.h
++++ b/xbmc/cores/VideoPlayer/DVDMessageQueue.h
+@@ -0,6 +0,7 @@
+   unsigned GetPacketCount(CDVDMsg::Message type);
+   bool ReceivedAbortRequest() { return m_bAbortRequest; }
+   void WaitUntilEmpty();
++  void WaitForMessage(std::chrono::milliseconds timeout);
+ 
+   // non messagequeue related functions
+   bool IsFull() const { return GetLevel(true) == 100; }
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,7 +0,7 @@
+     // check display lost
+     if (m_displayLost)
+     {
+-      CThread::Sleep(50ms);
++      m_displayReset.Wait(50ms);
+       continue;
+     }
+ 
+@@ -0,7 +0,7 @@
+       if (next == CDVDInputStream::NEXTSTREAM_RETRY && !IsBlurayTitleEndHeld())
+       {
+         // a BD-J title end waits on the disc program, which acts on its own thread
+-        CThread::Sleep(IsBlurayTitleEndWait() ? 10ms : 100ms);
++        m_messenger.WaitForMessage(IsBlurayTitleEndWait() ? 10ms : 100ms);
+         continue;
+       }
+ 
+@@ -0,7 +0,7 @@
+           m_VideoPlayerVideo->HasData() ||
+           (m_CurrentVideo.id >= 0 && m_CurrentVideo.packets > 0 && !m_VideoPlayerVideo->IsEOS()))
+       {
+-        CThread::Sleep(100ms);
++        m_messenger.WaitForMessage(100ms);
+         continue;
+       }
+ 
+@@ -0,6 +0,7 @@
+   m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsgBool>(CDVDMsg::GENERAL_PAUSE, false), 1);
+   m_clock.Pause(false);
+   m_displayLost = false;
++  m_displayReset.Set();
+   m_VideoPlayerAudio->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::PLAYER_DISPLAY_RESET), 1);
+   m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::PLAYER_DISPLAY_RESET), 1);
+ }
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+   bool m_updateStreamDetails{false};
+ 
+   std::atomic<bool> m_displayLost;
++  CEvent m_displayReset;
+ 
+   double m_messageQueueTimeSize{0.0};
+ };

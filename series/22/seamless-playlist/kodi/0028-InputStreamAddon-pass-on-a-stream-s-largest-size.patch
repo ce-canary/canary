@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 08:46:53 -0600
+Subject: [PATCH] InputStreamAddon: pass on a stream's largest size
+
+The largest size an add-on declares for a video stream stops at the
+add-on interface. The demux stream and the player's stream info have
+no field for it.
+---
+ xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h               | 2 ++
+ xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp       | 2 ++
+ xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp | 2 ++
+ xbmc/cores/VideoPlayer/DVDStreamInfo.cpp                    | 6 ++++++
+ xbmc/cores/VideoPlayer/DVDStreamInfo.h                      | 2 ++
+ 5 files changed, 14 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h
+@@ -0,6 +0,8 @@
+   bool interlaced = false; // unknown or progressive => false, otherwise true.
+   int iHeight = 0; // height of the stream reported by the demuxer
+   int iWidth = 0; // width of the stream reported by the demuxer
++  int iMaxHeight = 0; // largest height the stream may switch to, 0 if unknown
++  int iMaxWidth = 0; // largest width the stream may switch to, 0 if unknown
+   double fAspect = 0; // display aspect of stream
+   bool bVFR = false; // variable framerate
+   bool bPTSInvalid = false; // pts cannot be trusted (avi's).
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp
+@@ -0,6 +0,8 @@
+       streamVideo->iFpsRate = source->iFpsRate;
+     }
+     streamVideo->iBitRate = source->iBitRate;
++    streamVideo->iMaxWidth = source->iMaxWidth;
++    streamVideo->iMaxHeight = source->iMaxHeight;
+     if (source->extraData)
+     {
+       streamVideo->extraData = source->extraData;
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp
+@@ -0,6 +0,8 @@
+     videoStream->iFpsRate = stream->m_FpsRate;
+     videoStream->iWidth = stream->m_Width;
+     videoStream->iHeight = stream->m_Height;
++    videoStream->iMaxWidth = stream->m_maxWidth;
++    videoStream->iMaxHeight = stream->m_maxHeight;
+     videoStream->fAspect = static_cast<double>(stream->m_Aspect);
+     videoStream->iBitRate = stream->m_BitRate;
+     videoStream->profile = ConvertVideoCodecProfile(stream->m_codecProfile);
+diff --git a/xbmc/cores/VideoPlayer/DVDStreamInfo.cpp b/xbmc/cores/VideoPlayer/DVDStreamInfo.cpp
+--- a/xbmc/cores/VideoPlayer/DVDStreamInfo.cpp
++++ b/xbmc/cores/VideoPlayer/DVDStreamInfo.cpp
+@@ -0,6 +0,8 @@
+   interlaced = false;
+   height   = 0;
+   width    = 0;
++  maxHeight = 0;
++  maxWidth = 0;
+   aspect   = 0.0;
+   vfr      = false;
+   stills   = false;
+@@ -0,6 +0,8 @@
+   interlaced = right.interlaced;
+   height   = right.height;
+   width    = right.width;
++  maxHeight = right.maxHeight;
++  maxWidth = right.maxWidth;
+   aspect   = right.aspect;
+   stills   = right.stills;
+   level    = right.level;
+@@ -0,6 +0,8 @@
+     interlaced = stream->interlaced;
+     height    = stream->iHeight;
+     width     = stream->iWidth;
++    maxHeight = stream->iMaxHeight;
++    maxWidth = stream->iMaxWidth;
+     aspect    = stream->fAspect;
+     vfr       = stream->bVFR;
+     ptsinvalid = stream->bPTSInvalid;
+diff --git a/xbmc/cores/VideoPlayer/DVDStreamInfo.h b/xbmc/cores/VideoPlayer/DVDStreamInfo.h
+--- a/xbmc/cores/VideoPlayer/DVDStreamInfo.h
++++ b/xbmc/cores/VideoPlayer/DVDStreamInfo.h
+@@ -0,6 +0,8 @@
+   bool interlaced;
+   int height; // height of the stream reported by the demuxer
+   int width; // width of the stream reported by the demuxer
++  int maxHeight; // largest height the stream may switch to, 0 if unknown
++  int maxWidth; // largest width the stream may switch to, 0 if unknown
+   double aspect; // display aspect as reported by demuxer
+   bool vfr; // variable framerate
+   bool stills; // there may be odd still frames in video

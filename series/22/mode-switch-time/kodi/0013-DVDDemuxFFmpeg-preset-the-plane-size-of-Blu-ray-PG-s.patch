@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 8 Nov 2026 14:54:07 -0600
+Subject: [PATCH] DVDDemuxFFmpeg: preset the plane size of Blu-ray PG streams
+
+FFmpeg counts a PG stream as unprobed until a display set gives it a
+size. A movie play item whose PG streams have no display set near its
+start read on to the 10 MB probesize, 0.5 to 1.1 s over SMB on two
+UHD movies. Kodi never reads that size, and the play item states the
+graphics plane.
+---
+ .../DVDDemuxers/DVDDemuxFFmpeg.cpp            | 15 ++++++++
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 36 +++++++++++++++++++
+ .../DVDInputStreams/DVDInputStreamBluray.h    |  3 ++
+ 3 files changed, 54 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+@@ -0,6 +0,21 @@
+     if (m_pInput->IsStreamType(DVDSTREAM_TYPE_DVD))
+       av_opt_set_int(m_pFormatContext, "analyzeduration", 500000, 0);
+ 
++#ifdef HAVE_LIBBLURAY
++    // ffmpeg takes a PG size only from a display set and reads on to the probesize for one; the
++    // play item states it
++    if (isBluray)
++    {
++      const auto bluray{std::static_pointer_cast<CDVDInputStreamBluray>(m_pInput)};
++      for (unsigned int i = 0; i < m_pFormatContext->nb_streams; i++)
++      {
++        AVStream* st = m_pFormatContext->streams[i];
++        if (st->codecpar->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE && st->codecpar->width == 0)
++          bluray->GetDemuxerGraphicsPlane(st->id, st->codecpar->width, st->codecpar->height);
++      }
++    }
++#endif
++
+     CLog::Log(LOGDEBUG, "{} - avformat_find_stream_info starting", __FUNCTION__);
+     int iErr = avformat_find_stream_info(m_pFormatContext, NULL);
+     if (iErr < 0)
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,6 +0,42 @@
+ #endif
+ }
+ 
++bool CDVDInputStreamBluray::GetDemuxerGraphicsPlane(int pid, int& width, int& height) const
++{
++  if (!m_demuxerClip || m_demuxerClip->video_stream_count == 0 ||
++      std::ranges::none_of(std::span(m_demuxerClip->pg_streams, m_demuxerClip->pg_stream_count),
++                           [pid](const BLURAY_STREAM_INFO& info)
++                           { return info.pid == static_cast<uint16_t>(pid); }))
++    return false;
++
++  // the plane follows the primary video, except that a UHD play item keeps the HD plane
++  switch (m_demuxerClip->video_streams[0].format)
++  {
++    case BLURAY_VIDEO_FORMAT_480I:
++    case BLURAY_VIDEO_FORMAT_480P:
++      width = 720;
++      height = 480;
++      return true;
++    case BLURAY_VIDEO_FORMAT_576I:
++    case BLURAY_VIDEO_FORMAT_576P:
++      width = 720;
++      height = 576;
++      return true;
++    case BLURAY_VIDEO_FORMAT_720P:
++      width = 1280;
++      height = 720;
++      return true;
++    case BLURAY_VIDEO_FORMAT_1080I:
++    case BLURAY_VIDEO_FORMAT_1080P:
++    case BLURAY_VIDEO_FORMAT_2160P:
++      width = 1920;
++      height = 1080;
++      return true;
++    default:
++      return false;
++  }
++}
++
+ const BLURAY_CLIP_INFO* CDVDInputStreamBluray::GetNextItemClip() const
+ {
+   if (m_bMVCPlayback || m_hasMVCExtension)
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,9 @@
+   //! whether the stream table of the play item the demuxer opened on lists the Dolby Vision
+   //! enhancement layer `pid`, true when libbluray does not tell
+   bool ListsEnhancementLayer(int pid) const;
++  //! the graphics plane of the presentation graphic stream `pid` of the play item the demuxer
++  //! opened on, false when the play item does not list the stream or its video format
++  bool GetDemuxerGraphicsPlane(int pid, int& width, int& height) const;
+   bool IsTitleEnded() const { return m_endedTitleTime > 0; }
+   bool IsTitleEndWait() const { return m_titleEndWait; }
+   //! whether a held title end still waits for its last picture to be presented

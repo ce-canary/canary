@@ -1,0 +1,290 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 18:40:36 -0600
+Subject: [PATCH] AMLCodec: keep the picture over a disc program jump
+
+A BD-J program starts the playlist of a new title after the title
+event, so the old item closes before the next clip is known. That
+close kept only the output, and the video layer went off until the
+next decoder opened.
+---
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  | 68 +++++++++++++------
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.h    |  5 +-
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  |  2 +
+ .../DVDInputStreams/DVDInputStreamBluray.h    |  5 ++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        |  6 +-
+ xbmc/utils/AMLUtils.cpp                       |  4 +-
+ xbmc/utils/AMLUtils.h                         |  5 +-
+ 7 files changed, 66 insertions(+), 29 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,6 +0,8 @@
+ uint64_t armGen{0};
+ std::thread::id armThread;
+ std::optional<NextVideoFormat> armNext;
++// the armed close follows a jump of the disc program to a next item not known yet
++bool armJump{false};
+ // the held output and the decoder that takes or ends it, none while holdOwner is 0
+ bool holdKept{false};
+ uint64_t holdOwner{0};
+@@ -0,6 +0,9 @@
+ bool pictureForced{false};
+ // the mode the core keeps a kept Dolby Vision picture's output in
+ int pictureDvMode{-1};
++// the output hold a picture kept for a next not known yet falls back to at the open of another
++// format, the one its close would have kept without the picture
++CAMLCodec::OutputModule pictureFallback{CAMLCodec::OutputModule::NONE};
+ // the taken picture went off before the first frame of its taker, which plays under the forced
+ // output of the picture's module from then on
+ bool pictureDropped{false};
+@@ -0,12 +0,13 @@
+   }
+ }
+ 
+-void CAMLCodec::ContinuePresentation(const std::optional<NextVideoFormat>& next)
++void CAMLCodec::ContinuePresentation(const std::optional<NextVideoFormat>& next, bool jump)
+ {
+   std::lock_guard<std::mutex> lock(holdMutex);
+   armGen = lastGen;
+   armThread = std::this_thread::get_id();
+   armNext = next;
++  armJump = jump && !next;
+ }
+ 
+ void CAMLCodec::EndPresentation(bool stop)
+@@ -0,7 +0,7 @@
+     }
+     holdOwner = 0;
+   }
+-  if (armed && holdKept && !holdOwner && heldPicture && !NextPlays(heldFormat))
++  if (armed && holdKept && !holdOwner && heldPicture && !armJump && !NextPlays(heldFormat))
+   {
+     ShowMainVideo(false);
+     keptOnScreen = false;
+@@ -0,7 +0,7 @@
+   // it could hold the dv output or runs a VS10 mapping
+   const bool corePicture = dvEnabled && (dvOutputHold || dvPolicy == AMDV_FORCE_OUTPUT_MODE);
+   if (!dropped && (!dvEnabled || corePicture) && !format.interlaced && !format.mvc &&
+-      NextPlays(format))
++      (armJump || NextPlays(format)))
+   {
+     heldFormat = format;
+     heldModule = m_outputModule;
+@@ -0,14 +0,15 @@
+   // SDR otherwise; outside follow source the forced output is the module's output now
+   const int hdrPolicy =
+       dvEnabled ? -1 : AmlDisplay->aml_get_drmProperty("hdr_policy", DRM_MODE_OBJECT_CRTC);
+-  if (hold == Hold::NONE && !dvEnabled &&
+-      PlaysHdr10Output(m_hints, m_output, m_processInfo.GetIsHdr10Plus()) &&
++  const bool hdrOutputHold =
++      !dvEnabled && PlaysHdr10Output(m_hints, m_output, m_processInfo.GetIsHdr10Plus()) &&
+       (!armNext || armNext->hdrType == StreamHdrType::HDR_TYPE_HDR10) &&
+       (m_outputModule == OutputModule::HDR ||
+        (dvPolicy != AMDV_FORCE_OUTPUT_MODE &&
+         (hdrPolicy == HDR_FOLLOW_SOURCE ||
+          (m_ownOutput && AmlDisplay->aml_get_drmProperty("force_output", DRM_MODE_OBJECT_CRTC) ==
+-                             FORCE_OUTPUT_BT2020_PQ)))))
++                             FORCE_OUTPUT_BT2020_PQ))));
++  if (hold == Hold::NONE && hdrOutputHold)
+   {
+     // follow sink without the forced output sees a sink without HDR, so the forced output goes
+     // first
+@@ -0,6 +0,10 @@
+     pictureLayers =
+         kept ? GetCoreLayers(m_hints, m_processInfo.GetDoviIsFEL()) : CoreLayers::SINGLE;
+     pictureForced = kept && m_ownOutput;
++    pictureFallback = hold != Hold::PICTURE || !armJump ? OutputModule::NONE
++                      : dvEnabled && dvOutputHold       ? OutputModule::DV
++                      : hdrOutputHold                   ? OutputModule::HDR
++                                                        : OutputModule::NONE;
+   }
+   CLog::Log(LOGDEBUG, "CAMLCodec::{}: armed close keeps {}, next {}, dv core {}, dv policy {}",
+             __FUNCTION__,
+@@ -0,7 +0,10 @@
+             : hold == Hold::OUTPUT_DV  ? "the dv output"
+             : hold == Hold::OUTPUT_HDR ? "the hdr output"
+                                        : "nothing",
+-            armNext ? "known" : "unknown", dvEnabled, dvPolicy);
++            armNext   ? "known"
++            : armJump ? "unknown after a jump"
++                      : "unknown",
++            dvEnabled, dvPolicy);
+   return hold;
+ }
+ 
+@@ -0,19 +0,23 @@
+   if (!holdKept || holdOwner != m_holdGen)
+     return false;
+ 
+-  const bool take =
+-      heldPicture ? GetHeldFormat(hints, output, m_processInfo.GetIsHdr10Plus()) == heldFormat
+-                  : (heldModule == OutputModule::DV && RunsDolbyVision(hints, output)) ||
+-                        (heldModule == OutputModule::HDR &&
+-                         PlaysHdr10Output(hints, output, m_processInfo.GetIsHdr10Plus()));
++  const bool pictureTake =
++      heldPicture && GetHeldFormat(hints, output, m_processInfo.GetIsHdr10Plus()) == heldFormat;
++  // a picture this open does not match falls back to the output hold of its close
++  const OutputModule outputModule = heldPicture ? pictureFallback : heldModule;
++  const bool take = pictureTake ||
++                    (outputModule == OutputModule::DV && RunsDolbyVision(hints, output)) ||
++                    (outputModule == OutputModule::HDR &&
++                     PlaysHdr10Output(hints, output, m_processInfo.GetIsHdr10Plus()));
+   // the core runs a kept picture with the setup of its open; a picture goes only to an open that
+   // forces the mode alike and has the same layers, a minimum layer also to a full one
+   const CoreLayers layers = GetCoreLayers(hints, doviIsFEL);
+   const bool fullLayer = layers == CoreLayers::FEL;
+   const bool convert =
+-      take && heldPicture && pictureDv &&
+-      (ForcesCoreMode(hints) != pictureForced ||
+-       (layers != pictureLayers && !(pictureLayers == CoreLayers::MEL && fullLayer)));
++      take && heldPicture &&
++      (!pictureTake || (pictureDv && (ForcesCoreMode(hints) != pictureForced ||
++                                      (layers != pictureLayers &&
++                                       !(pictureLayers == CoreLayers::MEL && fullLayer)))));
+   // a picture under the core goes only to a decoder that runs the core
+   const bool takes = take && (!(heldPicture && pictureDv) || RunsDolbyVision(hints, output));
+   CLog::Log(LOGDEBUG, "CAMLCodec::{}: {} the held {}", __FUNCTION__, takes ? "takes" : "releases",
+@@ -0,20 +0,28 @@
+ 
+   if (convert)
+   {
++    const OutputModule module = pictureTake ? OutputModule::DV : pictureFallback;
++    auto* AmlDisplay =
++        static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
+     // the mode is stored only once the policy is forced
+-    if (heldModule != OutputModule::DV)
++    if (module == OutputModule::DV && heldModule != OutputModule::DV)
+     {
+-      auto* AmlDisplay =
+-          static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
+       AmlDisplay->aml_set_drmProperty("dv_policy", DRM_MODE_OBJECT_CRTC, AMDV_FORCE_OUTPUT_MODE);
+       AmlDisplay->aml_set_drmProperty("dv_mode", DRM_MODE_OBJECT_CRTC, pictureDvMode);
+     }
++    else if (module == OutputModule::HDR && heldModule != OutputModule::HDR &&
++             AmlDisplay->aml_get_drmProperty("hdr_policy", DRM_MODE_OBJECT_CRTC) ==
++                 HDR_FOLLOW_SOURCE)
++    {
++      AmlDisplay->aml_set_drmProperty("force_output", DRM_MODE_OBJECT_CRTC, FORCE_OUTPUT_BT2020_PQ);
++      AmlDisplay->aml_set_drmProperty("hdr_policy", DRM_MODE_OBJECT_CRTC, HDR_FOLLOW_SINK);
++    }
+     ShowMainVideo(false);
+     keptOnScreen = false;
+-    heldModule = OutputModule::DV;
++    heldModule = module;
+     heldPicture = false;
+-    CLog::Log(LOGDEBUG, "CAMLCodec::{}: the picture goes off, the taker keeps the dv output",
+-              __FUNCTION__);
++    CLog::Log(LOGDEBUG, "CAMLCodec::{}: the picture goes off, the taker keeps the {} output",
++              __FUNCTION__, module == OutputModule::DV ? "dv" : "hdr");
+   }
+ 
+   m_outputModule = heldModule;
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+@@ -0,8 +0,9 @@
+ 
+   //! The next close of the newest decoder, on this thread, hands its output on to the decoder of
+   //! the next item, which plays under it if it plays the same format; with a known `next` it
+-  //! also keeps the last picture until the first frame of a next item of that format
+-  static void   ContinuePresentation(const std::optional<NextVideoFormat>& next);
++  //! also keeps the last picture until the first frame of a next item of that format, and after
++  //! a `jump` of the disc program to a next not known yet until the open of the next decoder
++  static void   ContinuePresentation(const std::optional<NextVideoFormat>& next, bool jump = false);
+   //! Ends a hold that no decoder claimed; a `stop` also disarms the next close and ends a hold
+   //! a decoder claimed but did not take
+   static void   EndPresentation(bool stop);
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,6 +0,7 @@
+ CDVDInputStream::ENextStream CDVDInputStreamBluray::NextStream()
+ {
+   m_nextClip = nullptr;
++  m_nextJump = false;
+   if (!m_navmode || m_aborted || m_hold == HOLD_ERROR || HasGivenUpReading())
+     return NEXTSTREAM_NONE;
+ 
+@@ -0,6 +0,7 @@
+   // a title end before the next stream reports a picture waits for none of the old one
+   m_lastPictureTime = -1;
+   m_nextClip = clipKnown && m_clip && !programStop ? (joinClip ? joinClip : m_clip) : nullptr;
++  m_nextJump = programJump && !programStop && !m_nextClip;
+   m_nextItemInPlaylist = !m_playlistLeft;
+   m_nextItemSeekTime.reset();
+   if (m_nextItemInPlaylist && m_itemSeeked)
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,10 @@
+   //! the clip the item opened by the last NextStream starts with, when its events named it
+   const BLURAY_CLIP_INFO* GetNextItemClip() const;
+ 
++  //! whether the item opened by the last NextStream follows a jump of the disc program that has
++  //! not named its clip yet
++  bool NextItemFollowsJump() const { return m_nextJump; }
++
+   //! whether the item opened by the last NextStream continues the playlist of the item before it
+   bool NextItemContinuesPlaylist() const { return m_nextItemInPlaylist; }
+ 
+@@ -0,6 +0,7 @@
+     int64_t m_reportedTime{-1};
+     int64_t m_playedItemEnd{-1};
+     const BLURAY_CLIP_INFO* m_nextClip{nullptr};
++    bool m_nextJump{false};
+     bool m_playlistLeft{false};
+     bool m_nextItemInPlaylist{false};
+     bool m_itemSeeked{false};
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,8 +0,10 @@
+         CloseStream(m_CurrentAudio, true);
+ #if defined(HAVE_LIBBLURAY)
+         if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY) && !m_bAbortRequest)
+-          aml_continue_presentation(
+-              std::static_pointer_cast<CDVDInputStreamBluray>(m_pInputStream)->GetNextItemClip());
++        {
++          const auto bluray = std::static_pointer_cast<CDVDInputStreamBluray>(m_pInputStream);
++          aml_continue_presentation(bluray->GetNextItemClip(), bluray->NextItemFollowsJump());
++        }
+ #endif
+         CloseStream(m_CurrentVideo, true);
+         ReportBlurayItemPlayedOut();
+diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
+--- a/xbmc/utils/AMLUtils.cpp
++++ b/xbmc/utils/AMLUtils.cpp
+@@ -0,14 +0,14 @@
+ } // namespace
+ #endif
+ 
+-void aml_continue_presentation(const BLURAY_CLIP_INFO* next)
++void aml_continue_presentation(const BLURAY_CLIP_INFO* next, bool jump)
+ {
+   std::optional<NextVideoFormat> format;
+ #if defined(HAVE_LIBBLURAY)
+   if (next)
+     format = GetClipVideoFormat(*next);
+ #endif
+-  CAMLCodec::ContinuePresentation(format);
++  CAMLCodec::ContinuePresentation(format, jump);
+ }
+ 
+ void aml_continue_presentation(const CDVDStreamInfo& next)
+diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
+--- a/xbmc/utils/AMLUtils.h
++++ b/xbmc/utils/AMLUtils.h
+@@ -0,8 +0,9 @@
+ bool aml_display_reset_pending();
+ // when the last delayed display reset ended, the clock's epoch when none ran
+ std::chrono::steady_clock::time_point aml_display_reset_end();
+-// `next` is the clip of the next item, nullptr when unknown
+-void aml_continue_presentation(const BLURAY_CLIP_INFO* next);
++// `next` is the clip of the next item, nullptr when unknown; `jump` when the disc program jumped
++// to a next it has not named yet
++void aml_continue_presentation(const BLURAY_CLIP_INFO* next, bool jump);
+ // `next` is the stream the next decoder opens with
+ void aml_continue_presentation(const CDVDStreamInfo& next);
+ void aml_end_presentation(bool stop);

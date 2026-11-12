@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 8 Nov 2026 10:10:42 -0600
+Subject: [PATCH] VideoPlayer: do not cache a stream that is starting
+ mid-playback
+
+The file underrun check counted a stream that had not synced yet as
+stalled. At a clip join the reopened streams start empty, so the player
+went to caching while the decoder opened. Whether it did depended on a
+3 s timer from the previous sync, so the buffering indicator flashed at
+some joins and not others.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,7 +0,13 @@
+           if (m_VideoPlayerAudio->GetLevel() <= 50 &&
+               m_processInfo->GetLevelVQ() <= 50)
+           {
+-            SetCaching(CACHESTATE_FULL);
++            // once playback has started, a stream that has not synced yet is starting, not stalled
++            if (!m_State.streamsReady ||
++                (m_CurrentAudio.id >= 0 && m_VideoPlayerAudio->IsStalled() &&
++                 m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_INSYNC) ||
++                (m_CurrentVideo.id >= 0 && m_VideoPlayerVideo->IsStalled() &&
++                 m_CurrentVideo.syncState == IDVDStreamPlayer::SYNC_INSYNC))
++              SetCaching(CACHESTATE_FULL);
+           }
+           else if (m_CurrentAudio.id >= 0 && m_CurrentAudio.inited &&
+                    m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_INSYNC &&

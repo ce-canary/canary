@@ -1,0 +1,261 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 11 Nov 2026 20:23:19 -0600
+Subject: [PATCH] OverlayRenderer: draw SDR PGS at the video's SDR white
+
+With the GUI composited instead of converted by the kernel, an SDR PGS
+is drawn at the GUI peak, not at the SDR white of the video under it.
+Under sdr2hdr it is then several times dimmer than the picture.
+---
+ .../Overlay/DVDOverlayCodecFFmpeg.cpp         |  3 ++
+ .../DVDCodecs/Overlay/DVDOverlayImage.h       |  3 ++
+ .../VideoRenderers/OverlayRenderer.cpp        | 24 ++++++++-
+ .../VideoRenderers/OverlayRenderer.h          |  3 ++
+ .../VideoRenderers/OverlayRendererUtil.cpp    | 51 +++++++++++++++++++
+ .../VideoRenderers/OverlayRendererUtil.h      | 10 ++++
+ .../VideoRenderers/RenderManager.cpp          |  3 ++
+ 7 files changed, 95 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayCodecFFmpeg.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayCodecFFmpeg.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayCodecFFmpeg.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayCodecFFmpeg.cpp
+@@ -0,6 +0,9 @@
+     overlay->m_isHDROverlay = m_pCodecContext->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE &&
+                               m_pCodecContext->colorspace == AVCOL_SPC_BT2020_NCL &&
+                               m_pCodecContext->color_trc == AVCOL_TRC_SMPTE2084;
++    overlay->m_isSDRPgs = m_pCodecContext->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE &&
++                          m_pCodecContext->color_trc != AVCOL_TRC_SMPTE2084 &&
++                          m_pCodecContext->color_trc != AVCOL_TRC_ARIB_STD_B67;
+     overlay->source_width = m_width;
+     overlay->source_height = m_height;
+ 
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayImage.h b/xbmc/cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayImage.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayImage.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayImage.h
+@@ -0,6 +0,7 @@
+     source_width = src.source_width;
+     source_height = src.source_height;
+     m_isHDROverlay = src.m_isHDROverlay;
++    m_isSDRPgs = src.m_isSDRPgs;
+ 
+     pixels.resize(sub_h * linesize);
+ 
+@@ -0,6 +0,8 @@
+ 
+   // pixels are already HDR, matching video's colorimetry
+   bool m_isHDROverlay{false};
++  // pgs palette in sdr levels
++  bool m_isSDRPgs{false};
+ 
+   int linesize{0};
+   int x{0};
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp
+@@ -0,10 +0,11 @@
+ void CRenderer::CheckCompositeState()
+ {
+   const bool hdrComposite = CServiceBroker::GetWinSystem()->IsHdrComposite();
+-  if (hdrComposite == m_hdrComposite)
++  if (hdrComposite == m_hdrComposite && m_videoMapping == m_cacheMapping)
+     return;
+ 
+   m_hdrComposite = hdrComposite;
++  m_cacheMapping = m_videoMapping;
+   ReleaseCache();
+ }
+ 
+@@ -0,6 +0,13 @@
+   m_stereomode = stereomode;
+ }
+ 
++void CRenderer::SetVideoMapping(const HdrOverlayMapping& mapping)
++{
++  std::unique_lock lock(m_section);
++
++  m_videoMapping = mapping;
++}
++
+ void CRenderer::SetSubtitleVerticalPosition(const int value, bool save)
+ {
+   std::unique_lock lock(m_section);
+@@ -0,7 +0,19 @@
+   }
+ 
+   if (o.IsOverlayType(DVDOVERLAY_TYPE_IMAGE))
+-    r = COverlay::Create(static_cast<CDVDOverlayImage&>(o), m_rs);
++  {
++    const CDVDOverlayImage& image = static_cast<CDVDOverlayImage&>(o);
++    // an sdr pgs is drawn like an authored pq one, at the video's sdr white
++    if (image.m_isSDRPgs && ShouldConvertSDRPaletteToPQ(m_videoMapping))
++    {
++      CDVDOverlayImage pq(image);
++      ConvertSDRPaletteToPQ(pq.palette, m_videoMapping.sdrWhite, m_videoMapping.sdrGamma);
++      pq.m_isHDROverlay = true;
++      r = COverlay::Create(pq, m_rs);
++    }
++    else
++      r = COverlay::Create(image, m_rs);
++  }
+   else if (o.IsOverlayType(DVDOVERLAY_TYPE_SPU))
+     r = COverlay::Create(static_cast<CDVDOverlaySpu&>(o));
+ 
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h
+@@ -0,6 +0,7 @@
+     bool HasVisibleOverlay(int idx) const;
+     void SetVideoRect(CRect &source, CRect &dest, CRect &view);
+     void SetStereoMode(const std::string &stereomode);
++    void SetVideoMapping(const HdrOverlayMapping& mapping);
+ 
+     /*!
+      * \brief Set the subtitle vertical position,
+@@ -0,6 +0,8 @@
+     std::map<unsigned int, std::shared_ptr<COverlay>> m_textureCache;
+     static unsigned int m_textureid;
+     bool m_hdrComposite{false};
++    HdrOverlayMapping m_videoMapping;
++    HdrOverlayMapping m_cacheMapping;
+     CRect m_rv; // Frame size
+     CRect m_rs; // Source size
+     CRect m_rd; // Video size, may be influenced by video settings (e.g. zoom)
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRendererUtil.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRendererUtil.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRendererUtil.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRendererUtil.cpp
+@@ -0,6 +0,7 @@
+ 
+ #include "OverlayRendererUtil.h"
+ 
++#include "BaseRenderer.h"
+ #include "ServiceBroker.h"
+ #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayImage.h"
+ #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlaySSA.h"
+@@ -0,6 +0,11 @@
+ #include <cmath>
+ #include <cstring>
+ 
++extern "C"
++{
++#include <libavutil/pixfmt.h>
++}
++
+ namespace OVERLAY
+ {
+ 
+@@ -0,6 +0,11 @@
+   return !destinationIsPQ;
+ }
+ 
++bool ShouldConvertSDRPaletteToPQ(const HdrOverlayMapping& mapping)
++{
++  return mapping.transfer == AVCOL_TRC_SMPTE2084 && mapping.sdrWhite > 0.0f;
++}
++
+ namespace
+ {
+ constexpr float ST2084_m1 = 2610.0f / (4096.0f * 4.0f);
+@@ -0,6 +0,13 @@
+   return std::pow(num / den, 1.0f / ST2084_m1);
+ }
+ 
++// linear (1.0 == 10000 nits) -> PQ code value (0-1)
++float EncodePQ(float y)
++{
++  const float p = std::pow(std::clamp(y, 0.0f, 1.0f), ST2084_m1);
++  return std::pow((ST2084_c1 + ST2084_c2 * p) / (1.0f + ST2084_c3 * p), ST2084_m2);
++}
++
+ float LinearToSrgbComponent(float c)
+ {
+   c = std::clamp(c, 0.0f, 1.0f);
+@@ -0,6 +0,39 @@
+   }
+ }
+ 
++void ConvertSDRPaletteToPQ(std::vector<uint32_t>& palette, float whiteNits, float gamma)
++{
++  // linear BT.709 -> linear BT.2020 primaries, ITU-R BT.2087
++  static constexpr float BT709_TO_2020[3][3] = {
++      {0.627403896f, 0.329283039f, 0.043313065f},
++      {0.069097289f, 0.919540395f, 0.011362316f},
++      {0.016391439f, 0.088013308f, 0.895595253f},
++  };
++
++  const float whiteScale = whiteNits / 10000.0f;
++
++  for (uint32_t& entry : palette)
++  {
++    const int a = (entry >> PIXEL_ASHIFT) & 0xff;
++    const float linear709[3] = {
++        std::pow(((entry >> PIXEL_RSHIFT) & 0xff) / 255.0f, gamma) * whiteScale,
++        std::pow(((entry >> PIXEL_GSHIFT) & 0xff) / 255.0f, gamma) * whiteScale,
++        std::pow(((entry >> PIXEL_BSHIFT) & 0xff) / 255.0f, gamma) * whiteScale,
++    };
++
++    int pq[3];
++    for (int i = 0; i < 3; i++)
++      pq[i] = static_cast<int>(EncodePQ(BT709_TO_2020[i][0] * linear709[0] +
++                                        BT709_TO_2020[i][1] * linear709[1] +
++                                        BT709_TO_2020[i][2] * linear709[2]) *
++                                   255.0f +
++                               0.5f);
++
++    entry = (a << PIXEL_ASHIFT) | (pq[0] << PIXEL_RSHIFT) | (pq[1] << PIXEL_GSHIFT) |
++            (pq[2] << PIXEL_BSHIFT);
++  }
++}
++
+ int GetStereoscopicDepth(bool isPgs, int subtitleDepth)
+ {
+   auto stereo_mode = CServiceBroker::GetWinSystem()->GetGfxContext().GetStereoMode();
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRendererUtil.h b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRendererUtil.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRendererUtil.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRendererUtil.h
+@@ -0,6 +0,7 @@
+ class CDVDOverlayImage;
+ class CDVDOverlaySpu;
+ class CDVDOverlaySSA;
++struct HdrOverlayMapping;
+ typedef struct ass_image ASS_Image;
+ 
+ namespace OVERLAY
+@@ -0,6 +0,15 @@
+ //! untouched.
+ void ConvertPQPaletteToSRGB(std::vector<uint32_t>& palette);
+ 
++//! True when an SDR PGS palette is drawn over the video at the video's SDR
++//! white instead of in the GUI: the GUI is composited to PQ and the platform
++//! knows that white.
++bool ShouldConvertSDRPaletteToPQ(const HdrOverlayMapping& mapping);
++
++//! Converts a PGS palette in place from BT.709 (power law gamma, black at zero)
++//! to BT.2020 ST.2084 (PQ), with white at whiteNits. Alpha is untouched.
++void ConvertSDRPaletteToPQ(std::vector<uint32_t>& palette, float whiteNits, float gamma);
++
+ //! paletteOverride, when non-null, is used in place of o.palette - e.g.
+ //! a palette already converted by ConvertPQPaletteToSRGB() above. o.pixels
+ //! (the per-pixel palette indices) is always taken from o itself either way.
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,6 +0,7 @@
+     if (!m_presenting)
+       CheckEnableClockSync();
+   }
++  HdrOverlayMapping videoMapping;
+   {
+     std::unique_lock lock2(m_presentlock);
+ 
+@@ -0,9 +0,11 @@
+       }
+     }
+ 
++    videoMapping = m_pRenderer->GetOverlayMapping(GuiSource());
+     m_playerPort->UpdateRenderBuffers(m_queued.size(), m_discard.size(), m_free.size());
+     m_bRenderGUI = true;
+   }
++  m_overlays.SetVideoMapping(videoMapping);
+ 
+   m_overlays.PrepareMenu();
+ 

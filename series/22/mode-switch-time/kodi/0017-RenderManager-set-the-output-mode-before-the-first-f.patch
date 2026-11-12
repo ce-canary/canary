@@ -1,0 +1,226 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 8 Nov 2026 16:01:59 -0600
+Subject: [PATCH] RenderManager: set the output mode before the first frame
+
+The mode set for a new stream waits for the kernel's video started
+flag. HDR and DV packets start on the GUI mode, the set drops them and
+they start again, and the first frames play on the old refresh rate.
+An earlier set needs the meson_hdmi same-mode check and its amdv
+output query, which decide the DV link format before the first frame.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        |  5 ++
+ .../VideoRenderers/RenderManager.cpp          | 49 ++++++++++++++-----
+ .../VideoRenderers/RenderManager.h            |  7 ++-
+ xbmc/utils/AMLUtils.cpp                       | 12 -----
+ xbmc/utils/AMLUtils.h                         |  1 -
+ 5 files changed, 47 insertions(+), 27 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,8 @@
+       break;
+     case StreamType::VIDEO:
+       res = OpenVideoStream(hint, reset);
++      if (!res)
++        m_renderManager.VideoStreamClosed();
+       // a presentation kept for this stream ends when no AML decoder claimed it
+       aml_end_presentation(false);
+       // Set the m_bFullScreenVideo flag now, before streamsReady, so the
+@@ -0,6 +0,9 @@
+     player->CloseStream(bWaitForBuffers);
+   }
+ 
++  if (current.type == StreamType::VIDEO)
++    m_renderManager.VideoStreamClosed();
++
+   current.Clear();
+   return true;
+ }
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,9 +0,6 @@
+ bool CRenderManager::Configure(const VideoPicture& picture, float fps, unsigned int orientation, int buffers)
+ {
+ 
+-  if (m_amdv_wait_delay == -1)
+-    m_amdv_wait_delay = aml_amdv_wait(picture.hdrType);
+-
+   // check if something has changed
+   {
+     std::unique_lock lock(m_statelock);
+@@ -0,6 +0,7 @@
+     if (m_pRenderer != nullptr && m_picture.IsSameParams(picture) && m_orientation == orientation &&
+         m_NumberBuffers == buffers && !m_pRenderer->ConfigChanged(picture))
+     {
++      m_awaitConfigure = false;
+       if (m_fps != fps)
+       {
+         CLog::Log(LOGDEBUG, "CRenderManager::Configure - framerate changed from {:4.2f} to {:4.2f}",
+@@ -0,6 +0,7 @@
+     m_orientation = orientation;
+     m_NumberBuffers  = buffers;
+     m_renderState = STATE_CONFIGURING;
++    m_awaitConfigure = false;
+     m_stateEvent.Reset();
+     m_clockSync.Reset();
+     m_dvdClock.SetVsyncAdjust(0);
+@@ -0,11 +0,23 @@
+     m_presentevent.notifyAll();
+   }
+ 
+-  if (!m_stateEvent.Wait(std::chrono::seconds(m_render_timeout)))
++  // a display mode switch the render loop runs meanwhile does not count against the timeout
++  const std::chrono::seconds timeout(m_render_timeout);
++  auto deadline = std::chrono::steady_clock::now() + timeout;
++  while (!m_stateEvent.Wait(std::chrono::duration_cast<std::chrono::milliseconds>(
++      deadline - std::chrono::steady_clock::now())))
+   {
+-    CLog::Log(LOGWARNING, "CRenderManager::Configure - timeout waiting for configure");
+     std::unique_lock lock(m_statelock);
+-    return false;
++    const auto now = std::chrono::steady_clock::now();
++    if (m_switching)
++      deadline = now + timeout;
++    else
++      deadline = std::max(deadline, m_switchEnd + timeout);
++    if (deadline <= now)
++    {
++      CLog::Log(LOGWARNING, "CRenderManager::Configure - timeout waiting for configure");
++      return false;
++    }
+   }
+ 
+   std::unique_lock lock(m_statelock);
+@@ -0,6 +0,10 @@
+       StopPresentThread();
+       if (!Configure())
+         return;
++      // the video thread waits for m_stateEvent, so no frame of this stream is queued yet
++      const CGraphicContext& gfx = CServiceBroker::GetWinSystem()->GetGfxContext();
++      if (gfx.IsFullScreenVideo() && gfx.IsFullScreenRoot())
++        SwitchResolution();
+       StartPresentThread();
+       // the release lead a waiter reads depends on whether the vsync presenter runs
+       m_stateEvent.Set();
+@@ -0,15 +0,14 @@
+     {
+       auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - m_videostarted);
+ 
+-      if (m_amdv_wait_delay == -1)
+-        return;
+-
+-      if (m_amdv_wait_delay > 0)
+       {
+-        m_amdv_wait_delay--;
+-        return;
++        // a switch for a new stream runs at its Configure
++        std::unique_lock lock(m_statelock);
++        if (m_renderState != STATE_CONFIGURED || m_awaitConfigure)
++          return;
+       }
+-      else if (aml_video_started() || elapsed > std::chrono::seconds(m_render_timeout))
++
++      if (aml_video_started() || elapsed > std::chrono::seconds(m_render_timeout))
+         SwitchResolution();
+     }
+   }
+@@ -0,6 +0,7 @@
+       m_pRenderer->Update();
+     std::unique_lock lock(m_statelock);
+     m_switching = false;
++    m_switchEnd = std::chrono::steady_clock::now();
+     if (m_presenting)
+       m_pRenderer->WakeVsyncPresent();
+   }
+@@ -0,11 +0,19 @@
+     m_picture.iWidth = width;
+     m_picture.iHeight = height;
+     m_picture.stereoMode = stereomode;
++    m_awaitConfigure = true;
+   }
+   m_videostarted = std::chrono::system_clock::now();
+   m_bTriggerUpdateResolution = true;
+ }
+ 
++void CRenderManager::VideoStreamClosed()
++{
++  std::unique_lock lock(m_statelock);
++
++  m_awaitConfigure = false;
++}
++
+ void CRenderManager::ToggleDebug()
+ {
+   m_renderDebug = !m_renderDebug;
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -0,6 +0,7 @@
+   RESOLUTION GetResolution();
+   void UpdateResolution();
+   void TriggerUpdateResolution(float fps, int width, int height, std::string &stereomode);
++  void VideoStreamClosed();
+   void SetViewMode(int iViewMode);
+   void PreInit();
+   void UnInit();
+@@ -0,6 +0,9 @@
+   CCriticalSection m_presentlock;
+   CCriticalSection m_datalock;
+   std::atomic_bool m_bTriggerUpdateResolution{false};
++  //! Set with the stream hints before their trigger; cleared under m_statelock once the
++  //! stream's first picture reaches Configure, or when the stream closes
++  std::atomic_bool m_awaitConfigure{false};
+   bool m_bRenderGUI = true;
+   bool m_renderedDebugOverlay = false;
+   bool m_renderDebug = false;
+@@ -0,7 +0,6 @@
+   unsigned int m_orientation = 0;
+   int m_NumberBuffers = 0;
+   int m_lateframes = -1;
+-  int m_amdv_wait_delay = -1;
+   double m_presentpts = 0.0;
+   EPRESENTSTEP m_presentstep = PRESENT_IDLE;
+   XbmcThreads::EndTime<> m_presentTimer;
+@@ -0,6 +0,8 @@
+   //! Set by the render loop around a display mode switch, under m_statelock; the vsync thread
+   //! does not pick meanwhile
+   bool m_switching{false};
++  //! Under m_statelock: when the last display mode switch ended
++  std::chrono::steady_clock::time_point m_switchEnd{};
+   int m_guiPresentSource{-1};
+   //! Vsync thread, under m_presentlock: the frame on the video plane when a GUI flip made now
+   //! latches
+diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
+--- a/xbmc/utils/AMLUtils.cpp
++++ b/xbmc/utils/AMLUtils.cpp
+@@ -0,18 +0,6 @@
+   CAMLCodec::DropKeptPicture(taken);
+ }
+ 
+-int aml_amdv_wait(StreamHdrType hdrType)
+-{
+-  if (hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)
+-  {
+-    CSysfsPath amdv_wait_delay{"/sys/module/aml_media/parameters/amdv_wait_delay"};
+-    if (amdv_wait_delay.Exists())
+-      return amdv_wait_delay.Get<int>().value_or(0);
+-  }
+-
+-  return 0;
+-}
+-
+ void aml_set_3d_video_mode(unsigned int mode, bool framepacking_support, int view_mode)
+ {
+   int fd;
+diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
+--- a/xbmc/utils/AMLUtils.h
++++ b/xbmc/utils/AMLUtils.h
+@@ -0,5 +0,4 @@
+ void aml_end_presentation(bool stop);
+ // `taken` also drops a picture a next decoder took before its first frame
+ void aml_drop_kept_picture(bool taken);
+-int aml_amdv_wait(StreamHdrType hdrType);
+ void aml_set_3d_video_mode(unsigned int mode, bool framepacking_support, int view_mode);

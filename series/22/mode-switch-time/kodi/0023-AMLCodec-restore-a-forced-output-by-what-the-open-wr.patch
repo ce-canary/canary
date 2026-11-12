@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 08:24:12 -0600
+Subject: [PATCH] AMLCodec: restore a forced output by what the open wrote
+
+A close restored the forced output of the HDR module only while sdr2hdr
+or hdr2sdr was on at close time. Turning the setting off during
+playback left the output forced past the close.
+---
+ xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,6 +0,8 @@
+ // as a pre-check
+ std::atomic<bool> keptOnScreen{false};
+ HeldFormat heldFormat;
++// an open forced the output of the HDR module, which no close has restored since
++std::atomic<bool> outputForced{false};
+ 
+ // whether the next item is known to play `format`
+ bool NextPlays(const HeldFormat& format)
+@@ -0,6 +0,7 @@
+       outputWrites.emplace_back("dv_policy", AMDV_FOLLOW_SINK);
+       outputWrites.emplace_back("hdr_policy", AMDV_FOLLOW_SINK);
+       outputWrites.emplace_back("force_output", forceOutput);
++      outputForced = true;
+       m_outputModule = OutputModule::NONE;
+       m_ownOutput = true;
+       m_handback = false;
+@@ -0,8 +0,7 @@
+ 
+     writes.emplace_back("dv_enable", 0);
+   }
+-  else if (CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_SDR2HDR) ||
+-           CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_HDR2SDR))
++  else if (outputForced.exchange(false))
+   {
+     writes.emplace_back("dv_policy", AMDV_FOLLOW_SOURCE);
+     writes.emplace_back("hdr_policy", HDR_FOLLOW_SOURCE);
+@@ -0,6 +0,7 @@
+   {
+     AmlDisplay->aml_set_drmProperty("hdr_policy", DRM_MODE_OBJECT_CRTC, HDR_FOLLOW_SOURCE);
+     AmlDisplay->aml_set_drmProperty("force_output", DRM_MODE_OBJECT_CRTC, FORCE_OUTPUT_DISABLED);
++    outputForced = false;
+   }
+   CLog::Log(LOGDEBUG, "CAMLCodec::{}: hands the output back, gate {}", __FUNCTION__, gate);
+   m_outputModule = OutputModule::NONE;
+@@ -0,6 +0,7 @@
+   {
+     AmlDisplay->aml_set_drmProperty("hdr_policy", DRM_MODE_OBJECT_CRTC, HDR_FOLLOW_SOURCE);
+     AmlDisplay->aml_set_drmProperty("force_output", DRM_MODE_OBJECT_CRTC, FORCE_OUTPUT_DISABLED);
++    outputForced = false;
+   }
+ 
+   if (dvEnabled && dvPolicy == AMDV_FORCE_OUTPUT_MODE)

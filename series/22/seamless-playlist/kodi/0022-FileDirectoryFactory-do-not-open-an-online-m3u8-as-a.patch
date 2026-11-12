@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 00:46:30 -0600
+Subject: [PATCH] FileDirectoryFactory: do not open an online m3u8 as a
+ playlist file
+
+The factory takes every path with a playlist extension as a playlist
+file. For an online m3u8 the playlist factory then types the stream
+with a HEAD request on a fresh item, even when the played item has
+content lookup off, and still opens no playlist for an hls stream.
+---
+ xbmc/filesystem/FileDirectoryFactory.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/filesystem/FileDirectoryFactory.cpp b/xbmc/filesystem/FileDirectoryFactory.cpp
+--- a/xbmc/filesystem/FileDirectoryFactory.cpp
++++ b/xbmc/filesystem/FileDirectoryFactory.cpp
+@@ -0,7 +0,9 @@
+     IFileDirectory* pDir=new CSmartPlaylistDirectory;
+     return pDir; // treat as directory
+   }
+-  if (CPlayListFactory::IsPlaylist(url))
++  // online m3u8 files are hls streams, which do not open as a playlist
++  if (CPlayListFactory::IsPlaylist(url) &&
++      !(URIUtils::IsInternetStream(url) && url.HasExtension(".m3u8")))
+   { // Playlist file
+     // currently we only return the directory if it contains
+     // more than one file.  Reason is that .pls and .m3u may be used

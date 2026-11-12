@@ -1,0 +1,160 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 8 Nov 2026 13:46:54 -0600
+Subject: [PATCH] ActiveAE: drain the sink only while a stream tail plays
+
+A lost display and a sink reopen both drained the old sink first. On
+an HDMI sink that held a mode change or a start back by about 200 ms
+on ALSA while keep-alive silence or a muted start played out. Only the
+tail of a stream that just ended needs to play out.
+---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 23 ++++++++++++++++---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.h   |  3 ++-
+ .../Engines/ActiveAE/ActiveAESink.cpp         |  8 +++----
+ .../Engines/ActiveAE/ActiveAESink.h           |  3 ++-
+ 4 files changed, 28 insertions(+), 9 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,7 +0,8 @@
+         case CActiveAEControlProtocol::DISPLAYLOST:
+           if (m_sink.GetDeviceType(m_mode == MODE_PCM ? m_settings.device : m_settings.passthroughdevice) == AE_DEVTYPE_HDMI)
+           {
+-            UnconfigureSink();
++            // the display waits for this reply before it changes mode
++            UnconfigureSink(!m_streamTailEnd.IsTimePast());
+             m_stats.SetSuspended(true);
+             m_state = AE_TOP_CONFIGURED_SUSPEND;
+             m_extDeferData = true;
+@@ -0,6 +0,13 @@
+       ++it;
+   }
+ 
++  if (m_streams.empty())
++  {
++    AEDelayStatus status;
++    m_stats.GetDelay(status);
++    m_streamTailEnd.Set(std::chrono::milliseconds(static_cast<int>(status.GetDelay() * 1000)));
++  }
++
+   ClearDiscardedBuffers();
+ }
+ 
+@@ -0,6 +0,8 @@
+   config.stats = &m_stats;
+   config.device = (m_sinkRequestFormat.m_dataFormat == AE_FMT_RAW) ? &m_settings.passthroughdevice :
+                                                                      &m_settings.device;
++  // drain only while the device still plays the tail of a stream
++  config.drain = !m_streamTailEnd.IsTimePast();
+ 
+   // send message to sink
+   m_sink.m_controlPort.SendOutMessage(CSinkControlProtocol::SETNOISETYPE, &m_settings.streamNoise, sizeof(bool));
+@@ -0,11 +0,12 @@
+   }
+ }
+ 
+-void CActiveAE::UnconfigureSink()
++void CActiveAE::UnconfigureSink(bool drain)
+ {
+   // send message to sink
+   Message *reply;
+-  if (m_sink.m_controlPort.SendOutMessageSync(CSinkControlProtocol::UNCONFIGURE, &reply, 2s))
++  if (m_sink.m_controlPort.SendOutMessageSync(CSinkControlProtocol::UNCONFIGURE, &reply, 2s,
++                                              &drain, sizeof(bool)))
+   {
+     bool success = reply->signal == CSinkControlProtocol::ACC;
+     if (!success)
+@@ -0,7 +0,13 @@
+ 
+           //! @todo find better solution for this gapless bites audiophile
+           if (m_settings.config == AE_CONFIG_MATCH)
++          {
++            AEDelayStatus status;
++            m_stats.GetDelay(status);
++            m_streamTailEnd.Set(
++                std::chrono::milliseconds(static_cast<int>(status.GetDelay() * 1000)));
+             Configure(&slave->m_format);
++          }
+ 
+           (*it)->m_streamSlave = NULL;
+         }
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
+@@ -0,7 +0,7 @@
+   bool InitSink();
+   bool SendYieldDevice(bool yield);
+   void DrainSink();
+-  void UnconfigureSink();
++  void UnconfigureSink(bool drain = true);
+   void Dispose();
+   void LoadSettings(AEAudioFormat *format = NULL);
+   void ValidateOutputDevices(bool saveChanges);
+@@ -0,6 +0,7 @@
+   unsigned int m_extErrorRetries{0};
+   bool m_extDrain;
+   XbmcThreads::EndTime<> m_extDrainTimer;
++  XbmcThreads::EndTime<> m_streamTailEnd;
+   std::chrono::milliseconds m_extKeepConfig;
+   bool m_extHoldConfig{false};
+   AEAudioFormat m_extHoldFormat;
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
+@@ -0,7 +0,7 @@
+           m_extSilenceTimer.Set(0ms);
+           m_extStreaming = false;
+           ReturnBuffers();
+-          OpenSink();
++          OpenSink(!data || data->drain);
+ 
+           if (!m_extError)
+           {
+@@ -0,7 +0,7 @@
+ 
+         case CSinkControlProtocol::UNCONFIGURE:
+           ReturnBuffers();
+-          CloseSink();
++          CloseSink(*reinterpret_cast<bool*>(msg->data));
+           m_state = S_TOP_UNCONFIGURED;
+           msg->Reply(CSinkControlProtocol::ACC);
+           return;
+@@ -0,7 +0,7 @@
+   }
+ }
+ 
+-void CActiveAESink::OpenSink()
++void CActiveAESink::OpenSink(bool drain)
+ {
+   bool passthrough = (m_requestedFormat.m_dataFormat == AE_FMT_RAW);
+ 
+@@ -0,7 +0,7 @@
+ 
+   CLog::LogF(LOGINFO, "initialize sink");
+ 
+-  CloseSink();
++  CloseSink(drain);
+ 
+   // get the display name of the device
+   GetDeviceFriendlyName(dev.name);
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.h
+@@ -0,6 +0,7 @@
+   AEAudioFormat format;
+   CEngineStats *stats;
+   const std::string *device;
++  bool drain{true};
+ };
+ 
+ struct SinkReply
+@@ -0,7 +0,7 @@
+   void StateMachine(int signal, Protocol* port, Message* msg);
+   void PrintSinks(std::string& driver);
+   void GetDeviceFriendlyName(const std::string& device);
+-  void OpenSink();
++  void OpenSink(bool drain = true);
+   void CloseSink(bool drain = true);
+   void ReturnBuffers();
+   void SetSilenceTimer();

@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 22:21:51 -0600
+Subject: [PATCH] PlayList: expand a nested playlist item in one call
+
+The level limit on expanding an item that is itself a playlist lives in
+the playlist player's Play, so no other caller can expand an item the
+way playback does.
+---
+ xbmc/PlayListPlayer.cpp     |  8 +-------
+ xbmc/playlists/PlayList.cpp | 11 +++++++++++
+ xbmc/playlists/PlayList.h   |  1 +
+ 3 files changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/xbmc/PlayListPlayer.cpp b/xbmc/PlayListPlayer.cpp
+--- a/xbmc/PlayListPlayer.cpp
++++ b/xbmc/PlayListPlayer.cpp
+@@ -0,13 +0,7 @@
+     iSong = playlist.size() - 1;
+ 
+   // check if the item itself is a playlist, and can be expanded
+-  // only allow a few levels, this could end up in a loop
+-  // if they refer to each other in a loop
+-  for (int i=0; i<5; i++)
+-  {
+-    if(!playlist.Expand(iSong))
+-      break;
+-  }
++  playlist.ExpandNested(iSong);
+ 
+   m_iCurrentSong = iSong;
+   CFileItemPtr item = playlist[m_iCurrentSong];
+diff --git a/xbmc/playlists/PlayList.cpp b/xbmc/playlists/PlayList.cpp
+--- a/xbmc/playlists/PlayList.cpp
++++ b/xbmc/playlists/PlayList.cpp
+@@ -0,6 +0,17 @@
+   return true;
+ }
+ 
++void CPlayList::ExpandNested(int position)
++{
++  // only allow a few levels, this could end up in a loop
++  // if they refer to each other in a loop
++  for (int i = 0; i < 5; i++)
++  {
++    if (!Expand(position))
++      break;
++  }
++}
++
+ void CPlayList::UpdateItem(const CFileItem *item)
+ {
+   if (!item) return;
+diff --git a/xbmc/playlists/PlayList.h b/xbmc/playlists/PlayList.h
+--- a/xbmc/playlists/PlayList.h
++++ b/xbmc/playlists/PlayList.h
+@@ -0,6 +0,7 @@
+   void Remove(int position);
+   bool Swap(int position1, int position2);
+   bool Expand(int position); // expands any playlist at position into this playlist
++  void ExpandNested(int position); // expands it again while the first item is a playlist too
+   void Clear();
+   int size() const;
+   int RemoveDVDItems();

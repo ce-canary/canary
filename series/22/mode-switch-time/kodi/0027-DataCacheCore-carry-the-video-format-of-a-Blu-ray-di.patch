@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 08:25:07 -0600
+Subject: [PATCH] DataCacheCore: carry the video format of a Blu-ray disc
+
+The output mode of a clip followed only that clip's own video. The size
+and dynamic range of the disc's main title had no path from the input
+stream to the renderer and the Amlogic output.
+---
+ xbmc/cores/DataCacheCore.cpp                   | 14 ++++++++++++++
+ xbmc/cores/DataCacheCore.h                     | 14 ++++++++++++++
+ xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp |  6 ++++++
+ xbmc/cores/VideoPlayer/Process/ProcessInfo.h   |  2 ++
+ 4 files changed, 36 insertions(+)
+
+diff --git a/xbmc/cores/DataCacheCore.cpp b/xbmc/cores/DataCacheCore.cpp
+--- a/xbmc/cores/DataCacheCore.cpp
++++ b/xbmc/cores/DataCacheCore.cpp
+@@ -0,6 +0,20 @@
+   return m_playerVideoInfo.m_isInterlaced;
+ }
+ 
++void CDataCacheCore::SetDiscFormat(const DiscFormat& format)
++{
++  std::unique_lock lock(m_videoPlayerSection);
++
++  m_playerVideoInfo.discFormat = format;
++}
++
++DiscFormat CDataCacheCore::GetDiscFormat()
++{
++  std::unique_lock lock(m_videoPlayerSection);
++
++  return m_playerVideoInfo.discFormat;
++}
++
+ // player audio info
+ void CDataCacheCore::SetAudioDecoderName(std::string name)
+ {
+diff --git a/xbmc/cores/DataCacheCore.h b/xbmc/cores/DataCacheCore.h
+--- a/xbmc/cores/DataCacheCore.h
++++ b/xbmc/cores/DataCacheCore.h
+@@ -0,6 +0,16 @@
+ #include <string>
+ #include <vector>
+ 
++enum class StreamHdrType;
++
++// the video size and dynamic range of a disc's main title, empty without one
++struct DiscFormat
++{
++  int width{0};
++  int height{0};
++  StreamHdrType hdrType{};
++};
++
+ class CDataCacheCore
+ {
+ public:
+@@ -0,6 +0,9 @@
+    */
+   bool IsVideoInterlaced();
+ 
++  void SetDiscFormat(const DiscFormat& format);
++  DiscFormat GetDiscFormat();
++
+   // player audio info
+   void SetAudioDecoderName(std::string name);
+   std::string GetAudioDecoderName();
+@@ -0,6 +0,7 @@
+     int liveBitRate;
+     int queueLevel;
+     int queueDataLevel;
++    DiscFormat discFormat;
+   } m_playerVideoInfo;
+ 
+   CCriticalSection m_audioPlayerSection;
+diff --git a/xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp b/xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp
+--- a/xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp
++++ b/xbmc/cores/VideoPlayer/Process/ProcessInfo.cpp
+@@ -0,6 +0,12 @@
+   return m_IsHdr10Plus;
+ }
+ 
++void CProcessInfo::SetDiscFormat(const DiscFormat& format)
++{
++  if (m_dataCache)
++    m_dataCache->SetDiscFormat(format);
++}
++
+ EINTERLACEMETHOD CProcessInfo::GetFallbackDeintMethod()
+ {
+   return VS_INTERLACEMETHOD_DEINTERLACE;
+diff --git a/xbmc/cores/VideoPlayer/Process/ProcessInfo.h b/xbmc/cores/VideoPlayer/Process/ProcessInfo.h
+--- a/xbmc/cores/VideoPlayer/Process/ProcessInfo.h
++++ b/xbmc/cores/VideoPlayer/Process/ProcessInfo.h
+@@ -0,6 +0,7 @@
+ 
+ class CProcessInfo;
+ class CDataCacheCore;
++struct DiscFormat;
+ 
+ using CreateProcessControl = CProcessInfo* (*)();
+ 
+@@ -0,6 +0,7 @@
+   bool GetDoviIsFEL();
+   void SetIsHdr10Plus(bool isHdr10Plus);
+   bool GetIsHdr10Plus();
++  void SetDiscFormat(const DiscFormat& format);
+   virtual EINTERLACEMETHOD GetFallbackDeintMethod();
+   virtual void SetSwDeinterlacingMethods();
+   void UpdateDeinterlacingMethods(std::list<EINTERLACEMETHOD> &methods);

@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 22:22:01 -0600
+Subject: [PATCH] amdv: keep the frame on screen's setting when an instance
+ maps
+
+Mapping an instance reset the md size, mel mode and source format of
+the frame still on screen, so a kept Dolby Vision frame re-parsed
+before the next stream's first frame changed colour in VD1. Those
+values and the last parsed format belong to the new stream only from
+its first shown frame.
+---
+ .../media/enhancement/amdolby_vision/amdv.c   | 43 +++++++++++++------
+ .../media/enhancement/amdolby_vision/amdv.h   |  1 +
+ 2 files changed, 32 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhancement/amdolby_vision/amdv.c
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -0,24 +0,17 @@
+ 			local_irq_save(__sf);
+ 			write_seqcount_begin(&dv_inst[*inst].seq);
+ 			dv_inst[*inst].frame_count = 0;
+-			dv_inst[*inst].last_mel_mode = 0;
+-			dv_inst[*inst].last_total_md_size = 0;
+-			dv_inst[*inst].last_total_comp_size = 0;
++			/* the frame on screen keeps its md and format until
++			 * this mapping shows its first frame
++			 */
++			dv_inst[*inst].keep_shown_state = true;
+ 			dv_inst[*inst].layer_id = VD_PATH_MAX;
+ 			dv_inst[*inst].video_height = 0;
+ 			dv_inst[*inst].video_width = 0;
+ 			dv_inst[*inst].valid = 0;
+-			dv_inst[*inst].current_id = 0;
+ 			write_seqcount_end(&dv_inst[*inst].seq);
+ 			local_irq_restore(__sf);
+ 		}
+-		/* size-before-pointer release: in_md==NULL implies in_md_size==0 */
+-		WRITE_ONCE(dv_inst[*inst].src_format, FORMAT_SDR);
+-		WRITE_ONCE(dv_inst[*inst].in_md_size, 0);
+-		WRITE_ONCE(dv_inst[*inst].in_comp_size, 0);
+-		smp_wmb();
+-		WRITE_ONCE(dv_inst[*inst].in_md, NULL);
+-		WRITE_ONCE(dv_inst[*inst].in_comp, NULL);
+ 		dv_inst[*inst].err_parse_cnt = 0;
+ 		mutex_unlock(&dv_inst_lock);
+ 		return 0;
+@@ -0,7 +0,7 @@
+ 		dv_inst[i].current_id = 0;
+ 		write_seqcount_end(&dv_inst[i].seq);
+ 		local_irq_restore(__sf);
+-		/* size-before-pointer release (see dv_inst_map) */
++		/* size-before-pointer release: in_md==NULL implies in_md_size==0 */
+ 		WRITE_ONCE(dv_inst[i].src_format, FORMAT_INVALID);
+ 		WRITE_ONCE(dv_inst[i].in_md_size, 0);
+ 		WRITE_ONCE(dv_inst[i].in_comp_size, 0);
+@@ -0,6 +0,32 @@
+ 		//dv_id = layer_id_to_dv_id(vd_path);
+ 	//}
+ 
++	if (vf && toggle_mode == 1 && !drop_flag &&
++	    dv_inst[dv_id].keep_shown_state) {
++		unsigned long __sf;
++
++		/* first frame shown by this mapping: drop the state of the
++		 * frame it replaces, its own parse below writes what it carries
++		 */
++		local_irq_save(__sf);
++		write_seqcount_begin(&dv_inst[dv_id].seq);
++		dv_inst[dv_id].last_mel_mode = 0;
++		dv_inst[dv_id].last_total_md_size = 0;
++		dv_inst[dv_id].last_total_comp_size = 0;
++		dv_inst[dv_id].current_id = 0;
++		write_seqcount_end(&dv_inst[dv_id].seq);
++		local_irq_restore(__sf);
++		/* size-before-pointer release: in_md==NULL implies in_md_size==0 */
++		WRITE_ONCE(dv_inst[dv_id].src_format, FORMAT_SDR);
++		WRITE_ONCE(dv_inst[dv_id].in_md_size, 0);
++		WRITE_ONCE(dv_inst[dv_id].in_comp_size, 0);
++		smp_wmb(); /* release: sizes before pointers */
++		WRITE_ONCE(dv_inst[dv_id].in_md, NULL);
++		WRITE_ONCE(dv_inst[dv_id].in_comp, NULL);
++		dv_inst[dv_id].keep_shown_state = false;
++		last_current_format = FORMAT_INVALID;
++	}
++
+ 	if (src_format == FORMAT_INVALID)
+ 		last_current_format = src_format;
+ 
+diff --git a/drivers/media/enhancement/amdolby_vision/amdv.h b/drivers/media/enhancement/amdolby_vision/amdv.h
+--- a/drivers/media/enhancement/amdolby_vision/amdv.h
++++ b/drivers/media/enhancement/amdolby_vision/amdv.h
+@@ -0,6 +0,7 @@
+ 	u32 last_total_md_size;
+ 	u32 last_total_comp_size;
+ 	bool last_mel_mode;
++	bool keep_shown_state;/*state is the frame on screen's until the first shown frame*/
+ 	struct hdr10_parameter hdr10_param;
+ 	struct vframe_s *dv_vf[16][2];
+ 	u32 frame_count;

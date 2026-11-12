@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 08:46:39 -0600
+Subject: [PATCH] Inputstream: let the add-on declare a stream's largest size
+
+An adaptive stream tells Kodi only the size of its current
+representation. Kodi chooses the display mode for that size, so an
+add-on that wants the mode of its top representation has to start on
+it, whatever the link can carry.
+---
+ .../include/kodi/addon-instance/Inputstream.h | 38 +++++++++++++++++--
+ .../kodi/c-api/addon-instance/inputstream.h   |  6 +++
+ 2 files changed, 41 insertions(+), 3 deletions(-)
+
+diff --git a/xbmc/addons/kodi-dev-kit/include/kodi/addon-instance/Inputstream.h b/xbmc/addons/kodi-dev-kit/include/kodi/addon-instance/Inputstream.h
+--- a/xbmc/addons/kodi-dev-kit/include/kodi/addon-instance/Inputstream.h
++++ b/xbmc/addons/kodi-dev-kit/include/kodi/addon-instance/Inputstream.h
+@@ -0,6 +0,8 @@
+   /// | **FPS rate** | Video | Type related required | @ref InputstreamInfo::SetFpsRate "SetFpsRate" | @ref InputstreamInfo::GetFpsRate "GetFpsRate"
+   /// | **Height** | Video | Type related required | @ref InputstreamInfo::SetHeight "SetHeight" | @ref InputstreamInfo::GetHeight "GetHeight"
+   /// | **Width** | Video | Type related required | @ref InputstreamInfo::SetWidth "SetWidth" | @ref InputstreamInfo::GetWidth "GetWidth"
++  /// | **Maximum height** | Video | no | @ref InputstreamInfo::SetMaxHeight "SetMaxHeight" | @ref InputstreamInfo::GetMaxHeight "GetMaxHeight"
++  /// | **Maximum width** | Video | no | @ref InputstreamInfo::SetMaxWidth "SetMaxWidth" | @ref InputstreamInfo::GetMaxWidth "GetMaxWidth"
+   /// | **Aspect** | Video | Type related required | @ref InputstreamInfo::SetAspect "SetAspect" | @ref InputstreamInfo::GetAspect "GetAspect"
+   /// | **Channel quantity** | Audio | Type related required | @ref InputstreamInfo::SetChannels "SetChannels" | @ref InputstreamInfo::GetChannels "GetChannels"
+   /// | **Sample rate** | Audio | Type related required | @ref InputstreamInfo::SetSampleRate "SetSampleRate" | @ref InputstreamInfo::GetSampleRate "GetSampleRate"
+@@ -0,6 +0,30 @@
+   /// @brief To get with @ref SetWidth changed values.
+   unsigned int GetWidth() const { return m_cStructure->m_Width; }
+ 
++  /// @brief Largest height the stream may switch to, such as its top adaptive representation.
++  ///
++  /// Kodi chooses the display mode for it, so a later switch keeps the mode.
++  ///
++  /// @param[in] height Height to use, 0 if unknown
++  ///
++  /// @note Ignored by a Kodi whose inputstream API is older than 3.5.0.
++  void SetMaxHeight(unsigned int height) { m_cStructure->m_maxHeight = height; }
++
++  /// @brief To get with @ref SetMaxHeight changed values.
++  unsigned int GetMaxHeight() const { return m_cStructure->m_maxHeight; }
++
++  /// @brief Largest width the stream may switch to, such as its top adaptive representation.
++  ///
++  /// Kodi chooses the display mode for it, so a later switch keeps the mode.
++  ///
++  /// @param[in] width Width to use, 0 if unknown
++  ///
++  /// @note Ignored by a Kodi whose inputstream API is older than 3.5.0.
++  void SetMaxWidth(unsigned int width) { m_cStructure->m_maxWidth = width; }
++
++  /// @brief To get with @ref SetMaxWidth changed values.
++  unsigned int GetMaxWidth() const { return m_cStructure->m_maxWidth; }
++
+   /// @brief Display aspect of stream.
+   ///
+   /// @param[in] aspect Aspect ratio to use
+@@ -0,9 +0,15 @@
+                                      int streamId,
+                                      struct INPUTSTREAM_INFO* stream))
+   {
+-    InputstreamInfo infoData(info);
+-    bool ret = static_cast<CInstanceInputStream*>(instance->toAddon->addonInstance)
+-                   ->GetStream(streamid, infoData);
++    auto* addon = static_cast<CInstanceInputStream*>(instance->toAddon->addonInstance);
++    // a Kodi older than 3.5.0 passes a stream info without m_maxWidth and m_maxHeight, so the
++    // add-on fills its own and Kodi's takes the part it has
++    const bool hasMaxSize = addon->IsInstanceAPIVersionAtLeast(3, 5, 0);
++    InputstreamInfo kodiInfo(info);
++    InputstreamInfo addonInfo;
++    bool ret = addon->GetStream(streamid, hasMaxSize ? kodiInfo : addonInfo);
++    if (!hasMaxSize)
++      std::memcpy(info, addonInfo.GetCStructure(), offsetof(INPUTSTREAM_INFO, m_maxWidth));
+     if (ret && transfer_stream)
+     {
+       // Do this with given callback to prevent memory problems and leaks. This
+diff --git a/xbmc/addons/kodi-dev-kit/include/kodi/c-api/addon-instance/inputstream.h b/xbmc/addons/kodi-dev-kit/include/kodi/c-api/addon-instance/inputstream.h
+--- a/xbmc/addons/kodi-dev-kit/include/kodi/c-api/addon-instance/inputstream.h
++++ b/xbmc/addons/kodi-dev-kit/include/kodi/c-api/addon-instance/inputstream.h
+@@ -0,6 +0,12 @@
+ 
+     //! @brief Dolby Vision config metadata (dvcc atom)
+     struct INPUTSTREAM_DVCC_METADATA* m_dvccMetadata;
++
++    //! @brief largest width the stream may switch to, 0 if unknown
++    unsigned int m_maxWidth;
++
++    //! @brief largest height the stream may switch to, 0 if unknown
++    unsigned int m_maxHeight;
+   };
+ 
+   struct INPUTSTREAM_TIMES

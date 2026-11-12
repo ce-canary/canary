@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 28 Sep 2026 15:15:48 -0500
+Subject: [PATCH] DVDDemuxFFmpeg: fix .sup seeks to before the first packet
+
+A .sup seek target gets no start time offset, so a seek back to the
+start or to an early chapter can lie before the first packet. The
+backward seek then fails, the file keeps its old position, and the
+subtitles in between are not shown.
+---
+ xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+@@ -0,6 +0,10 @@
+       ret = av_seek_frame(m_pFormatContext, m_seekStream, seek_pts,
+                           backwards ? AVSEEK_FLAG_BACKWARD : 0);
+ 
++    // a .sup target can lie before the first packet, where a backward seek fails
++    if (ret < 0 && m_bSup && seek_pts < m_pFormatContext->start_time)
++      ret = av_seek_frame(m_pFormatContext, m_seekStream, seek_pts, 0);
++
+     if (ret < 0)
+     {
+       // demuxer can return failure, if seeking behind eof

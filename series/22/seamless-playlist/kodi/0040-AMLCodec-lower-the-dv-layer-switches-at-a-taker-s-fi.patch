@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 19:50:32 -0600
+Subject: [PATCH] AMLCodec: lower the dv layer switches at a taker's first
+ frame
+
+A taker lowers the switches of a kept full-layer picture at its open,
+which only works while that picture is already off. The core reads
+the switches again when it re-parses the frame on screen, so a
+picture kept for a taker without that layer needs them until the
+taker's first frame replaces it.
+---
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp     | 16 +++++++++++++---
+ .../cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h |  1 +
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,6 +0,7 @@
+ {
+   std::lock_guard<std::mutex> lock(holdMutex);
+   m_outputModule = OutputModule::NONE;
++  m_lowerLayers = false;
+   if (holdKept && !holdOwner)
+     holdOwner = m_holdGen;
+   if (!holdKept || holdOwner != m_holdGen)
+@@ -0,6 +0,11 @@
+     return false;
+   }
+ 
++  // the core reads the layer switches a kept picture's open raised also for that picture, so a
++  // decoder without a full enhancement layer lowers them only at its first frame
++  m_lowerLayers = RunsDolbyVision(hints, output) &&
++                  !(doviIsFEL && (hints.dovi.dv_profile == 4 || hints.dovi.dv_profile == 7));
++
+   if (convert)
+   {
+     const OutputModule module = pictureTake ? OutputModule::DV : pictureFallback;
+@@ -0,9 +0,6 @@
+     return true;
+   }
+ 
+-  // the open of a full layer picture enabled its layer, and the picture went off before this open
+-  if (pictureLayers == CoreLayers::FEL && !fullLayer)
+-    CloseLayers({});
+   // a native Dolby Vision open forces no mode; the core would leave a mapping's held IPT for the
+   // tunnel only at the handback, on video
+   const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+@@ -0,6 +0,13 @@
+   }
+   else if (!drop && m_handback)
+     HandBack();
++
++  if (ret >= 0 && !drop && m_lowerLayers.exchange(false))
++  {
++    auto* AmlDisplay =
++        static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
++    AmlDisplay->SetCrtcProperties({{"dv_debug", "enable_fel 0"}, {"dv_debug", "enable_mel 0"}});
++  }
+   return ret >= 0;
+ }
+ 
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+@@ -0,6 +0,7 @@
+   std::atomic<bool> m_handback{false};
+   bool             m_handbackFrame{false};
+   bool             m_handbackOff{false};
++  std::atomic<bool> m_lowerLayers{false};
+   bool             m_drainPrebuffer{false};
+   bool             m_streamStartGate{false};
+   bool             m_inputWritten{false};

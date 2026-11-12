@@ -1,0 +1,206 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 00:42:40 -0600
+Subject: [PATCH] VideoPlayer: open a prefetched add-on item's default streams
+ early
+
+A prefetched inputstream add-on item opens its streams only at the
+join, where each fetches its first segments on connections the add-on
+closed meanwhile. The join also ranks those streams before the item's
+video settings load, with the settings of the item played before.
+---
+ .../include/kodi/addon-instance/Inputstream.h |  2 +-
+ .../DVDInputStreams/InputStreamAddon.h        |  4 +-
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 66 ++++++++++++++++++-
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  2 +-
+ 4 files changed, 68 insertions(+), 6 deletions(-)
+
+diff --git a/xbmc/addons/kodi-dev-kit/include/kodi/addon-instance/Inputstream.h b/xbmc/addons/kodi-dev-kit/include/kodi/addon-instance/Inputstream.h
+--- a/xbmc/addons/kodi-dev-kit/include/kodi/addon-instance/Inputstream.h
++++ b/xbmc/addons/kodi-dev-kit/include/kodi/addon-instance/Inputstream.h
+@@ -0,7 +0,7 @@
+ /// | <b>`point`</b> | The identification of the addon instance to inputstream is mandatory <b>`kodi.inputstream`</b>. In addition, the instance declared in the first <b>`<extension ... />`</b> is also
+ /// | <b>`extension`</b> | A filename extension is an identifier specified as a suffix to the name of a computer file where supported by addon.
+ /// | <b>`listitemprops`</b> | Values that are available to the addon at @ref InputstreamProperty::GetProperties() and that can be passed to @ref CInstanceInputStream::Open() ith the respective values.
+-/// | <b>`prefetch`</b> | Optional, <b>`true`</b> if Kodi may open the next playlist item ahead of its playback, while another instance of the addon plays. Such an open is told by @ref InputstreamProperty::IsPrefetch().
++/// | <b>`prefetch`</b> | Optional, <b>`true`</b> if Kodi may open the next playlist item ahead of its playback, on another thread while another instance of the addon plays. Such an open is told by @ref InputstreamProperty::IsPrefetch(). Kodi may also open streams of that item before playback picks them. It opens each picked stream again before the first @ref CInstanceInputStream::DemuxRead(), and that repeated open of an enabled stream must change nothing. Streams playback does not pick are disabled with @ref CInstanceInputStream::EnableStream() before the first read or seek.
+ /// | <b>`protocols`</b> | The streaming protocol is a special protocol supported by the addon for the transmission of streaming media data over a network.
+ /// | <b>`library_@PLATFORM@`</b> | The runtime library used for the addon. This is usually declared by cmake and correctly displayed in the translated `addon.xml`.
+ ///
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.h b/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.h
+@@ -0,7 +0,9 @@
+   ~CInputStreamAddon() override;
+ 
+   static bool Supports(const ADDON::AddonInfoPtr& addonInfo, const CFileItem& fileitem);
+-  // whether an instance may open ahead of playback, beside another open instance of the add-on
++  // whether an instance may open ahead of playback, on another thread beside an open instance of
++  // the add-on; its streams may open before the player claims them, and the player opens each
++  // claimed one again before its first read, which must then change nothing
+   static bool SupportsPrefetch(const ADDON::AddonInfoPtr& addonInfo);
+ 
+   void SetPrefetch(bool prefetch) { m_prefetch = prefetch; }
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,7 @@
+ #include "DVDCodecs/DVDCodecUtils.h"
+ #include "DVDDemuxers/DVDDemux.h"
+ #include "DVDDemuxers/DVDDemuxCC.h"
++#include "DVDDemuxers/DVDDemuxClient.h"
+ #include "DVDDemuxers/DVDDemuxFFmpeg.h"
+ #include "DVDDemuxers/DVDDemuxUtils.h"
+ #include "DVDDemuxers/DVDDemuxVobsub.h"
+@@ -0,6 +0,7 @@
+ #include "resources/LocalizeStrings.h"
+ #include "resources/ResourcesComponent.h"
+ #include "settings/AdvancedSettings.h"
++#include "settings/MediaSettings.h"
+ #include "settings/Settings.h"
+ #include "settings/SettingsComponent.h"
+ #include "threads/SingleLock.h"
+@@ -0,6 +0,7 @@
+ #include "utils/Variant.h"
+ #include "utils/log.h"
+ #include "video/Bookmark.h"
++#include "video/VideoDatabase.h"
+ #include "video/VideoFileItemClassify.h"
+ #include "video/VideoInfoTag.h"
+ #include "windowing/GraphicContext.h"
+@@ -0,6 +0,7 @@
+   //! the demuxer the job probes with, set only while its open runs
+   CDVDDemux* opening{nullptr};
+   std::string mimeType;
++  CVideoSettings videoSettings;
+   std::shared_ptr<CDVDInputStream> input;
+   std::unique_ptr<CDVDDemux> demuxer;
+ };
+@@ -0,6 +0,47 @@
+ 
+ CPrefetchScreen prefetchScreen;
+ 
++// the settings the application loads for an item it plays
++CVideoSettings LoadVideoSettings(const CFileItem& item)
++{
++  CVideoSettings settings{CMediaSettings::GetInstance().GetDefaultVideoSettings()};
++  CVideoDatabase db;
++  if (db.Open())
++  {
++    if (!db.GetVideoSettings(item, settings))
++      settings = CMediaSettings::GetInstance().GetDefaultVideoSettings();
++    db.Close();
++  }
++  return settings;
++}
++
++// Opens the streams the join opens by default with `settings`, so their first data loads while
++// the current item plays. A stream the join picks otherwise costs only its download
++void PreOpenDefaultStreams(const CVideoSettings& settings,
++                           const std::shared_ptr<CDVDInputStream>& input,
++                           CDVDDemuxClient& demuxer)
++{
++  const bool preferStereo{
++      CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_videoPreferStereoStream &&
++      CServiceBroker::GetActiveAE()->HasStereoAudioChannelCount()};
++
++  CSelectionStreams streams;
++  streams.Update(input, &demuxer);
++  const std::vector<SelectionStream> video{
++      RankDefaultStreams(StreamType::VIDEO, streams, settings, preferStereo, &demuxer)};
++  const std::vector<SelectionStream> audio{
++      RankDefaultStreams(StreamType::AUDIO, streams, settings, preferStereo, &demuxer)};
++  const PredicateSubtitlePriority psp(audio.empty() ? CLanguageTag{} : audio.front().language,
++                                      settings.m_SubtitleStream);
++  const std::vector<SelectionStream> subtitles{streams.Get(StreamType::SUBTITLE, psp)};
++
++  for (const auto* ranked : {&video, &audio, &subtitles})
++  {
++    if (!ranked->empty())
++      demuxer.PreOpenStream(ranked->front().id);
++  }
++}
++
+ // the item fields the input and demuxer open from; the mime type is compared apart
+ bool OpensSameInput(const CFileItem& item, const CFileItem& other)
+ {
+@@ -0,6 +0,7 @@
+   CFFmpegLog::SetLogLevel(1);
+   std::shared_ptr<CDVDInputStream> input;
+   std::unique_ptr<CDVDDemux> demuxer;
++  CVideoSettings settings;
+   const std::string_view failure = [&]() -> std::string_view
+   {
+     // typed as the application and the player type it
+@@ -0,11 +0,16 @@
+     // a live stream would play from where it was opened; an add-on knows it once open
+     if (type == DVDSTREAM_TYPE_ADDON ? input->IsRealtime() : input->GetLength() <= 0)
+       return "it can be live";
++    settings = LoadVideoSettings(item);
+     if (input->GetIDemux())
+     {
+       demuxer.reset(CDVDFactoryDemuxer::CreateDemuxer(input));
+       if (!demuxer)
+         return "its demuxer did not open";
++      if (cancelled())
++        return "it was dropped";
++      if (auto* client = dynamic_cast<CDVDDemuxClient*>(demuxer.get()))
++        PreOpenDefaultStreams(settings, input, *client);
+       return {};
+     }
+     if (!CDVDFactoryDemuxer::IsFFmpegFile(input))
+@@ -0,6 +0,7 @@
+     if (!slot->cancelled && failure.empty())
+     {
+       slot->mimeType = item.GetMimeType();
++      slot->videoSettings = settings;
+       slot->input = std::move(input);
+       slot->demuxer = std::move(demuxer);
+     }
+@@ -0,8 +0,9 @@
+ }
+ 
+ // Hands the input and demuxer prepared for `m_item` to the open, waiting for a prefetch that
+-// started. Returns whether they were taken, with `m_item` typed as the prefetch typed it.
+-bool CVideoPlayer::TakePrefetch()
++// started. Returns whether they were taken, with `m_item` typed as the prefetch typed it and its
++// video settings applied, unless `previous` is the same file, whose settings are newer.
++bool CVideoPlayer::TakePrefetch(const CFileItem& previous)
+ {
+   std::shared_ptr<PrefetchSlot> slot;
+   {
+@@ -0,6 +0,13 @@
+   m_item.SetMimeType(slot->mimeType);
+   m_preparedInput = std::move(slot->input);
+   m_preparedDemuxer = std::move(slot->demuxer);
++  CVideoSettings settings{slot->videoSettings};
++  lock.unlock();
++
++  // the application loads the same settings later, behind the previous item's store, and the
++  // default streams open before that
++  if (!previous.IsSamePath(&m_item))
++    SetVideoSettings(settings);
+   return true;
+ }
+ 
+@@ -0,7 +0,7 @@
+ 
+       m_item = msg.GetItem();
+       // resolved here, as for a fresh start, so the caller does not wait for a lookup
+-      if (!joined || !TakePrefetch())
++      if (!joined || !TakePrefetch(fileItem))
+         m_item.SetMimeTypeForInternetFile();
+       m_playerOptions = msg.GetOptions();
+ 
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,7 +0,7 @@
+   bool ParkAtEnd();
+   struct PrefetchSlot;
+   static void Prefetch(const std::shared_ptr<PrefetchSlot>& slot);
+-  bool TakePrefetch();
++  bool TakePrefetch(const CFileItem& previous);
+   void CancelPrefetch(std::string_view reason);
+   bool ShouldDeferSync(bool ready, std::chrono::steady_clock::time_point now);
+   bool ShouldWaitForSync(std::chrono::steady_clock::time_point now);

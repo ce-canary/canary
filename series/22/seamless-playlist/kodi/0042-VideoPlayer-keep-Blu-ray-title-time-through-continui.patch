@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 11 Nov 2026 00:39:17 -0600
+Subject: [PATCH] VideoPlayer: keep Blu-ray title time through continuity
+ checks
+
+Blu-ray packets are on title time, where a forward gap is the disc's
+own time, such as a play item that holds its one picture until its
+out time. The continuity check read such a gap as a stream fault and
+shifted later pictures earlier by its length.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,15 @@
+   if( pPacket->dts == DVD_NOPTS_VALUE || current.dts == DVD_NOPTS_VALUE)
+     return false;
+ 
++  // blu-ray packets are on title time, so a gap is the disc's own time, not a discontinuity
++  if (m_pInputStream && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY))
++  {
++    if (current.avsync == CCurrentStream::AV_SYNC_CHECK)
++      current.avsync = CCurrentStream::AV_SYNC_CONT;
++    current.lastdts = pPacket->dts;
++    return true;
++  }
++
+   double mindts = DVD_NOPTS_VALUE, maxdts = DVD_NOPTS_VALUE;
+   UpdateLimits(mindts, maxdts, m_CurrentAudio.dts);
+   UpdateLimits(mindts, maxdts, m_CurrentVideo.dts);

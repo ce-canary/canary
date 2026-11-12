@@ -1,0 +1,127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 8 Nov 2026 23:45:25 -0600
+Subject: [PATCH] VideoPlayer: drain video at a held read in the menu sync wait
+
+The Blu-ray menu sync wait holds the video drain until the video
+player reports a stall. The video player cannot output a short clip
+before the drain, so it stalls only after ten frame times and the
+first picture of a menu intro waits about 400 ms. The wait already
+knows when the read is held.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 38 ++++++++++++++++++--------
+ xbmc/cores/VideoPlayer/VideoPlayer.h   |  2 ++
+ 2 files changed, 28 insertions(+), 12 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,7 @@
+   m_SpeedState.Reset(DVD_NOPTS_VALUE);
+   m_navTail = false;
+   m_inputEnded = false;
++  m_videoDrained = false;
+   m_navStop = false;
+   m_navStopped = false;
+   m_discAudioPick = false;
+@@ -0,7 +0,9 @@
+           m_State.menuType == MenuType::NATIVE &&
+           (ShouldWaitForSync(std::chrono::steady_clock::now()) || PlayNavTail()))
+       {
+-        PollBlurayEvents();
++        // a held read is the end of the input, and video only stalls once it is drained
++        if (PollBlurayEvents())
++          SendVideoDrain();
+         CThread::Sleep(10ms);
+         continue;
+       }
+@@ -0,16 +0,8 @@
+         continue;
+       }
+ 
+-      if (!m_inputEnded && m_CurrentVideo.id >= 0 && m_CurrentVideo.packets > 0)
+-      {
+-        // a demuxer can come back empty on a late read, a disc that gets here has no next item;
+-        // the input's EOF needs a read past the last byte, which a demuxer may never make
+-        if (m_pInputStream->IsEOF() || (m_pDemuxer && m_pDemuxer->IsAtEnd()) ||
+-            std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream))
+-          SendVideoInputEnd();
+-
+-        m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
+-      }
++      if (!m_inputEnded)
++        SendVideoDrain();
+       m_inputEnded = true;
+ 
+       m_CurrentAudio.inited = false;
+@@ -0,6 +0,7 @@
+       m_syncWait.reset();
+       m_navTail = false;
+       m_inputEnded = false;
++      m_videoDrained = false;
+     }
+ 
+     // see if we can find something better to play
+@@ -0,10 +0,11 @@
+ 
+   if (!m_navTail)
+   {
+-    if (m_CurrentVideo.id >= 0)
++    if (m_CurrentVideo.id >= 0 && !m_videoDrained)
+     {
+       SendVideoInputEnd();
+       m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
++      m_videoDrained = true;
+     }
+     m_inputEnded = true;
+ 
+@@ -0,6 +0,22 @@
+   m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_INPUT_END));
+ }
+ 
++// once for each run of input
++void CVideoPlayer::SendVideoDrain()
++{
++  if (m_videoDrained || m_CurrentVideo.id < 0 || m_CurrentVideo.packets == 0)
++    return;
++
++  // a demuxer can come back empty on a late read, a disc that gets here has no next item;
++  // the input's EOF needs a read past the last byte, which a demuxer may never make
++  if (m_pInputStream->IsEOF() || (m_pDemuxer && m_pDemuxer->IsAtEnd()) ||
++      std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream))
++    SendVideoInputEnd();
++
++  m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
++  m_videoDrained = true;
++}
++
+ // seeks in the tail are dropped, as they would act on the next item, unless the read is held in
+ // the title; a disc audio or subtitle pick goes to the disc, whose stream registers carry it into
+ // the next item; video and program picks have no disc register and are dropped
+@@ -0,6 +0,7 @@
+   m_seekStart = false;
+   m_navTail = false;
+   m_inputEnded = false;
++  m_videoDrained = false;
+   m_lastVideoTitleTime = DVD_NOPTS_VALUE;
+ #if defined(HAVE_LIBBLURAY)
+   if (const auto bluray = GetBlurayInputStream())
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+   void CloseSubtitleForNextStream();
+   bool PlayNavTail();
+   void SendVideoInputEnd();
++  void SendVideoDrain();
+   bool DropInNavTail(CDVDMsg& msg);
+   bool SelectDiscStream(const SelectionStream& st);
+   bool TakeDiscAudioPick(CDemuxStream* stream);
+@@ -0,6 +0,7 @@
+   bool m_videoInputEnded{false};
+   // the demuxer has no more for now, the players play out what they hold
+   bool m_inputEnded{false};
++  bool m_videoDrained{false};
+   bool m_discAudioPick{false};
+ 
+   CEdl m_Edl;

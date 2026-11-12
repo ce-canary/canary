@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 8 Nov 2026 17:49:22 -0600
+Subject: [PATCH] DVDVideoCodecAmlogic: publish the declared interlace at the
+ open
+
+The Amlogic decoder never published the stream's declared interlace.
+Only the deinterlacer state, read after the first decoded picture, set
+it. The first renderer configure therefore used the frame rate, and a
+1080i50 stream could have its display mode set twice.
+---
+ xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+@@ -0,6 +0,7 @@
+ 
+       m_processInfo.SetDoviIsFEL(doviIsFEL);
+       m_processInfo.SetIsHdr10Plus(IsHdr10Plus);
++      m_processInfo.SetVideoInterlaced(m_hints.interlaced);
+ 
+       CLog::Log(LOGINFO, "CDVDVideoCodecAmlogic::{}: Open decoder: fps:{:d}/{:d}", __FUNCTION__, m_hints.fpsrate, m_hints.fpsscale);
+       if (m_Codec && !m_Codec->OpenDecoder(m_hints, doviIsFEL))

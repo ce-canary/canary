@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 11 Nov 2026 12:39:54 -0600
+Subject: [PATCH] VideoPlayer: let only audio and video move the start of a
+ seek
+
+A stream whose first packet after a seek is more than 20 s before
+the target moves every stream's start back to that packet. A
+subtitle file seeks to its last set before the target, which is
+often that far back, and the seek then starts early.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,7 +0,9 @@
+       return true;
+     }
+ 
+-    if ((current.startpts - current.dts) > DVD_SEC_TO_TIME(20))
++    // other players keep early packets, so nothing is decoded to reach the start
++    if ((current.type == StreamType::AUDIO || current.type == StreamType::VIDEO) &&
++        (current.startpts - current.dts) > DVD_SEC_TO_TIME(20))
+     {
+       CLog::Log(LOGDEBUG, "{} - too far to decode before finishing seek", __FUNCTION__);
+       if(m_CurrentAudio.startpts != DVD_NOPTS_VALUE)

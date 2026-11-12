@@ -44,7 +44,7 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
        CLog::Log(LOGDEBUG,
                  "ActiveAE::SyncStream - average error of {:f}, left to the player's clock", error);
      }
-@@ -0,13 +0,23 @@
+@@ -0,15 +0,25 @@
      {
        stream->m_syncState = CAESyncInfo::AESyncState::SYNC_ADJUST;
        stream->m_lastSyncError = error;
@@ -60,9 +60,11 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
 +    CLog::Log(LOGDEBUG, "ActiveAE::SyncStream - average error of {:f}, start adjusting", error);
 +  }
  
-   // While the error is averaged, samples that will not be skipped stay audible.
+   // While the error is averaged, samples that will not be skipped stay audible. Not in passthrough,
+   // where the correction that follows interrupts the bitstream the receiver just locked on to.
    double errorSoFar{0.0};
-   const bool audible{stream->m_syncError.GetSoFar(errorSoFar) && keepAudible(errorSoFar)};
+   const bool audible{m_mode != MODE_RAW && stream->m_syncError.GetSoFar(errorSoFar) &&
+                      keepAudible(errorSoFar)};
 +  if (stream->m_syncState == CAESyncInfo::AESyncState::SYNC_MUTE && audible)
 +    stream->m_silentSinceSyncStart = false;
    if (stream->m_syncState == CAESyncInfo::AESyncState::SYNC_MUTE && !audible)

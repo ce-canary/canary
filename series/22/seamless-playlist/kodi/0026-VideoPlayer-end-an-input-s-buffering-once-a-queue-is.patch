@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 08:36:22 -0600
+Subject: [PATCH] VideoPlayer: end an input's buffering once a queue is full by
+ time
+
+An input with no cache status left its buffering wait only when a
+queue no longer accepted data. The queue counts that by data size, so
+a slow source can take minutes to fill it and a short item never
+does, and the picture stayed frozen meanwhile.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,8 +0,12 @@
+     }
+     else
+     {
++      // a queue full by time also ends the wait: AcceptsData counts data, which a slow source can
++      // take minutes to fill and a short item never fills
+       if ((!m_VideoPlayerAudio->AcceptsData() && m_CurrentAudio.id >= 0) ||
+-          (!m_VideoPlayerVideo->AcceptsData() && m_CurrentVideo.id >= 0))
++          (!m_VideoPlayerVideo->AcceptsData() && m_CurrentVideo.id >= 0) ||
++          (m_VideoPlayerAudio->GetLevel() >= 100 && m_CurrentAudio.id >= 0) ||
++          (m_processInfo->GetLevelVQ() >= 100 && m_CurrentVideo.id >= 0))
+         SetCaching(CACHESTATE_INIT);
+     }
+ 

@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 15:11:27 -0600
+Subject: [PATCH] VideoPlayer: look up an in-place open's mime type on the
+ player thread
+
+An open on a running player looked up the mime type of an internet item
+on the caller's thread, which is the main thread. A slow host froze the
+GUI for the lookup. A fresh start already does it on the player thread.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,7 +0,6 @@
+     CDVDMsgOpenFile::FileParams params;
+     params.m_item = file;
+     params.m_options = options;
+-    params.m_item.SetMimeTypeForInternetFile();
+     m_messenger.Put(std::make_shared<CDVDMsgOpenFile>(params), 1);
+ 
+     return true;
+@@ -0,6 +0,8 @@
+       });
+ 
+       m_item = msg.GetItem();
++      // resolved here, as for a fresh start, so the caller does not wait for a lookup
++      m_item.SetMimeTypeForInternetFile();
+       m_playerOptions = msg.GetOptions();
+ 
+       m_processInfo->SetPlayTimes(0,0,0,0);

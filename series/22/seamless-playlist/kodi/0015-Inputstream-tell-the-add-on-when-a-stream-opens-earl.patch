@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 21:51:04 -0600
+Subject: [PATCH] Inputstream: tell the add-on when a stream opens early
+
+An add-on gets no sign of why a stream opens. One opened ahead of its
+playback, while another item plays, may not show a dialog or take a
+licence that playback of the current item holds. It needs to know at
+Open so it can fail quietly instead.
+---
+ .../include/kodi/addon-instance/Inputstream.h | 19 ++++++++++++++++++-
+ .../kodi/c-api/addon-instance/inputstream.h   |  2 ++
+ .../kodi-dev-kit/include/kodi/versions.h      |  2 +-
+ .../DVDInputStreams/InputStreamAddon.cpp      |  1 +
+ .../DVDInputStreams/InputStreamAddon.h        |  3 +++
+ 5 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/addons/kodi-dev-kit/include/kodi/addon-instance/Inputstream.h b/xbmc/addons/kodi-dev-kit/include/kodi/addon-instance/Inputstream.h
+--- a/xbmc/addons/kodi-dev-kit/include/kodi/addon-instance/Inputstream.h
++++ b/xbmc/addons/kodi-dev-kit/include/kodi/addon-instance/Inputstream.h
+@@ -0,6 +0,7 @@
+   /// | **List of properties** | `std::map<std::string, std::string>` | @ref InputstreamProperty::GetProperties "GetProperties"
+   /// | **Get addon library folder** | `std::string` | @ref InputstreamProperty::GetLibFolder "GetLibFolder"
+   /// | **Get addon profile/user folder** | `std::string` | @ref InputstreamProperty::GetProfileFolder "GetProfileFolder"
++  /// | **Opened ahead of playback** | `bool` | @ref InputstreamProperty::IsPrefetch "IsPrefetch"
+ 
+   /// @addtogroup cpp_kodi_addon_inputstream_Defs_InputstreamProperty
+   ///@{
+@@ -0,6 +0,12 @@
+   /// @note As alternative can also @ref kodi::GetBaseUserPath used.
+   std::string GetProfileFolder() const { return m_cStructure->m_profileFolder; }
+ 
++  /// @brief Whether Kodi opens the stream ahead of its playback, while another item plays.
++  ///
++  /// @note An add-on that would need the user, such as a dialog, should fail the open instead.
++  /// Always false on a Kodi whose inputstream API is older than 3.5.0.
++  bool IsPrefetch() const { return m_hasPrefetch && m_cStructure->m_prefetch; }
++
+   ///@}
+ 
+ private:
+@@ -0,6 +0,14 @@
+   InputstreamProperty(const InputstreamProperty& stream) = delete;
+   InputstreamProperty(const INPUTSTREAM_PROPERTY* stream) : CStructHdl(stream) {}
+   InputstreamProperty(INPUTSTREAM_PROPERTY* stream) : CStructHdl(stream) {}
++  InputstreamProperty(INPUTSTREAM_PROPERTY* stream, bool hasPrefetch)
++    : CStructHdl(stream),
++      m_hasPrefetch(hasPrefetch)
++  {
++  }
++
++  // a Kodi older than 3.5.0 passes a property without m_prefetch
++  bool m_hasPrefetch{false};
+ };
+ ///@}
+ //------------------------------------------------------------------------------
+@@ -0,6 +0,7 @@
+ /// | <b>`point`</b> | The identification of the addon instance to inputstream is mandatory <b>`kodi.inputstream`</b>. In addition, the instance declared in the first <b>`<extension ... />`</b> is also
+ /// | <b>`extension`</b> | A filename extension is an identifier specified as a suffix to the name of a computer file where supported by addon.
+ /// | <b>`listitemprops`</b> | Values that are available to the addon at @ref InputstreamProperty::GetProperties() and that can be passed to @ref CInstanceInputStream::Open() ith the respective values.
++/// | <b>`prefetch`</b> | Optional, <b>`true`</b> if Kodi may open the next playlist item ahead of its playback, while another instance of the addon plays. Such an open is told by @ref InputstreamProperty::IsPrefetch().
+ /// | <b>`protocols`</b> | The streaming protocol is a special protocol supported by the addon for the transmission of streaming media data over a network.
+ /// | <b>`library_@PLATFORM@`</b> | The runtime library used for the addon. This is usually declared by cmake and correctly displayed in the translated `addon.xml`.
+ ///
+@@ -0,7 +0,8 @@
+   inline static bool ADDON_Open(const AddonInstance_InputStream* instance,
+                                 INPUTSTREAM_PROPERTY* props)
+   {
+-    return static_cast<CInstanceInputStream*>(instance->toAddon->addonInstance)->Open(props);
++    auto* addon = static_cast<CInstanceInputStream*>(instance->toAddon->addonInstance);
++    return addon->Open(InputstreamProperty(props, addon->IsInstanceAPIVersionAtLeast(3, 5, 0)));
+   }
+ 
+   inline static void ADDON_Close(const AddonInstance_InputStream* instance)
+diff --git a/xbmc/addons/kodi-dev-kit/include/kodi/c-api/addon-instance/inputstream.h b/xbmc/addons/kodi-dev-kit/include/kodi/c-api/addon-instance/inputstream.h
+--- a/xbmc/addons/kodi-dev-kit/include/kodi/c-api/addon-instance/inputstream.h
++++ b/xbmc/addons/kodi-dev-kit/include/kodi/c-api/addon-instance/inputstream.h
+@@ -0,6 +0,8 @@
+ 
+     const char* m_libFolder;
+     const char* m_profileFolder;
++
++    bool m_prefetch;
+   };
+ 
+   /*!
+diff --git a/xbmc/addons/kodi-dev-kit/include/kodi/versions.h b/xbmc/addons/kodi-dev-kit/include/kodi/versions.h
+--- a/xbmc/addons/kodi-dev-kit/include/kodi/versions.h
++++ b/xbmc/addons/kodi-dev-kit/include/kodi/versions.h
+@@ -0,7 +0,7 @@
+ #define ADDON_INSTANCE_VERSION_IMAGEDECODER_DEPENDS   "c-api/addon-instance/imagedecoder.h" \
+                                                       "addon-instance/ImageDecoder.h"
+ 
+-#define ADDON_INSTANCE_VERSION_INPUTSTREAM            "3.4.1"
++#define ADDON_INSTANCE_VERSION_INPUTSTREAM            "3.5.0"
+ #define ADDON_INSTANCE_VERSION_INPUTSTREAM_MIN        "3.4.0"
+ #define ADDON_INSTANCE_VERSION_INPUTSTREAM_XML_ID     "kodi.binary.instance.inputstream"
+ #define ADDON_INSTANCE_VERSION_INPUTSTREAM_DEPENDS    "c-api/addon-instance/inputstream.h" \
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.cpp
+@@ -0,6 +0,7 @@
+   std::string profileFolder = CSpecialProtocol::TranslatePath(Addon()->Profile());
+   props.m_libFolder = libFolder.c_str();
+   props.m_profileFolder = profileFolder.c_str();
++  props.m_prefetch = m_prefetch;
+ 
+   DetectScreenResolution();
+ 
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.h b/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/InputStreamAddon.h
+@@ -0,6 +0,8 @@
+ 
+   static bool Supports(const ADDON::AddonInfoPtr& addonInfo, const CFileItem& fileitem);
+ 
++  void SetPrefetch(bool prefetch) { m_prefetch = prefetch; }
++
+   // CDVDInputStream
+   bool Open() override;
+   void Close() override;
+@@ -0,6 +0,7 @@
+ 
+   unsigned int m_currentVideoWidth{0};
+   unsigned int m_currentVideoHeight{0};
++  bool m_prefetch{false};
+ 
+   std::vector<std::string> m_fileItemProps;
+   INPUTSTREAM_CAPABILITIES m_caps;

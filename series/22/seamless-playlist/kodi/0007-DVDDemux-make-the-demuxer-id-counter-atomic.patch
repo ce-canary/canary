@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 16:54:29 -0600
+Subject: [PATCH] DVDDemux: make the demuxer id counter atomic
+
+Demuxers are created on the player thread and, through the DVDFileInfo
+thumbnail and stream details jobs, on job threads at the same time.
+The id counter they share is a plain static, so two demuxers can get
+the same id and the stream lookup by demuxer id mixes them up.
+---
+ xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h
+@@ -0,6 +0,7 @@
+ #include "cores/FFmpeg.h"
+ #include "utils/LanguageTag.h"
+ 
++#include <atomic>
+ #include <chrono>
+ #include <memory>
+ #include <string>
+@@ -0,7 +0,7 @@
+ private:
+   static int64_t NewGuid()
+   {
+-    static int64_t guid = 0;
++    static std::atomic<int64_t> guid{0};
+     return guid++;
+   }
+ 

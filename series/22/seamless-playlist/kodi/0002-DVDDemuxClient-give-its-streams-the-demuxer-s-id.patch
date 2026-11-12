@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 15:45:19 -0600
+Subject: [PATCH] DVDDemuxClient: give its streams the demuxer's id
+
+The streams of an add-on demuxer kept demuxer id -1, while its packets
+carry the demuxer's own id. The player tells a stale stream from a
+current one by demuxer id and stream id. A stream of a closed add-on
+demuxer matched the stream with the same id in the next one.
+---
+ xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp
+@@ -0,6 +0,7 @@
+     std::dynamic_pointer_cast<CDemuxStreamClientInternal>(toStream)->m_announced = *stream;
+ 
+   toStream->uniqueId = stream->uniqueId;
++  toStream->demuxerId = GetDemuxerId();
+   toStream->codec = stream->codec;
+   toStream->codecName = stream->codecName;
+   toStream->codec_fourcc = stream->codec_fourcc;

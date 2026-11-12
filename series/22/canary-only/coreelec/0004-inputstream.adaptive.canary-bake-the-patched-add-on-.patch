@@ -1,0 +1,3272 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 22:15:58 -0600
+Subject: [PATCH] inputstream.adaptive.canary: bake the patched add-on into the
+ image
+
+inputstream.adaptive keeps one session state per process, so Kodi cannot
+open the next playlist item while the current one plays. The canary carries
+the add-on patches that make the state per instance, as an image add-on
+whose version is above the repository's.
+---
+ .../Amlogic-ce/devices/Amlogic-no/options     |    2 +-
+ .../inputstream.adaptive.canary/package.mk    |   23 +
+ ...-the-sample-pools-against-concurrent.patch |  231 +++
+ ...i-properties-and-cookies-per-session.patch | 1619 +++++++++++++++++
+ ...settings-and-thread-pool-between-ins.patch |  239 +++
+ ...hare-the-cdm-module-between-adapters.patch |  123 ++
+ ...e-the-remaining-state-shared-by-inst.patch |  121 ++
+ ...refetch-open-that-would-show-a-dialo.patch |  284 +++
+ ...reams-kodi-opens-again-before-the-fi.patch |   54 +
+ ...fetched-item-s-first-reads-at-stream.patch |   75 +
+ ....xml-declare-the-prefetch-capability.patch |   23 +
+ ...the-largest-size-instead-of-forcing-.patch |  377 ++++
+ 12 files changed, 3170 insertions(+), 1 deletion(-)
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/package.mk
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-01-decrypters-guard-the-sample-pools-against-concurrent.patch
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-02-session-keep-kodi-properties-and-cookies-per-session.patch
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-03-srvbroker-share-settings-and-thread-pool-between-ins.patch
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-04-cdm-share-the-cdm-module-between-adapters.patch
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-05-decrypters-remove-the-remaining-state-shared-by-inst.patch
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-06-main-decline-a-prefetch-open-that-would-show-a-dialo.patch
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-07-main-keep-the-streams-kodi-opens-again-before-the-fi.patch
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-08-main-start-a-prefetched-item-s-first-reads-at-stream.patch
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-09-addon.xml-declare-the-prefetch-capability.patch
+ create mode 100644 projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-10-chooser-declare-the-largest-size-instead-of-forcing-.patch
+
+diff --git a/projects/Amlogic-ce/devices/Amlogic-no/options b/projects/Amlogic-ce/devices/Amlogic-no/options
+--- a/projects/Amlogic-ce/devices/Amlogic-no/options
++++ b/projects/Amlogic-ce/devices/Amlogic-no/options
+@@ -0,7 +0,7 @@
+   # Space separated list is supported,
+   # e.g. ADDITIONAL_PACKAGES="PACKAGE1 PACKAGE2"
+   # ADDITIONAL_PACKAGES+=""
+-    ADDITIONAL_PACKAGES+=" canary-bdj hyperion.canary"
++    ADDITIONAL_PACKAGES+=" canary-bdj hyperion.canary inputstream.adaptive.canary"
+ 
+   # add OOTB support for IR remote
+   # IR_REMOTE_KEYMAPS+=""
+diff --git a/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/package.mk b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/package.mk
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/package.mk
+@@ -0,0 +0,23 @@
++# SPDX-License-Identifier: GPL-2.0-or-later
++# Copyright (C) 2026-present Team CoreELEC (https://coreelec.org)
++
++# the add-on keeps its id, as items name it in their inputstream property
++. $(get_pkg_directory inputstream.adaptive)/package.mk
++
++PKG_NAME="inputstream.adaptive.canary"
++PKG_URL=""
++PKG_DEPENDS_UNPACK+=" inputstream.adaptive"
++PKG_IS_ADDON="embedded"
++
++unpack() {
++  mkdir -p ${PKG_BUILD}
++  tar --strip-components=1 -xf ${SOURCES}/inputstream.adaptive/inputstream.adaptive-${PKG_VERSION}.tar.gz -C ${PKG_BUILD}
++}
++
++# above the repository's <version>.<rev>, so Kodi loads this copy while both are installed
++post_makeinstall_target() {
++  local addon_xml="${INSTALL}/usr/share/kodi/addons/inputstream.adaptive/addon.xml"
++  local addon_version="$(xmlstarlet sel -t -v "/addon/@version" "${addon_xml}").1000"
++
++  xmlstarlet ed --inplace -u "/addon/@version" -v "${addon_version}" "${addon_xml}"
++}
+diff --git a/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-01-decrypters-guard-the-sample-pools-against-concurrent.patch b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-01-decrypters-guard-the-sample-pools-against-concurrent.patch
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-01-decrypters-guard-the-sample-pools-against-concurrent.patch
+@@ -0,0 +0,231 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Tue, 10 Nov 2026 00:43:41 -0600
++Subject: [PATCH 01/10] [decrypters] Guard the sample pools against concurrent
++ readers
++
++All stream readers of a DRM session share its sample pools and the
++Widevine decrypt buffers. A stream opened during playback adds a pool on
++the player thread while another stream's reader decrypts on the thread
++pool, so the pool could be reallocated under that reader.
++---
++ .../ClearKeyCencSingleSampleDecrypter.cpp     |  8 +++++++
++ .../ClearKeyCencSingleSampleDecrypter.h       |  3 +++
++ .../widevine/WVCencSingleSampleDecrypter.cpp  | 23 ++++++++++++++++---
++ .../widevine/WVCencSingleSampleDecrypter.h    |  2 ++
++ .../WVCencSingleSampleDecrypter.cpp           |  9 ++++++++
++ .../WVCencSingleSampleDecrypter.h             |  3 +++
++ 6 files changed, 45 insertions(+), 3 deletions(-)
++
++diff --git a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
++index 8deb5d0d94..474a4e8720 100644
++--- a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
+++++ b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
++@@ -110,6 +110,8 @@ bool CClearKeyCencSingleSampleDecrypter::HasKeyId(const std::vector<uint8_t>& ke
++ 
++ AP4_UI32 CClearKeyCencSingleSampleDecrypter::AddPool()
++ {
+++  std::lock_guard<std::mutex> lock(m_poolMutex);
+++
++   const AP4_UI32 poolId = static_cast<AP4_UI32>(m_pool.size());
++ 
++   m_pool.emplace(poolId, PINFO());
++@@ -119,6 +121,8 @@ AP4_UI32 CClearKeyCencSingleSampleDecrypter::AddPool()
++ 
++ void CClearKeyCencSingleSampleDecrypter::RemovePool(AP4_UI32 poolId)
++ {
+++  std::lock_guard<std::mutex> lock(m_poolMutex);
+++
++   m_pool.erase(poolId);
++ }
++ 
++@@ -130,6 +134,8 @@ AP4_Result CClearKeyCencSingleSampleDecrypter::SetFragmentInfo(
++     DRM::Capabilities flags,
++     CryptoInfo cryptoInfo)
++ {
+++  std::lock_guard<std::mutex> lock(m_poolMutex);
+++
++   if (!STRING::KeyExists(m_pool, poolId))
++   {
++     LOG::LogF(LOGERROR, "Cannot set fragment info, the pool id %u dont exist", poolId);
++@@ -170,6 +176,8 @@ AP4_Result CClearKeyCencSingleSampleDecrypter::DecryptSampleData(
++     const AP4_UI32* bytesOfEncryptedData,
++     DRM::DRMMediaType streamType)
++ {
+++  std::lock_guard<std::mutex> lock(m_poolMutex);
+++
++   if (m_pool.empty())
++   {
++     LOG::LogF(LOGERROR, "Cannot decrypt data, the pool is empty");
++diff --git a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
++index efe04b4943..f58d2755f1 100644
++--- a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
+++++ b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
++@@ -12,6 +12,7 @@
++ 
++ #include <cstdint>
++ #include <map>
+++#include <mutex>
++ #include <vector>
++ 
++ class CClearKeyDecrypter;
++@@ -79,6 +80,8 @@ private:
++ 
++   // \brif Decrypter pool
++   std::map<AP4_UI32, PINFO> m_pool; // ID - Pool info
+++  // the stream readers run on several threads
+++  std::mutex m_poolMutex;
++ 
++   DRM::Config m_config;
++   std::vector<uint8_t> m_defaultKeyId;
++diff --git a/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp b/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
++index 80c1c0db7d..a057115c9a 100644
++--- a/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
+++++ b/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
++@@ -457,6 +457,8 @@ AP4_Result CWVCencSingleSampleDecrypter::SetFragmentInfo(AP4_UI32 poolId,
++                                                          DRM::Capabilities caps,
++                                                          CryptoInfo cryptoInfo)
++ {
+++  std::lock_guard<std::mutex> lock(m_poolMutex);
+++
++   if (poolId >= m_fragmentPool.size())
++     return AP4_ERROR_OUT_OF_RANGE;
++ 
++@@ -471,6 +473,8 @@ AP4_Result CWVCencSingleSampleDecrypter::SetFragmentInfo(AP4_UI32 poolId,
++ 
++ AP4_UI32 CWVCencSingleSampleDecrypter::AddPool()
++ {
+++  std::lock_guard<std::mutex> lock(m_poolMutex);
+++
++   for (size_t i(0); i < m_fragmentPool.size(); ++i)
++     if (m_fragmentPool[i].m_nalLengthSize == 99)
++     {
++@@ -485,6 +489,8 @@ AP4_UI32 CWVCencSingleSampleDecrypter::AddPool()
++ 
++ void CWVCencSingleSampleDecrypter::RemovePool(AP4_UI32 poolId)
++ {
+++  std::lock_guard<std::mutex> lock(m_poolMutex);
+++
++   m_fragmentPool[poolId].m_nalLengthSize = 99;
++   m_fragmentPool[poolId].m_key.clear();
++ }
++@@ -575,6 +581,20 @@ AP4_Result CWVCencSingleSampleDecrypter::DecryptSampleData(AP4_UI32 poolId,
++     return AP4_SUCCESS;
++   }
++ 
+++  // a renewal is a license request, keep it out of the pool lock. The video decoder renews
+++  // for a secure path stream
+++  bool isRenewalHere{true};
+++#ifndef TARGET_WEBOS
+++  {
+++    std::lock_guard<std::mutex> lock(m_poolMutex);
+++    isRenewalHere = !m_fragmentPool[poolId].capabilities.HasFlag(Capabilities::SECURE_PATH);
+++  }
+++#endif
+++  if (isRenewalHere)
+++    CheckLicenseRenewal();
+++
+++  std::lock_guard<std::mutex> lock(m_poolMutex);
+++
++   FINFO& fragInfo(m_fragmentPool[poolId]);
++ 
++   if (fragInfo.capabilities.HasFlag(Capabilities::SECURE_PATH)) //we can not decrypt only
++@@ -659,8 +679,6 @@ AP4_Result CWVCencSingleSampleDecrypter::DecryptSampleData(AP4_UI32 poolId,
++     CdmDecryptedBlock cdmOut;
++     cdmOut.SetDecryptedBuffer(&buf);
++ 
++-    CheckLicenseRenewal();
++-
++     cdm::Status ret = m_cdmAdapter->GetCDM()->Decrypt(cdmIn, &cdmOut, ToCdmStreamType(streamType));
++     if (ret != cdm::kSuccess)
++     {
++@@ -771,7 +789,6 @@ AP4_Result CWVCencSingleSampleDecrypter::DecryptSampleData(AP4_UI32 poolId,
++     CdmDecryptedBlock cdmOut;
++     cdmOut.SetDecryptedBuffer(&buf);
++ 
++-    CheckLicenseRenewal();
++     ret = m_cdmAdapter->GetCDM()->Decrypt(cdmIn, &cdmOut, ToCdmStreamType(streamType));
++ 
++     if (ret == cdm::Status::kSuccess)
++diff --git a/src/decrypters/widevine/WVCencSingleSampleDecrypter.h b/src/decrypters/widevine/WVCencSingleSampleDecrypter.h
++index 4b0004b03b..945693c2f0 100644
++--- a/src/decrypters/widevine/WVCencSingleSampleDecrypter.h
+++++ b/src/decrypters/widevine/WVCencSingleSampleDecrypter.h
++@@ -106,6 +106,8 @@ private:
++   int m_hdcpLimit{0};
++   int m_resolutionLimit{0};
++ 
+++  // guards the pool and the decrypt buffers, the stream readers run on several threads
+++  std::mutex m_poolMutex;
++   AP4_DataBuffer m_decryptIn;
++   AP4_DataBuffer m_decryptOut;
++ 
++diff --git a/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp b/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp
++index c3ae7f6528..1877f04132 100644
++--- a/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp
+++++ b/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp
++@@ -528,6 +528,8 @@ AP4_Result CWVCencSingleSampleDecrypterA::SetFragmentInfo(AP4_UI32 poolId,
++                                                           DRM::Capabilities caps,
++                                                           CryptoInfo cryptoInfo)
++ {
+++  std::unique_lock<std::mutex> lock(m_poolMutex);
+++
++   if (poolId >= m_fragmentPool.size())
++     return AP4_ERROR_OUT_OF_RANGE;
++ 
++@@ -535,6 +537,7 @@ AP4_Result CWVCencSingleSampleDecrypterA::SetFragmentInfo(AP4_UI32 poolId,
++   m_fragmentPool[poolId].m_nalLengthSize = nalLengthSize;
++   m_fragmentPool[poolId].m_annexbSpsPps = annexbSpsPps;
++   m_fragmentPool[poolId].capabilities = caps;
+++  lock.unlock();
++ 
++   if (m_isKeyUpdateRequested)
++     KeyUpdateRequest(false, false);
++@@ -544,6 +547,8 @@ AP4_Result CWVCencSingleSampleDecrypterA::SetFragmentInfo(AP4_UI32 poolId,
++ 
++ AP4_UI32 CWVCencSingleSampleDecrypterA::AddPool()
++ {
+++  std::lock_guard<std::mutex> lock(m_poolMutex);
+++
++   for (size_t i(0); i < m_fragmentPool.size(); ++i)
++     if (m_fragmentPool[i].m_nalLengthSize == 99)
++     {
++@@ -558,6 +563,8 @@ AP4_UI32 CWVCencSingleSampleDecrypterA::AddPool()
++ 
++ void CWVCencSingleSampleDecrypterA::RemovePool(AP4_UI32 poolId)
++ {
+++  std::lock_guard<std::mutex> lock(m_poolMutex);
+++
++   m_fragmentPool[poolId].m_nalLengthSize = 99;
++   m_fragmentPool[poolId].m_key.clear();
++ }
++@@ -574,6 +581,8 @@ AP4_Result CWVCencSingleSampleDecrypterA::DecryptSampleData(AP4_UI32 poolId,
++   if (!m_cdmAdapter->GetCDM())
++     return AP4_ERROR_INVALID_STATE;
++ 
+++  std::lock_guard<std::mutex> lock(m_poolMutex);
+++
++   FINFO& fragInfo(m_fragmentPool[poolId]);
++ 
++   if (fragInfo.m_nalLengthSize > 4)
++diff --git a/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.h b/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.h
++index a5bdc9fdb6..d5d681f503 100644
++--- a/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.h
+++++ b/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.h
++@@ -13,6 +13,7 @@
++ #include "decrypters/IDecrypter.h"
++ 
++ #include <map>
+++#include <mutex>
++ #include <string_view>
++ 
++ class CJNIMediaDrm;
++@@ -117,6 +118,8 @@ private:
++ 
++   std::vector<uint8_t> m_defaultKeyId;
++ 
+++  // the stream readers run on several threads
+++  std::mutex m_poolMutex;
++   std::vector<FINFO> m_fragmentPool;
++ 
++   uint16_t m_hdcpVersion{DRM::HDCP_V_MAX};
+diff --git a/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-02-session-keep-kodi-properties-and-cookies-per-session.patch b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-02-session-keep-kodi-properties-and-cookies-per-session.patch
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-02-session-keep-kodi-properties-and-cookies-per-session.patch
+@@ -0,0 +0,1619 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Mon, 9 Nov 2026 21:55:11 -0600
++Subject: [PATCH 02/10] [Session] Keep Kodi properties and cookies per session
++
++The service broker held the Kodi properties, cookies, screen info and
++manifest tree as process-wide state. A second add-on instance replaced
++them with its own, and closing one instance destroyed them under the
++other.
++---
++ src/CompKodiProps.cpp                         |  2 +-
++ src/CompKodiProps.h                           |  4 +-
++ src/CompResources.h                           | 37 ----------------
++ src/Session.cpp                               | 27 +++++++-----
++ src/Session.h                                 | 14 ++++--
++ src/SrvBroker.cpp                             | 16 -------
++ src/SrvBroker.h                               | 43 -------------------
++ src/codechandler/TTMLCodecHandler.cpp         | 11 +----
++ src/codechandler/TTMLCodecHandler.h           |  5 ++-
++ src/common/AdaptiveStream.cpp                 |  7 ++-
++ src/common/AdaptiveStream.h                   |  1 +
++ src/common/AdaptiveTree.cpp                   | 18 +++++---
++ src/common/AdaptiveTree.h                     | 21 +++++++++
++ src/common/Chooser.cpp                        | 11 ++---
++ src/common/Chooser.h                          | 10 ++++-
++ src/decrypters/DrmEngine.cpp                  | 12 ++++--
++ src/decrypters/DrmEngine.h                    |  8 +++-
++ src/decrypters/DrmEngineDefines.h             | 14 ++++++
++ .../ClearKeyCencSingleSampleDecrypter.cpp     |  5 ++-
++ .../ClearKeyCencSingleSampleDecrypter.h       |  1 +
++ src/decrypters/clearkey/ClearKeyDecrypter.cpp |  2 +-
++ .../widevine/WVCencSingleSampleDecrypter.cpp  |  2 +-
++ .../WVCencSingleSampleDecrypter.cpp           |  5 ++-
++ src/main.cpp                                  | 13 +++---
++ src/main.h                                    |  1 +
++ src/parser/DASHTree.cpp                       | 27 +++++++-----
++ src/parser/DASHTree.h                         |  2 +
++ src/parser/HLSTree.cpp                        | 15 ++++---
++ src/parser/HLSTree.h                          |  2 +
++ src/parser/SmoothTree.cpp                     |  5 +--
++ src/samplereader/FragmentedSampleReader.cpp   |  5 ++-
++ src/samplereader/FragmentedSampleReader.h     |  1 +
++ src/samplereader/SubtitleSampleReader.cpp     | 16 +++----
++ src/samplereader/SubtitleSampleReader.h       |  3 +-
++ src/test/TestDASHTree.cpp                     |  7 ++-
++ src/test/TestHLSTree.cpp                      |  7 ++-
++ src/test/TestSmoothTree.cpp                   |  8 +++-
++ src/utils/CurlUtils.cpp                       | 33 ++++++++------
++ src/utils/CurlUtils.h                         | 32 +++++++++++++-
++ 39 files changed, 239 insertions(+), 214 deletions(-)
++
++diff --git a/src/CompKodiProps.cpp b/src/CompKodiProps.cpp
++index d76762270c..109eb989a9 100644
++--- a/src/CompKodiProps.cpp
+++++ b/src/CompKodiProps.cpp
++@@ -95,7 +95,7 @@ void LogDrmJsonDictKeys(std::string_view keyName,
++ }
++ } // unnamed namespace
++ 
++-void ADP::KODI_PROPS::CCompKodiProps::InitStage1(const std::map<std::string, std::string>& props)
+++ADP::KODI_PROPS::CCompKodiProps::CCompKodiProps(const std::map<std::string, std::string>& props)
++ {
++   std::string licenseUrl;
++ 
++diff --git a/src/CompKodiProps.h b/src/CompKodiProps.h
++index ad0e547c0d..3a7a74b70d 100644
++--- a/src/CompKodiProps.h
+++++ b/src/CompKodiProps.h
++@@ -160,11 +160,9 @@ struct DrmCfg
++ class ATTR_DLL_LOCAL CCompKodiProps
++ {
++ public:
++-  CCompKodiProps() = default;
+++  CCompKodiProps(const std::map<std::string, std::string>& props);
++   ~CCompKodiProps() = default;
++ 
++-  void InitStage1(const std::map<std::string, std::string>& props);
++-
++   // \brief HTTP headers used for any HTTP request
++   const std::map<std::string, std::string>& GetCommonHeaders() const { return m_commonHeaders; }
++ 
++diff --git a/src/CompResources.h b/src/CompResources.h
++index b9650eb252..81276f7c90 100644
++--- a/src/CompResources.h
+++++ b/src/CompResources.h
++@@ -21,12 +21,6 @@
++ #include <string>
++ #include <unordered_set>
++ 
++-// forwards
++-namespace adaptive
++-{
++-class AdaptiveTree;
++-}
++-
++ namespace ADP
++ {
++ namespace RESOURCES
++@@ -53,28 +47,6 @@ public:
++   CCompResources() = default;
++   ~CCompResources() = default;
++ 
++-  void InitStage2(adaptive::AdaptiveTree* tree) { m_tree = tree; }
++-
++-  /*!
++-   * \brief Get the current screen info.
++-   * \return The screen info.
++-   */
++-  ScreenInfo GetScreenInfo()
++-  {
++-    std::lock_guard<std::mutex> lock(m_screenInfoMutex);
++-    return m_screenInfo;
++-  }
++-
++-  /*!
++-   * \brief Set the screen info.
++-   * \param screenInfo The scren info
++-   */
++-  void SetScreenInfo(const ScreenInfo& screenInfo)
++-  {
++-    std::lock_guard<std::mutex> lock(m_screenInfoMutex);
++-    m_screenInfo = screenInfo;
++-  }
++-
++   /*!
++    * \brief Cookies that can be shared along with HTTP requests.
++    *        Some video services require you to accept cookies and send cookies along with requests.
++@@ -88,18 +60,9 @@ public:
++ 
++   std::mutex& GetCookiesMutex() { return m_cookiesMutex; }
++ 
++-  /*!
++-   * \brief Get the manifest tree.
++-   * \return The manifest tree.
++-   */
++-  const adaptive::AdaptiveTree& GetTree() const { return *m_tree; }
++-
++ private:
++-  ScreenInfo m_screenInfo;
++-  std::mutex m_screenInfoMutex;
++   std::unordered_set<UTILS::CURL::Cookie> m_cookies;
++   std::mutex m_cookiesMutex;
++-  adaptive::AdaptiveTree* m_tree{nullptr};
++ };
++ } // namespace RESOURCES
++ } // namespace ADP
++diff --git a/src/Session.cpp b/src/Session.cpp
++index cc657d204c..4efd63e11a 100644
++--- a/src/Session.cpp
+++++ b/src/Session.cpp
++@@ -82,6 +82,11 @@ uint64_t PTSToElapsed(uint64_t pts, CStream* stream)
++ }
++ } // unnamed namespace
++ 
+++SESSION::CSession::CSession(const std::map<std::string, std::string>& kodiProps)
+++  : m_kodiProps(kodiProps), m_drmEngine(m_kodiProps, m_resources)
+++{
+++}
+++
++ SESSION::CSession::~CSession()
++ {
++   LOG::Log(LOGDEBUG, "CSession::~CSession()");
++@@ -110,9 +115,11 @@ void SESSION::CSession::DeleteStreams()
++ |   initialize
++ +---------------------------------------------------------------------*/
++ 
++-SResult SESSION::CSession::Initialize(std::string manifestUrl)
+++SResult SESSION::CSession::Initialize(std::string manifestUrl,
+++                                     const ADP::RESOURCES::ScreenInfo& screenInfo)
++ {
++-  m_reprChooser = CHOOSER::CreateRepresentationChooser();
+++  m_reprChooser =
+++      CHOOSER::CreateRepresentationChooser(m_kodiProps.GetChooserProps(), screenInfo);
++ 
++   switch (CSrvBroker::GetSettings().GetMediaType())
++   {
++@@ -130,7 +137,7 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl)
++       m_mediaTypeMask = static_cast<uint8_t>(~0);
++   }
++ 
++-  auto& kodiProps = CSrvBroker::GetKodiProps();
+++  auto& kodiProps = m_kodiProps;
++   std::map<std::string, std::string> manifestHeaders = kodiProps.GetManifestHeaders();
++ 
++   DRM::DRMSession session;
++@@ -148,7 +155,8 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl)
++   URL::AppendParameters(manifestUrl, kodiProps.GetManifestParams());
++ 
++   CURL::HTTPResponse manifestResp;
++-  if (!CURL::DownloadFile(manifestUrl, manifestHeaders, {"etag", "last-modified"}, manifestResp))
+++  if (!CURL::DownloadFile(manifestUrl, m_kodiProps, m_resources, manifestHeaders,
+++                          {"etag", "last-modified"}, manifestResp))
++     return SResult::Error(GUI::GetLocalizedString(30307));
++ 
++   // The download speed with small file sizes is not accurate, we should download at least 512Kb
++@@ -169,7 +177,8 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl)
++     return SResult::Error(GUI::GetLocalizedString(30308));
++   }
++ 
++-  m_adaptiveTree->Configure(m_reprChooser, kodiProps.GetManifestUpdParams());
+++  m_adaptiveTree->Configure(m_reprChooser, m_kodiProps, m_resources,
+++                            kodiProps.GetManifestUpdParams());
++ 
++   if (!m_adaptiveTree->Open(manifestResp.effectiveUrl, manifestResp.headers, manifestResp.data))
++   {
++@@ -180,8 +189,6 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl)
++   m_adaptiveTree->PostOpen();
++   m_reprChooser->PostInit();
++ 
++-  CSrvBroker::GetInstance()->InitStage2(m_adaptiveTree);
++-
++   InitializePeriod();
++ 
++   return SResultCode::OK;
++@@ -189,7 +196,7 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl)
++ 
++ bool SESSION::CSession::CheckPlayableStreams(PLAYLIST::CPeriod* period)
++ {
++-  auto& kodiPropCfg = CSrvBroker::GetKodiProps().GetConfig();
+++  auto& kodiPropCfg = m_kodiProps.GetConfig();
++ 
++   if (kodiPropCfg.resolutionLimit == 0 &&
++       kodiPropCfg.hdcpCheck == ADP::KODI_PROPS::HdcpCheckType::DEFAULT)
++@@ -795,9 +802,9 @@ uint64_t SESSION::CSession::GetTotalTimeMs() const
++     return m_adaptiveTree->m_totalTime;
++ }
++ 
++-void SESSION::CSession::OnScreenResChange()
+++void SESSION::CSession::OnScreenResChange(const ADP::RESOURCES::ScreenInfo& screenInfo)
++ {
++-  m_reprChooser->OnUpdateScreenRes();
+++  m_reprChooser->OnUpdateScreenRes(screenInfo);
++ };
++ 
++ bool SESSION::CSession::GetNextSample(ISampleReader*& sampleReader)
++diff --git a/src/Session.h b/src/Session.h
++index 1a35a7b7f3..26d68edda6 100644
++--- a/src/Session.h
+++++ b/src/Session.h
++@@ -8,6 +8,8 @@
++ 
++ #pragma once
++ 
+++#include "CompKodiProps.h"
+++#include "CompResources.h"
++ #include "Stream.h"
++ #include "common/AdaptiveStream.h"
++ #include "common/AdaptiveTree.h"
++@@ -19,7 +21,9 @@
++ #include <kodi/platform/android/System.h>
++ #endif
++ 
+++#include <map>
++ #include <memory>
+++#include <string>
++ 
++ class Adaptive_CencSingleSampleDecrypter;
++ 
++@@ -28,16 +32,17 @@ namespace SESSION
++ class ATTR_DLL_LOCAL CSession : public adaptive::AdaptiveStreamObserver
++ {
++ public:
++-  CSession() = default;
+++  CSession(const std::map<std::string, std::string>& kodiProps);
++   virtual ~CSession();
++ 
++   void DeleteStreams();
++ 
++   /*! \brief Initialize the session
++    *  \param manifestUrl The manifest URL
+++   *  \param screenInfo The screen info
++    *  \return True if has success, false otherwise
++    */
++-  SResult Initialize(std::string manifestUrl);
+++  SResult Initialize(std::string manifestUrl, const ADP::RESOURCES::ScreenInfo& screenInfo);
++ 
++   bool CheckPlayableStreams(PLAYLIST::CPeriod* period);
++ 
++@@ -131,8 +136,9 @@ public:
++ 
++   /*!
++    * \brief Callback for screen resolution change.
+++   * \param screenInfo The screen info
++    */
++-  void OnScreenResChange();
+++  void OnScreenResChange(const ADP::RESOURCES::ScreenInfo& screenInfo);
++ 
++   /*!
++    * \brief Seek streams and readers to a specified time.
++@@ -257,6 +263,8 @@ protected:
++   uint64_t GetMediaDurationMs();
++ 
++ private:
+++  ADP::KODI_PROPS::CCompKodiProps m_kodiProps;
+++  ADP::RESOURCES::CCompResources m_resources;
++   DRM::CDRMEngine m_drmEngine;
++ 
++   adaptive::AdaptiveTree* m_adaptiveTree{nullptr};
++diff --git a/src/SrvBroker.cpp b/src/SrvBroker.cpp
++index 1947234ce0..03ea8063e8 100644
++--- a/src/SrvBroker.cpp
+++++ b/src/SrvBroker.cpp
++@@ -8,8 +8,6 @@
++ 
++ #include "SrvBroker.h"
++ 
++-#include "CompKodiProps.h"
++-#include "CompResources.h"
++ #include "CompSettings.h"
++ 
++ using namespace ADP;
++@@ -19,24 +17,10 @@ CSrvBroker::~CSrvBroker() = default;
++ 
++ void CSrvBroker::Initialize()
++ {
++-  m_compKodiProps = std::make_unique<KODI_PROPS::CCompKodiProps>();
++-  m_compResources = std::make_unique<RESOURCES::CCompResources>();
++   m_compSettings = std::make_unique<SETTINGS::CCompSettings>();
++ }
++ 
++-void CSrvBroker::InitStage1(const std::map<std::string, std::string>& kodiProps)
++-{
++-  m_compKodiProps->InitStage1(kodiProps);
++-}
++-
++-void CSrvBroker::InitStage2(adaptive::AdaptiveTree* tree)
++-{
++-  m_compResources->InitStage2(tree);
++-}
++-
++ void CSrvBroker::Deinitialize()
++ {
++-  m_compKodiProps.reset();
++-  m_compResources.reset();
++   m_compSettings.reset();
++ }
++diff --git a/src/SrvBroker.h b/src/SrvBroker.h
++index 09b1968c0b..bed186e7c1 100644
++--- a/src/SrvBroker.h
+++++ b/src/SrvBroker.h
++@@ -14,27 +14,13 @@
++ #include <kodi/AddonBase.h>
++ #endif
++ 
++-#include <map>
++ #include <memory>
++-#include <string>
++ 
++ // forward
++-namespace ADP::RESOURCES
++-{
++-class CCompResources;
++-}
++ namespace ADP::SETTINGS
++ {
++ class CCompSettings;
++ }
++-namespace ADP::KODI_PROPS
++-{
++-class CCompKodiProps;
++-}
++-namespace adaptive
++-{
++-class AdaptiveTree;
++-}
++ 
++ /*
++  * \brief Service broker is a singleton that give an easy access to the resources from anywhere in the code.
++@@ -50,17 +36,6 @@ public:
++    */
++   void Initialize();
++ 
++-  /*
++-   * \brief Initialize service broker components, on addon initialization.
++-   */
++-  void InitStage1(const std::map<std::string, std::string>& kodiProps);
++-
++-  /*
++-   * \brief Initialize service broker components, on session initialization.
++-   * \param tree The adaptive tree
++-   */
++-  void InitStage2(adaptive::AdaptiveTree* tree);
++-
++   static CSrvBroker* GetInstance()
++   {
++     static CSrvBroker instance;
++@@ -72,22 +47,6 @@ public:
++    */
++   void Deinitialize();
++ 
++-  /*
++-   * \brief Get Kodi properties component, to read Kodi (Listitem / playlist files "STRM") properties.
++-   */
++-  static ADP::KODI_PROPS::CCompKodiProps& GetKodiProps()
++-  {
++-    return *GetInstance()->m_compKodiProps;
++-  }
++-
++-  /*
++-   * \brief Get resources component, for shared resources.
++-   */
++-  static ADP::RESOURCES::CCompResources& GetResources()
++-  {
++-    return *GetInstance()->m_compResources;
++-  }
++-
++   /*
++    * \brief Get settings component, to manage add-on XML settings.
++    */
++@@ -100,7 +59,5 @@ private:
++   CSrvBroker();
++   ~CSrvBroker();
++ 
++-  std::unique_ptr<ADP::KODI_PROPS::CCompKodiProps> m_compKodiProps;
++-  std::unique_ptr<ADP::RESOURCES::CCompResources> m_compResources;
++   std::unique_ptr<ADP::SETTINGS::CCompSettings> m_compSettings;
++ };
++diff --git a/src/codechandler/TTMLCodecHandler.cpp b/src/codechandler/TTMLCodecHandler.cpp
++index 53d143251e..8bd168a947 100644
++--- a/src/codechandler/TTMLCodecHandler.cpp
+++++ b/src/codechandler/TTMLCodecHandler.cpp
++@@ -8,10 +8,6 @@
++ 
++ #include "TTMLCodecHandler.h"
++ 
++-#include "CompResources.h"
++-#include "SrvBroker.h"
++-#include "common/AdaptiveTree.h"
++-
++ // Kodi dont support TTML, so TTML is converted into "Text Subtitle Decoder" Kodi format
++ // managed with Kodi core overlay decoder "CDVDOverlayCodecText".
++ // This format must contain only subtitle text formatted as STR (SubRip) format in the packet data.
++@@ -45,12 +41,9 @@ void TTMLCodecHandler::SetPTSOffset(AP4_UI64 offset)
++     m_ptsOffset = offset;
++ }
++ 
++-TTMLCodecHandler::TTMLCodecHandler(AP4_SampleDescription* sd, bool isFile)
++-  : CodecHandler(sd), m_ttml(isFile)
+++TTMLCodecHandler::TTMLCodecHandler(AP4_SampleDescription* sd, bool isFile, bool isTimeRelative)
+++  : CodecHandler(sd), m_ttml(isFile), m_isTimeRelative(isTimeRelative)
++ {
++-  // For Miscrosoft Smooth Streaming, the subtitle time is relative to sample time,
++-  // in this case its needed apply an offset.
++-  m_isTimeRelative = CSrvBroker::GetResources().GetTree().IsTTMLTimeRelative();
++ }
++ 
++ bool TTMLCodecHandler::Transform(AP4_UI64 pts,
++diff --git a/src/codechandler/TTMLCodecHandler.h b/src/codechandler/TTMLCodecHandler.h
++index 4596b9a13b..566860decd 100644
++--- a/src/codechandler/TTMLCodecHandler.h
+++++ b/src/codechandler/TTMLCodecHandler.h
++@@ -19,8 +19,9 @@ public:
++    * \param sd The MP4 sample description, for MP4 segmented case.
++    * \param isFile Specify if parsing a single "sidecar" file
++    *               (subtitles for the whole duration of the video content).
+++   * \param isTimeRelative Specify if the subtitle time is relative to sample time.
++    */
++-  TTMLCodecHandler(AP4_SampleDescription* sd, bool isFile);
+++  TTMLCodecHandler(AP4_SampleDescription* sd, bool isFile, bool isTimeRelative);
++ 
++   bool Transform(AP4_UI64 pts, AP4_UI32 duration, AP4_DataBuffer& buf, AP4_UI64 timescale) override;
++   bool ReadNextSample(AP4_Sample& sample, AP4_DataBuffer& buf) override;
++@@ -31,5 +32,5 @@ public:
++ private:
++   TTML2SRT m_ttml;
++   AP4_UI64 m_ptsOffset{0};
++-  bool m_isTimeRelative;
+++  bool m_isTimeRelative{false};
++ };
++diff --git a/src/common/AdaptiveStream.cpp b/src/common/AdaptiveStream.cpp
++index d706890ee4..98d1462a00 100644
++--- a/src/common/AdaptiveStream.cpp
+++++ b/src/common/AdaptiveStream.cpp
++@@ -14,7 +14,6 @@
++ #endif
++ #include "Chooser.h"
++ #include "CompKodiProps.h"
++-#include "SrvBroker.h"
++ #include "utils/StringUtils.h"
++ #include "utils/CurlUtils.h"
++ #include "utils/UrlUtils.h"
++@@ -46,7 +45,7 @@ adaptive::AdaptiveStream::AdaptiveStream(AdaptiveTree* tree,
++     current_rep_(initialRepr),
++     lastUpdated_(std::chrono::system_clock::now())
++ {
++-  auto& kodiProps = CSrvBroker::GetKodiProps();
+++  auto& kodiProps = m_tree->GetKodiProps();
++   m_streamParams = kodiProps.GetStreamParams();
++   m_streamHeaders = kodiProps.GetStreamHeaders();
++ 
++@@ -105,7 +104,7 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
++   // Append stream parameters
++   URL::AppendParameters(url, m_streamParams);
++ 
++-  CURL::CUrl curl{url};
+++  CURL::CUrl curl{url, m_tree->GetKodiProps(), m_tree->GetResources()};
++   curl.AddHeaders(headers);
++ 
++   int statusCode = curl.Open();
++@@ -666,7 +665,7 @@ bool adaptive::AdaptiveStream::start_stream()
++   if (!current_rep_->current_segment_.has_value())
++   {
++     if (m_startEvent == EVENT_TYPE::STREAM_START && m_tree->IsLive() &&
++-        !m_tree->IsChangingPeriod() && !CSrvBroker::GetKodiProps().IsPlayTimeshift() &&
+++        !m_tree->IsChangingPeriod() && !m_tree->GetKodiProps().IsPlayTimeshift() &&
++         !current_rep_->Timeline().IsEmpty())
++     {
++       uint64_t totalDurSecs{0};
++diff --git a/src/common/AdaptiveStream.h b/src/common/AdaptiveStream.h
++index 658a72ca2e..3cbd04e237 100644
++--- a/src/common/AdaptiveStream.h
+++++ b/src/common/AdaptiveStream.h
++@@ -122,6 +122,7 @@ enum class EVENT_TYPE
++     PLAYLIST::CPeriod* getPeriod() { return current_period_; };
++     PLAYLIST::CAdaptationSet* getAdaptationSet() { return current_adp_; };
++     PLAYLIST::CRepresentation* getRepresentation() { return current_rep_; };
+++    const AdaptiveTree& GetTree() const { return *m_tree; }
++ 
++     uint64_t GetCurrentPTSOffset() const { return currentPTSOffset_; }
++     uint64_t GetAbsolutePTSOffset() const { return absolutePTSOffset_; }
++diff --git a/src/common/AdaptiveTree.cpp b/src/common/AdaptiveTree.cpp
++index e57f5ac383..cd9b7ea5d2 100644
++--- a/src/common/AdaptiveTree.cpp
+++++ b/src/common/AdaptiveTree.cpp
++@@ -30,6 +30,8 @@ namespace adaptive
++   AdaptiveTree::AdaptiveTree(const AdaptiveTree& left) : AdaptiveTree()
++   {
++     m_reprChooser = left.m_reprChooser;
+++    m_kodiProps = left.m_kodiProps;
+++    m_resources = left.m_resources;
++     m_manifestParams = left.m_manifestParams;
++     m_manifestHeaders = left.m_manifestHeaders;
++     m_settings = left.m_settings;
++@@ -41,21 +43,23 @@ namespace adaptive
++   }
++ 
++   void AdaptiveTree::Configure(CHOOSER::IRepresentationChooser* reprChooser,
+++                               const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++                               ADP::RESOURCES::CCompResources& resources,
++                                const std::string& manifestUpdParams)
++   {
++     m_reprChooser = reprChooser;
+++    m_kodiProps = &kodiProps;
+++    m_resources = &resources;
++ 
++-    auto srvBroker = CSrvBroker::GetInstance();
++-
++-    if (srvBroker->GetSettings().IsDebugManifest())
+++    if (CSrvBroker::GetSettings().IsDebugManifest())
++     {
++       m_pathSaveManifest = FILESYS::PathCombine(FILESYS::GetAddonUserPath(), "manifests");
++       // Delete previously saved manifest files
++       FILESYS::RemoveDirectory(m_pathSaveManifest, false);
++     }
++ 
++-    m_manifestParams = srvBroker->GetKodiProps().GetManifestParams();
++-    m_manifestHeaders = srvBroker->GetKodiProps().GetManifestHeaders();
+++    m_manifestParams = kodiProps.GetManifestParams();
+++    m_manifestHeaders = kodiProps.GetManifestHeaders();
++     m_manifestUpdParams = manifestUpdParams;
++     stream_start_ = GetTimestamp();
++ 
++@@ -120,7 +124,7 @@ namespace adaptive
++     // A manifest can provide live delay value, if not so we use our default
++     // value of 16 secs, this is needed to ensure an appropriate playback,
++     // an add-on can override the delay to try fix edge use cases
++-    uint64_t liveDelay = CSrvBroker::GetKodiProps().GetManifestConfig().liveDelay;
+++    uint64_t liveDelay = m_kodiProps->GetManifestConfig().liveDelay;
++     if (liveDelay >= 16)
++       m_liveDelay = liveDelay;
++     else if (m_liveDelay < 16)
++@@ -152,7 +156,7 @@ namespace adaptive
++   void AdaptiveTree::OverrideStreamsMediaFlags(
++       std::vector<std::unique_ptr<PLAYLIST::CPeriod>>& periods)
++   {
++-    const auto& config = CSrvBroker::GetKodiProps().GetConfig();
+++    const auto& config = m_kodiProps->GetConfig();
++ 
++     const std::string& audioLangCodeDef = config.mediaAudioLangCodeDef;
++     const std::string& audioLangCodeOrig = config.mediaAudioLangCodeOrig;
++diff --git a/src/common/AdaptiveTree.h b/src/common/AdaptiveTree.h
++index db26abad00..7a99e29a2d 100644
++--- a/src/common/AdaptiveTree.h
+++++ b/src/common/AdaptiveTree.h
++@@ -35,6 +35,17 @@ namespace CHOOSER
++ {
++ class IRepresentationChooser;
++ }
+++namespace ADP
+++{
+++namespace KODI_PROPS
+++{
+++class CCompKodiProps;
+++}
+++namespace RESOURCES
+++{
+++class CCompResources;
+++}
+++} // namespace ADP
++ 
++ namespace adaptive
++ {
++@@ -80,9 +91,13 @@ public:
++   /*!
++    * \brief Configure the adaptive tree.
++    * \param reprChooser The representation chooser
+++   * \param kodiProps The Kodi properties of the session
+++   * \param resources The resources of the session
++    * \param manifestUpdParams Parameters to be add to manifest request url, depends on manifest implementation
++    */
++   virtual void Configure(CHOOSER::IRepresentationChooser* reprChooser,
+++                         const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++                         ADP::RESOURCES::CCompResources& resources,
++                          const std::string& manifestUpdParams);
++ 
++   /*
++@@ -260,6 +275,10 @@ public:
++ 
++   CHOOSER::IRepresentationChooser* GetRepChooser() { return m_reprChooser; }
++ 
+++  const ADP::KODI_PROPS::CCompKodiProps& GetKodiProps() const { return *m_kodiProps; }
+++
+++  ADP::RESOURCES::CCompResources& GetResources() const { return *m_resources; }
+++
++   int SecondsSinceRepUpdate(PLAYLIST::CRepresentation* rep)
++   {
++     return static_cast<int>(
++@@ -435,6 +454,8 @@ protected:
++   std::string m_manifestParams;
++   std::map<std::string, std::string> m_manifestHeaders;
++   CHOOSER::IRepresentationChooser* m_reprChooser{nullptr};
+++  const ADP::KODI_PROPS::CCompKodiProps* m_kodiProps{nullptr};
+++  ADP::RESOURCES::CCompResources* m_resources{nullptr};
++ 
++   // Provide the path where the manifests will be saved, if debug enabled
++   std::string m_pathSaveManifest;
++diff --git a/src/common/Chooser.cpp b/src/common/Chooser.cpp
++index 8cc842ded5..c24cf8513b 100644
++--- a/src/common/Chooser.cpp
+++++ b/src/common/Chooser.cpp
++@@ -47,12 +47,11 @@ IRepresentationChooser* GetReprChooser(std::string_view type)
++ }
++ } // unnamed namespace
++ 
++-IRepresentationChooser* CHOOSER::CreateRepresentationChooser()
+++IRepresentationChooser* CHOOSER::CreateRepresentationChooser(
+++    const KODI_PROPS::ChooserProps& props, const RESOURCES::ScreenInfo& screenInfo)
++ {
++   IRepresentationChooser* reprChooser{nullptr};
++ 
++-  const KODI_PROPS::ChooserProps& props = CSrvBroker::GetKodiProps().GetChooserProps();
++-
++   // An add-on can override XML settings by using Kodi properties
++   if (!props.m_chooserType.empty())
++   {
++@@ -68,7 +67,7 @@ IRepresentationChooser* CHOOSER::CreateRepresentationChooser()
++   if (!reprChooser)
++     reprChooser = new CRepresentationChooserDefault();
++ 
++-  reprChooser->OnUpdateScreenRes();
+++  reprChooser->OnUpdateScreenRes(screenInfo);
++   reprChooser->Initialize(props);
++ 
++   return reprChooser;
++@@ -79,10 +78,8 @@ CHOOSER::IRepresentationChooser::IRepresentationChooser()
++   m_isAdjustRefreshRate = UTILS::GUI::IsAdjustRefreshRateEnabled();
++ }
++ 
++-void CHOOSER::IRepresentationChooser::OnUpdateScreenRes()
+++void CHOOSER::IRepresentationChooser::OnUpdateScreenRes(const ADP::RESOURCES::ScreenInfo& sInfo)
++ {
++-  const auto sInfo = CSrvBroker::GetResources().GetScreenInfo();
++-
++   LOG::Log(LOGINFO,
++            "[Repr. chooser] Resolution set: %dx%d, max allowed: %dx%d, Adjust refresh rate: %i",
++            sInfo.width, sInfo.height, sInfo.maxWidth, sInfo.maxHeight, m_isAdjustRefreshRate);
++diff --git a/src/common/Chooser.h b/src/common/Chooser.h
++index 1219e5aa82..a6252aa701 100644
++--- a/src/common/Chooser.h
+++++ b/src/common/Chooser.h
++@@ -26,6 +26,10 @@ namespace ADP::KODI_PROPS
++ {
++ struct ChooserProps;
++ }
+++namespace ADP::RESOURCES
+++{
+++struct ScreenInfo;
+++}
++ 
++ namespace CHOOSER
++ {
++@@ -60,8 +64,9 @@ public:
++ 
++   /*!
++    * \brief Callback to update screen resolution.
+++   * \param sInfo The screen info
++    */
++-  void OnUpdateScreenRes();
+++  void OnUpdateScreenRes(const ADP::RESOURCES::ScreenInfo& sInfo);
++ 
++   /*!
++    * \brief Set the current download speed.
++@@ -146,6 +151,7 @@ private:
++   bool m_isAdjustRefreshRate{false};
++ };
++ 
++-IRepresentationChooser* CreateRepresentationChooser();
+++IRepresentationChooser* CreateRepresentationChooser(const ADP::KODI_PROPS::ChooserProps& props,
+++                                                    const ADP::RESOURCES::ScreenInfo& screenInfo);
++ 
++ } // namespace CHOOSER
++diff --git a/src/decrypters/DrmEngine.cpp b/src/decrypters/DrmEngine.cpp
++index f6d466cc10..3a8492c731 100644
++--- a/src/decrypters/DrmEngine.cpp
+++++ b/src/decrypters/DrmEngine.cpp
++@@ -226,7 +226,7 @@ bool DRM::CDRMEngine::Initialize()
++   // by default ClearKey has the lowest priority since real DRMs should be preferred
++   std::vector<std::string_view> keySystemsPrio = {KS_WIDEVINE, KS_PLAYREADY, KS_WISEPLAY, KS_CLEARKEY};
++ 
++-  const auto& kodiProps = CSrvBroker::GetKodiProps();
+++  const auto& kodiProps = m_kodiProps;
++   // Reorder the keysystems list by using the custom DRM configuration, if any
++   for (auto& [ks, cfg] : kodiProps.GetDrmConfigs())
++   {
++@@ -294,7 +294,7 @@ bool DRM::CDRMEngine::Initialize()
++ 
++ bool DRM::CDRMEngine::PreInitializeDRM(DRMSession& session)
++ {
++-  auto& kodiProps = CSrvBroker::GetKodiProps();
+++  auto& kodiProps = m_kodiProps;
++ 
++   const auto propDrmCfg = kodiProps.GetDrmConfig(KS_WIDEVINE);
++ 
++@@ -343,6 +343,8 @@ bool DRM::CDRMEngine::PreInitializeDRM(DRMSession& session)
++   LOG::LogF(LOGDEBUG, "Initializing session with KID: %s", STRING::ToHexadecimal(kidData).c_str());
++ 
++   DRM::Config drmCfg = CreateDRMConfig(m_keySystem, kodiProps.GetDrmConfig(m_keySystem));
+++  drmCfg.kodiProps = &m_kodiProps;
+++  drmCfg.resources = &m_resources;
++ 
++   auto dec = drm->CreateSingleSampleDecrypter(drmCfg, kidData, CryptoMode::AES_CTR);
++ 
++@@ -386,7 +388,7 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::InitializeSession(
++     kodi::addon::InputstreamInfo& streamInfo,
++     bool canCleanupSessions)
++ {
++-  const auto& kodiProps = CSrvBroker::GetKodiProps();
+++  const auto& kodiProps = m_kodiProps;
++   
++   if (kodiProps.GetManifestConfig().ignoreMediaDefaultKid)
++     mediaDrmInfos.clear();
++@@ -560,6 +562,8 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::InitializeSession(
++       newSes.kid = drmInfo.defaultKid;
++ 
++       DRM::Config drmCfg = DRM::CreateDRMConfig(m_keySystem, drmPropCfg);
+++      drmCfg.kodiProps = &m_kodiProps;
+++      drmCfg.resources = &m_resources;
++ 
++       newSes.decrypter = newSes.drm->CreateSingleSampleDecrypter(
++           drmCfg, drmInfoKidBytes,
++@@ -768,7 +772,7 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::GetSession(const std::string&
++ 
++ bool DRM::CDRMEngine::ConfigureClearKey(std::vector<DRM::DRMInfo>& drmInfos)
++ {
++-  const auto& kodiProps = CSrvBroker::GetKodiProps();
+++  const auto& kodiProps = m_kodiProps;
++ 
++   if (drmInfos.empty())
++     return false;
++diff --git a/src/decrypters/DrmEngine.h b/src/decrypters/DrmEngine.h
++index 5781df5e01..a68f27c734 100644
++--- a/src/decrypters/DrmEngine.h
+++++ b/src/decrypters/DrmEngine.h
++@@ -29,7 +29,11 @@ namespace DRM
++ class ATTR_DLL_LOCAL CDRMEngine
++ {
++ public:
++-  CDRMEngine() = default;
+++  CDRMEngine(const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++             ADP::RESOURCES::CCompResources& resources)
+++    : m_kodiProps(kodiProps), m_resources(resources)
+++  {
+++  }
++   virtual ~CDRMEngine() = default;
++ 
++   /*!
++@@ -108,6 +112,8 @@ private:
++   // \brief Get a DRM instance for the specified key system, it will return nullptr if not found
++   std::shared_ptr<DRM::IDecrypter> GetDrmInstance(std::string_view ks) const;
++ 
+++  const ADP::KODI_PROPS::CCompKodiProps& m_kodiProps;
+++  ADP::RESOURCES::CCompResources& m_resources;
++   std::string m_keySystem; // Choosen key system
++   std::vector<DRMInstance> m_drms;
++   std::vector<std::shared_ptr<DRMSession>> m_sessions;
++diff --git a/src/decrypters/DrmEngineDefines.h b/src/decrypters/DrmEngineDefines.h
++index c52f9c6674..a5b8ef6600 100644
++--- a/src/decrypters/DrmEngineDefines.h
+++++ b/src/decrypters/DrmEngineDefines.h
++@@ -23,6 +23,17 @@ namespace DRM
++ {
++ class IDecrypter;
++ }
+++namespace ADP
+++{
+++namespace KODI_PROPS
+++{
+++class CCompKodiProps;
+++}
+++namespace RESOURCES
+++{
+++class CCompResources;
+++}
+++} // namespace ADP
++ 
++ namespace DRM
++ {
++@@ -96,6 +107,9 @@ struct Config
++   // Specifies if has been parsed the new DRM config ("drm" or "drm_legacy" kodi property)
++   //! @todo: to remove when deprecated DRM properties will be removed
++   bool isNewConfig{true};
+++  // The session Kodi properties and resources, to make the license HTTP requests
+++  const ADP::KODI_PROPS::CCompKodiProps* kodiProps{nullptr};
+++  ADP::RESOURCES::CCompResources* resources{nullptr};
++ };
++ 
++ constexpr std::string_view ROBUSTNESS_HW_SECDEC = "HW_SECURE_DECODE";
++diff --git a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
++index 474a4e8720..b294deac00 100644
++--- a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
+++++ b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
++@@ -31,9 +31,12 @@ uint32_t CClearKeyCencSingleSampleDecrypter::g_sessionIdCount = 1;
++ 
++ CClearKeyCencSingleSampleDecrypter::CClearKeyCencSingleSampleDecrypter(
++     const std::vector<uint8_t>& defaultKeyId,
+++    const DRM::Config& config,
++     CClearKeyDecrypter* host)
++   : m_host(host), m_defaultKeyId(defaultKeyId)
++ {
+++  m_config.kodiProps = config.kodiProps;
+++  m_config.resources = config.resources;
++ }
++ 
++ void CClearKeyCencSingleSampleDecrypter::InitDecrypter()
++@@ -267,7 +270,7 @@ bool CClearKeyCencSingleSampleDecrypter::MakeLicenseRequest(
++     FILESYS::SaveFile(debugFilePath, postData.c_str(), true);
++   }
++ 
++-  CURL::CUrl curl{url, postData};
+++  CURL::CUrl curl{url, *m_config.kodiProps, *m_config.resources, postData};
++   curl.AddHeader("Accept", "application/json");
++   curl.AddHeader("Content-Type", "application/json");
++   curl.AddHeaders(headers);
++diff --git a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
++index f58d2755f1..860dd1981b 100644
++--- a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
+++++ b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
++@@ -21,6 +21,7 @@ class CClearKeyCencSingleSampleDecrypter : public Adaptive_CencSingleSampleDecry
++ {
++ public:
++   CClearKeyCencSingleSampleDecrypter(const std::vector<uint8_t>& defaultKeyId,
+++                                     const DRM::Config& config,
++                                      CClearKeyDecrypter* host);
++   virtual ~CClearKeyCencSingleSampleDecrypter(){};
++ 
++diff --git a/src/decrypters/clearkey/ClearKeyDecrypter.cpp b/src/decrypters/clearkey/ClearKeyDecrypter.cpp
++index 38fc703b07..19f725387b 100644
++--- a/src/decrypters/clearkey/ClearKeyDecrypter.cpp
+++++ b/src/decrypters/clearkey/ClearKeyDecrypter.cpp
++@@ -29,7 +29,7 @@ std::shared_ptr<Adaptive_CencSingleSampleDecrypter> CClearKeyDecrypter::CreateSi
++     return nullptr;
++   }
++ 
++-  return std::make_shared<CClearKeyCencSingleSampleDecrypter>(defaultkeyid, this);
+++  return std::make_shared<CClearKeyCencSingleSampleDecrypter>(defaultkeyid, config, this);
++ }
++ 
++ std::optional<bool> CClearKeyDecrypter::HasLicenseKey(
++diff --git a/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp b/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
++index a057115c9a..a6418bebc5 100644
++--- a/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
+++++ b/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
++@@ -322,7 +322,7 @@ bool CWVCencSingleSampleDecrypter::SendSessionMessage()
++   std::string url = licConfig.serverUri;
++   DRM::TranslateLicenseUrlPh(url, challenge, drmCfg.isNewConfig);
++ 
++-  CURL::CUrl cUrl{url, reqData};
+++  CURL::CUrl cUrl{url, *drmCfg.kodiProps, *drmCfg.resources, reqData};
++   cUrl.AddHeaders(licConfig.reqHeaders);
++ 
++   const int statusCode = cUrl.Open();
++diff --git a/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp b/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp
++index 1877f04132..5327825a9b 100644
++--- a/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp
+++++ b/src/decrypters/widevineandroid/WVCencSingleSampleDecrypter.cpp
++@@ -276,7 +276,8 @@ bool CWVCencSingleSampleDecrypterA::ProvisionRequest()
++   reqData += "\"}";
++   reqData = BASE64::Encode(reqData);
++ 
++-  CURL::CUrl file(url);
+++  const DRM::Config& drmCfg = m_cdmAdapter->GetConfig();
+++  CURL::CUrl file(url, *drmCfg.kodiProps, *drmCfg.resources);
++   file.AddHeader("Content-Type", "application/json");
++   file.AddHeader("postdata", reqData.c_str());
++ 
++@@ -428,7 +429,7 @@ bool CWVCencSingleSampleDecrypterA::SendSessionMessage(const std::vector<uint8_t
++   std::string url = licConfig.serverUri;
++   DRM::TranslateLicenseUrlPh(url, challenge, drmCfg.isNewConfig);
++ 
++-  CURL::CUrl cUrl{url, reqData};
+++  CURL::CUrl cUrl{url, *drmCfg.kodiProps, *drmCfg.resources, reqData};
++   cUrl.AddHeaders(licConfig.reqHeaders);
++ 
++   const int statusCode = cUrl.Open();
++diff --git a/src/main.cpp b/src/main.cpp
++index 3165d713ef..1c6e2c83d5 100644
++--- a/src/main.cpp
+++++ b/src/main.cpp
++@@ -40,11 +40,9 @@ bool CInputStreamAdaptive::Open(const kodi::addon::InputstreamProperty& props)
++ {
++   LOG::Log(LOGDEBUG, "Open()");
++ 
++-  CSrvBroker::GetInstance()->InitStage1(props.GetProperties());
+++  m_session = std::make_shared<CSession>(props.GetProperties());
++ 
++-  m_session = std::make_shared<CSession>();
++-
++-  SResult ret = m_session->Initialize(props.GetURL());
+++  SResult ret = m_session->Initialize(props.GetURL(), m_screenInfo);
++   if (ret.IsFailed())
++   {
++     LOG::Log(LOGERROR, ret.Message().c_str());
++@@ -447,14 +445,13 @@ void CInputStreamAdaptive::SetVideoResolution(unsigned int width,
++                                               unsigned int maxWidth,
++                                               unsigned int maxHeight)
++ {
++-  CSrvBroker::GetResources().SetScreenInfo({static_cast<int>(width), static_cast<int>(height),
++-                                            static_cast<int>(maxWidth),
++-                                            static_cast<int>(maxHeight)});
+++  m_screenInfo = {static_cast<int>(width), static_cast<int>(height), static_cast<int>(maxWidth),
+++                  static_cast<int>(maxHeight)};
++ 
++   // SetVideoResolution method is initially called before CInputStreamAdaptive::Open so there is no session yet
++   // After that, other callbacks may be made during playback (e.g. for window resize)
++   if (m_session)
++-    m_session->OnScreenResChange();
+++    m_session->OnScreenResChange(m_screenInfo);
++ }
++ 
++ bool CInputStreamAdaptive::PosTime(int ms)
++diff --git a/src/main.h b/src/main.h
++index b56936da94..267096845d 100644
++--- a/src/main.h
+++++ b/src/main.h
++@@ -57,6 +57,7 @@ public:
++ 
++ private:
++   std::shared_ptr<SESSION::CSession> m_session;
+++  ADP::RESOURCES::ScreenInfo m_screenInfo;
++ 
++   bool m_checkCoreReopen{false}; // Check if Kodi core will reopen all streams
++ };
++diff --git a/src/parser/DASHTree.cpp b/src/parser/DASHTree.cpp
++index 761a5b179a..64b509eaa4 100644
++--- a/src/parser/DASHTree.cpp
+++++ b/src/parser/DASHTree.cpp
++@@ -9,7 +9,6 @@
++ #include "DASHTree.h"
++ 
++ #include "CompKodiProps.h"
++-#include "SrvBroker.h"
++ #include "common/Period.h"
++ #include "decrypters/HelperPr.h"
++ #include "decrypters/Helpers.h"
++@@ -91,9 +90,12 @@ std::string DetectCodecFromMimeType(std::string_view mimeType)
++ }
++ 
++ // \brief Make an HTTP request to get UTC Timing and return the string
++-std::string RequestUTCTiming(const std::string& url, CURL::RequestType reqType)
+++std::string RequestUTCTiming(const std::string& url,
+++                             const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++                             ADP::RESOURCES::CCompResources& resources,
+++                             CURL::RequestType reqType)
++ {
++-  CURL::CUrl curl(url, reqType);
+++  CURL::CUrl curl(url, kodiProps, resources, reqType);
++   const int statusCode = curl.Open();
++   if (statusCode == -1 || statusCode >= 400)
++   {
++@@ -126,9 +128,11 @@ adaptive::CDashTree::CDashTree(const CDashTree& left) : AdaptiveTree(left)
++ }
++ 
++ void adaptive::CDashTree::Configure(CHOOSER::IRepresentationChooser* reprChooser,
+++                                    const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++                                    ADP::RESOURCES::CCompResources& resources,
++                                     const std::string& manifestUpdParams)
++ {
++-  AdaptiveTree::Configure(reprChooser, manifestUpdParams);
+++  AdaptiveTree::Configure(reprChooser, kodiProps, resources, manifestUpdParams);
++ }
++ 
++ bool adaptive::CDashTree::Open(const std::string& url,
++@@ -152,7 +156,7 @@ bool adaptive::CDashTree::Open(const std::string& url,
++ 
++   MergeAdpSets();
++ 
++-  auto& kodiProps = CSrvBroker::GetKodiProps();
+++  auto& kodiProps = *m_kodiProps;
++   //! @todo: can have sense to move period selection on PostInit or another place
++   //! just before the session initialize period, that will be a common code for all manifest types,
++   //! also because the code related to live delay calculation on AdaptiveStream::start_stream
++@@ -230,7 +234,7 @@ bool adaptive::CDashTree::ParseManifest(const std::string& data)
++     // so limit it to avoid excessive memory consumption
++     m_tsbLimited = 14400000; // Default 4 hours
++ 
++-    auto& manifestCfg = CSrvBroker::GetKodiProps().GetManifestConfig();
+++    auto& manifestCfg = m_kodiProps->GetManifestConfig();
++     if (manifestCfg.timeShiftBufferLimit.has_value())
++       m_tsbLimited = *manifestCfg.timeShiftBufferLimit * 1000;
++ 
++@@ -1424,7 +1428,7 @@ int64_t adaptive::CDashTree::ResolveUTCTiming(pugi::xml_node node)
++   std::vector<std::pair<std::string, std::string>> utcTimings;
++ 
++   // Custom UTC timing
++-  auto& manifestCfg = CSrvBroker::GetKodiProps().GetManifestConfig();
+++  auto& manifestCfg = m_kodiProps->GetManifestConfig();
++   if (manifestCfg.dashUTCTiming.has_value())
++     utcTimings.emplace_back(*manifestCfg.dashUTCTiming);
++ 
++@@ -1442,8 +1446,8 @@ int64_t adaptive::CDashTree::ResolveUTCTiming(pugi::xml_node node)
++     if (scheme == "urn:mpeg:dash:utc:http-head:2012" ||
++         scheme == "urn:mpeg:dash:utc:http-head:2014")
++     {
++-      const uint64_t ts =
++-          UTILS::ConvertDate2822ToTs(RequestUTCTiming(value, CURL::RequestType::HEAD));
+++      const uint64_t ts = UTILS::ConvertDate2822ToTs(
+++          RequestUTCTiming(value, *m_kodiProps, *m_resources, CURL::RequestType::HEAD));
++       if (ts == 0)
++       {
++         LOG::LogF(LOGERROR, "UTCTiming conversion failed from scheme \"%s\"", scheme.c_str());
++@@ -1457,7 +1461,8 @@ int64_t adaptive::CDashTree::ResolveUTCTiming(pugi::xml_node node)
++              scheme == "urn:mpeg:dash:utc:http-xsdate:2012" ||
++              scheme == "urn:mpeg:dash:utc:http-iso:2012")
++     {
++-      const double ts = XML::ParseDate(RequestUTCTiming(value, CURL::RequestType::AUTO).c_str(), 0);
+++      const double ts = XML::ParseDate(
+++          RequestUTCTiming(value, *m_kodiProps, *m_resources, CURL::RequestType::AUTO).c_str(), 0);
++       if (ts == 0)
++       {
++         LOG::LogF(LOGERROR, "UTCTiming conversion failed from scheme \"%s\"", scheme.c_str());
++@@ -1551,7 +1556,7 @@ bool adaptive::CDashTree::DownloadManifestUpd(const std::string& url,
++                                               const std::vector<std::string>& respHeaders,
++                                               UTILS::CURL::HTTPResponse& resp)
++ {
++-  return CURL::DownloadFile(url, reqHeaders, respHeaders, resp);
+++  return CURL::DownloadFile(url, *m_kodiProps, *m_resources, reqHeaders, respHeaders, resp);
++ }
++ 
++ void adaptive::CDashTree::OnRequestSegments(PLAYLIST::CPeriod* period,
++diff --git a/src/parser/DASHTree.h b/src/parser/DASHTree.h
++index 1368423034..0d3ea625d7 100644
++--- a/src/parser/DASHTree.h
+++++ b/src/parser/DASHTree.h
++@@ -35,6 +35,8 @@ public:
++   CDashTree(const CDashTree& left);
++ 
++   void Configure(CHOOSER::IRepresentationChooser* reprChooser,
+++                 const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++                 ADP::RESOURCES::CCompResources& resources,
++                  const std::string& manifestUpdParams) override;
++ 
++   virtual TreeType GetTreeType() const override { return TreeType::DASH; }
++diff --git a/src/parser/HLSTree.cpp b/src/parser/HLSTree.cpp
++index 9b8f0d19ef..b4a4a9f9b4 100644
++--- a/src/parser/HLSTree.cpp
+++++ b/src/parser/HLSTree.cpp
++@@ -9,7 +9,6 @@
++ #include "HLSTree.h"
++ 
++ #include "CompKodiProps.h"
++-#include "SrvBroker.h"
++ #include "aes_decrypter.h"
++ #include "decrypters/HelperPr.h"
++ #include "decrypters/Helpers.h"
++@@ -164,9 +163,11 @@ adaptive::CHLSTree::CHLSTree(const CHLSTree& left) : AdaptiveTree(left)
++ }
++ 
++ void adaptive::CHLSTree::Configure(CHOOSER::IRepresentationChooser* reprChooser,
+++                                   const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++                                   ADP::RESOURCES::CCompResources& resources,
++                                    const std::string& manifestUpdateParam)
++ {
++-  AdaptiveTree::Configure(reprChooser, manifestUpdateParam);
+++  AdaptiveTree::Configure(reprChooser, kodiProps, resources, manifestUpdateParam);
++   m_decrypter = std::make_unique<AESDecrypter>();
++ }
++ 
++@@ -475,7 +476,7 @@ bool adaptive::CHLSTree::ProcessChildManifest(PLAYLIST::CPeriod* period,
++     PLAYLIST::CAdaptationSet* adp,
++     PLAYLIST::CRepresentation* rep)
++ {
++-  const auto& manifestCfg = CSrvBroker::GetKodiProps().GetManifestConfig();
+++  const auto& manifestCfg = m_kodiProps->GetManifestConfig();
++   size_t adpSetPos = GetPtrPosition(period->GetAdaptationSets(), adp);
++   size_t reprPos = GetPtrPosition(adp->GetRepresentations(), rep);
++ 
++@@ -961,7 +962,7 @@ void adaptive::CHLSTree::OnDataArrived(uint64_t segNum,
++       if (aesKey->key.empty())
++       {
++         // RETRY:
++-        auto drmCfgProp = CSrvBroker::GetKodiProps().GetDrmConfig(DRM::KS_NONE);
+++        auto drmCfgProp = m_kodiProps->GetDrmConfig(DRM::KS_NONE);
++ 
++         CURL::HTTPResponse resp;
++ 
++@@ -1084,7 +1085,7 @@ bool adaptive::CHLSTree::DownloadKey(const std::string& url,
++                                      const std::vector<std::string>& respHeaders,
++                                      UTILS::CURL::HTTPResponse& resp)
++ {
++-  return CURL::DownloadFile(url, reqHeaders, respHeaders, resp);
+++  return CURL::DownloadFile(url, *m_kodiProps, *m_resources, reqHeaders, respHeaders, resp);
++ }
++ 
++ bool adaptive::CHLSTree::DownloadManifestChild(const std::string& url,
++@@ -1092,7 +1093,7 @@ bool adaptive::CHLSTree::DownloadManifestChild(const std::string& url,
++                                                const std::vector<std::string>& respHeaders,
++                                                UTILS::CURL::HTTPResponse& resp)
++ {
++-  return CURL::DownloadFile(url, reqHeaders, respHeaders, resp);
+++  return CURL::DownloadFile(url, *m_kodiProps, *m_resources, reqHeaders, respHeaders, resp);
++ }
++ 
++ //! @todo: check updated variables that are not thread safe
++@@ -1419,7 +1420,7 @@ bool adaptive::CHLSTree::ParseRenditon(const Rendition& r,
++ 
++ bool adaptive::CHLSTree::ParseMultivariantPlaylist(const std::string& data)
++ {
++-  const auto& manifestCfg = CSrvBroker::GetKodiProps().GetManifestConfig();
+++  const auto& manifestCfg = m_kodiProps->GetManifestConfig();
++   std::stringstream streamData{data};
++   MultivariantPlaylist pl;
++ 
++diff --git a/src/parser/HLSTree.h b/src/parser/HLSTree.h
++index 69a7bf97c8..9c7ca3d250 100644
++--- a/src/parser/HLSTree.h
+++++ b/src/parser/HLSTree.h
++@@ -38,6 +38,8 @@ public:
++   virtual CHLSTree* Clone() const override { return new CHLSTree{*this}; }
++ 
++   virtual void Configure(CHOOSER::IRepresentationChooser* reprChooser,
+++                         const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++                         ADP::RESOURCES::CCompResources& resources,
++                          const std::string& manifestUpdateParam) override;
++ 
++   virtual bool Open(const std::string& url,
++diff --git a/src/parser/SmoothTree.cpp b/src/parser/SmoothTree.cpp
++index 7a96af45a5..ee0eca7284 100644
++--- a/src/parser/SmoothTree.cpp
+++++ b/src/parser/SmoothTree.cpp
++@@ -9,7 +9,6 @@
++ #include "SmoothTree.h"
++ 
++ #include "CompKodiProps.h"
++-#include "SrvBroker.h"
++ #include "decrypters/Helpers.h"
++ #include "decrypters/HelperPr.h"
++ #include "utils/StringUtils.h"
++@@ -108,7 +107,7 @@ bool adaptive::CSmoothTree::ParseManifest(const std::string& data)
++     {
++       m_dvrWindowLength = 14400000; // Limit to default 4 hours
++ 
++-      auto& manifestCfg = CSrvBroker::GetKodiProps().GetManifestConfig();
+++      auto& manifestCfg = m_kodiProps->GetManifestConfig();
++       if (manifestCfg.timeShiftBufferLimit.has_value())
++         m_dvrWindowLength = *manifestCfg.timeShiftBufferLimit * 1000;
++     }
++@@ -643,7 +642,7 @@ bool adaptive::CSmoothTree::DownloadManifestUpd(
++     const std::vector<std::string>& respHeaders,
++     UTILS::CURL::HTTPResponse& resp)
++ {
++-  return CURL::DownloadFile(url, reqHeaders, respHeaders, resp);
+++  return CURL::DownloadFile(url, *m_kodiProps, *m_resources, reqHeaders, respHeaders, resp);
++ }
++ 
++ void adaptive::CSmoothTree::UpdateTotalTime()
++diff --git a/src/samplereader/FragmentedSampleReader.cpp b/src/samplereader/FragmentedSampleReader.cpp
++index 61a9c46169..12845e3de4 100644
++--- a/src/samplereader/FragmentedSampleReader.cpp
+++++ b/src/samplereader/FragmentedSampleReader.cpp
++@@ -9,6 +9,7 @@
++ #include "FragmentedSampleReader.h"
++ 
++ #include "AdaptiveByteStream.h"
+++#include "Stream.h"
++ #include "codechandler/AV1CodecHandler.h"
++ #include "codechandler/AVCCodecHandler.h"
++ #include "codechandler/AudioCodecHandler.h"
++@@ -18,6 +19,7 @@
++ #include "codechandler/VP9CodecHandler.h"
++ #include "codechandler/WebVTTCodecHandler.h"
++ #include "common/AdaptiveCencSampleDecrypter.h"
+++#include "common/AdaptiveTree.h"
++ #include "decrypters/Helpers.h"
++ #include "decrypters/HelperPr.h"
++ #include "utils/Bento4Utils.h"
++@@ -68,6 +70,7 @@ CFragmentedSampleReader::~CFragmentedSampleReader()
++ bool CFragmentedSampleReader::Initialize(SESSION::CStream* stream)
++ {
++   m_lReader->EnableTrack(m_track->GetId());
+++  m_isTTMLTimeRelative = stream->m_adStream.GetTree().IsTTMLTimeRelative();
++ 
++   m_timeBaseExt = STREAM_TIME_BASE;
++   m_timeBaseInt = m_track->GetMediaTimeScale();
++@@ -713,7 +716,7 @@ void CFragmentedSampleReader::UpdateSampleDescription()
++         m_codecHandler = new HEVCCodecHandler(desc, m_track);
++         break;
++       case AP4_SAMPLE_FORMAT_STPP:
++-        m_codecHandler = new TTMLCodecHandler(desc, false);
+++        m_codecHandler = new TTMLCodecHandler(desc, false, m_isTTMLTimeRelative);
++         break;
++       case FMP4_SAMPLE_FORMAT_WVTT:
++         m_codecHandler = new WebVTTCodecHandler(desc, false);
++diff --git a/src/samplereader/FragmentedSampleReader.h b/src/samplereader/FragmentedSampleReader.h
++index 4a60606afa..ac0ed0b28b 100644
++--- a/src/samplereader/FragmentedSampleReader.h
+++++ b/src/samplereader/FragmentedSampleReader.h
++@@ -145,6 +145,7 @@ private:
++   bool m_bSampleDescChanged{false};
++   bool m_eos{false};
++   bool m_started{false};
+++  bool m_isTTMLTimeRelative{false};
++   int64_t m_dts{0};
++   int64_t m_pts{0};
++   int64_t m_ptsDiff{0};
++diff --git a/src/samplereader/SubtitleSampleReader.cpp b/src/samplereader/SubtitleSampleReader.cpp
++index 2ac4c7d72a..3c0d99165d 100644
++--- a/src/samplereader/SubtitleSampleReader.cpp
+++++ b/src/samplereader/SubtitleSampleReader.cpp
++@@ -9,8 +9,6 @@
++ #include "SubtitleSampleReader.h"
++ 
++ #include "CompKodiProps.h"
++-#include "CompResources.h"
++-#include "SrvBroker.h"
++ #include "Stream.h"
++ #include "AdaptiveByteStream.h"
++ #include "codechandler/TTMLCodecHandler.h"
++@@ -32,6 +30,7 @@ bool CSubtitleSampleReader::Initialize(SESSION::CStream* stream)
++ 
++   std::string codecInternalName = stream->m_info.GetCodecInternalName();
++   const CRepresentation* repr = stream->m_adStream.getRepresentation();
+++  const adaptive::AdaptiveTree& tree = stream->m_adStream.GetTree();
++ 
++   if (repr->IsSubtitleFileStream())
++   {
++@@ -40,14 +39,14 @@ bool CSubtitleSampleReader::Initialize(SESSION::CStream* stream)
++       m_codecHandler = std::make_unique<WebVTTCodecHandler>(nullptr, true);
++     else if (STRING::Contains(codecInternalName, CODEC::FOURCC_TTML) ||
++              STRING::Contains(codecInternalName, CODEC::FOURCC_STPP))
++-      m_codecHandler = std::make_unique<TTMLCodecHandler>(nullptr, true);
+++      m_codecHandler = std::make_unique<TTMLCodecHandler>(nullptr, true, tree.IsTTMLTimeRelative());
++     else
++     {
++       LOG::LogF(LOGERROR, "Codec \"%s\" not implemented", codecInternalName.data());
++       return false;
++     }
++ 
++-    return InitializeFile(repr->GetBaseUrl());
+++    return InitializeFile(repr->GetBaseUrl(), tree);
++   }
++   else
++   {
++@@ -60,7 +59,8 @@ bool CSubtitleSampleReader::Initialize(SESSION::CStream* stream)
++     else if (STRING::Contains(codecInternalName, CODEC::FOURCC_TTML) ||
++              STRING::Contains(codecInternalName, CODEC::FOURCC_DFXP) ||
++              STRING::Contains(codecInternalName, CODEC::FOURCC_STPP))
++-      m_codecHandler = std::make_unique<TTMLCodecHandler>(nullptr, false);
+++      m_codecHandler =
+++          std::make_unique<TTMLCodecHandler>(nullptr, false, tree.IsTTMLTimeRelative());
++     else
++     {
++       LOG::LogF(LOGERROR, "Codec \"%s\" not implemented", codecInternalName.data());
++@@ -70,15 +70,15 @@ bool CSubtitleSampleReader::Initialize(SESSION::CStream* stream)
++   }
++ }
++ 
++-bool CSubtitleSampleReader::InitializeFile(std::string url)
+++bool CSubtitleSampleReader::InitializeFile(std::string url, const adaptive::AdaptiveTree& tree)
++ {
++-  auto kodiProps = CSrvBroker::GetKodiProps();
+++  const auto& kodiProps = tree.GetKodiProps();
++ 
++   // Append stream parameters
++   URL::AppendParameters(url, kodiProps.GetStreamParams());
++ 
++   // Download the file
++-  CURL::CUrl curl(url);
+++  CURL::CUrl curl(url, kodiProps, tree.GetResources());
++   curl.AddHeaders(kodiProps.GetStreamHeaders());
++   int statusCode = curl.Open();
++   if (statusCode == -1)
++diff --git a/src/samplereader/SubtitleSampleReader.h b/src/samplereader/SubtitleSampleReader.h
++index 70ad0aa31e..d7d1d22d02 100644
++--- a/src/samplereader/SubtitleSampleReader.h
+++++ b/src/samplereader/SubtitleSampleReader.h
++@@ -22,6 +22,7 @@ class CStream;
++ namespace adaptive
++ {
++ class AdaptiveStream;
+++class AdaptiveTree;
++ }
++ 
++ class ATTR_DLL_LOCAL CSubtitleSampleReader : public ISampleReader
++@@ -51,7 +52,7 @@ public:
++   bool IsEncrypted() const override { return false; }
++ 
++ private:
++-  bool InitializeFile(std::string url);
+++  bool InitializeFile(std::string url, const adaptive::AdaptiveTree& tree);
++ 
++   uint64_t m_pts{0};
++   bool m_eos{false};
++diff --git a/src/test/TestDASHTree.cpp b/src/test/TestDASHTree.cpp
++index b9a5f7930c..5ee2a65099 100644
++--- a/src/test/TestDASHTree.cpp
+++++ b/src/test/TestDASHTree.cpp
++@@ -7,6 +7,7 @@
++  */
++ 
++ #include "../CompKodiProps.h"
+++#include "../CompResources.h"
++ #include "../SrvBroker.h"
++ #include "../decrypters/Helpers.h"
++ #include "../utils/Base64Utils.h"
++@@ -54,7 +55,7 @@ protected:
++   {
++     testHelper::testFile = filePath;
++ 
++-    CSrvBroker::GetInstance()->InitStage1(m_kodiProps);
+++    m_compKodiProps = std::make_unique<ADP::KODI_PROPS::CCompKodiProps>(m_kodiProps);
++ 
++     // Download the manifest
++     UTILS::CURL::HTTPResponse resp;
++@@ -69,7 +70,7 @@ protected:
++     // We set the download speed to calculate the initial network bandwidth
++     m_reprChooser->SetDownloadSpeed(500000);
++ 
++-    tree->Configure(m_reprChooser, manifestUpdParams);
+++    tree->Configure(m_reprChooser, *m_compKodiProps, m_resources, manifestUpdParams);
++ 
++     // Parse the manifest
++     if (!tree->Open(resp.effectiveUrl, resp.headers, resp.data))
++@@ -87,6 +88,8 @@ protected:
++   }
++ 
++   DASHTestTree* tree;
+++  std::unique_ptr<ADP::KODI_PROPS::CCompKodiProps> m_compKodiProps;
+++  ADP::RESOURCES::CCompResources m_resources;
++   CHOOSER::IRepresentationChooser* m_reprChooser{nullptr};
++   std::map<std::string, std::string> m_kodiProps;
++ };
++diff --git a/src/test/TestHLSTree.cpp b/src/test/TestHLSTree.cpp
++index f848ca98d8..37bbce233e 100644
++--- a/src/test/TestHLSTree.cpp
+++++ b/src/test/TestHLSTree.cpp
++@@ -9,6 +9,7 @@
++ #include "TestHelper.h"
++ #include "../decrypters/Helpers.h"
++ #include "../CompKodiProps.h"
+++#include "../CompResources.h"
++ #include "../SrvBroker.h"
++ 
++ #include <gtest/gtest.h>
++@@ -50,7 +51,7 @@ protected:
++   {
++     testHelper::testFile = filePath;
++ 
++-    CSrvBroker::GetInstance()->InitStage1(m_kodiProps);
+++    m_compKodiProps = std::make_unique<ADP::KODI_PROPS::CCompKodiProps>(m_kodiProps);
++ 
++     // Download the manifest
++     UTILS::CURL::HTTPResponse resp;
++@@ -65,7 +66,7 @@ protected:
++     // We set the download speed to calculate the initial network bandwidth
++     m_reprChooser->SetDownloadSpeed(500000);
++ 
++-    tree->Configure(m_reprChooser, "");
+++    tree->Configure(m_reprChooser, *m_compKodiProps, m_resources, "");
++ 
++     // Parse the manifest
++     if (!tree->Open(resp.effectiveUrl, resp.headers, resp.data))
++@@ -102,6 +103,8 @@ protected:
++   }
++ 
++   adaptive::CHLSTree* tree;
+++  std::unique_ptr<ADP::KODI_PROPS::CCompKodiProps> m_compKodiProps;
+++  ADP::RESOURCES::CCompResources m_resources;
++   CHOOSER::IRepresentationChooser* m_reprChooser{nullptr};
++   std::map<std::string, std::string> m_kodiProps;
++ };
++diff --git a/src/test/TestSmoothTree.cpp b/src/test/TestSmoothTree.cpp
++index b428d80888..88e1e8a75e 100644
++--- a/src/test/TestSmoothTree.cpp
+++++ b/src/test/TestSmoothTree.cpp
++@@ -7,6 +7,7 @@
++  */
++ 
++ #include "../CompKodiProps.h"
+++#include "../CompResources.h"
++ #include "../SrvBroker.h"
++ #include "../decrypters/Helpers.h"
++ #include "../utils/UrlUtils.h"
++@@ -45,7 +46,8 @@ protected:
++   {
++     testHelper::testFile = filePath;
++ 
++-    CSrvBroker::GetInstance()->InitStage1({});
+++    m_compKodiProps = std::make_unique<ADP::KODI_PROPS::CCompKodiProps>(
+++        std::map<std::string, std::string>{});
++ 
++     // Download the manifest
++     UTILS::CURL::HTTPResponse resp;
++@@ -60,7 +62,7 @@ protected:
++     // We set the download speed to calculate the initial network bandwidth
++     m_reprChooser->SetDownloadSpeed(500000);
++ 
++-    tree->Configure(m_reprChooser, "");
+++    tree->Configure(m_reprChooser, *m_compKodiProps, m_resources, "");
++ 
++     // Parse the manifest
++     if (!tree->Open(resp.effectiveUrl, resp.headers, resp.data))
++@@ -72,6 +74,8 @@ protected:
++   }
++ 
++   SmoothTestTree* tree;
+++  std::unique_ptr<ADP::KODI_PROPS::CCompKodiProps> m_compKodiProps;
+++  ADP::RESOURCES::CCompResources m_resources;
++   CHOOSER::IRepresentationChooser* m_reprChooser{nullptr};
++ };
++ 
++diff --git a/src/utils/CurlUtils.cpp b/src/utils/CurlUtils.cpp
++index abece2f27d..ed3229944c 100644
++--- a/src/utils/CurlUtils.cpp
+++++ b/src/utils/CurlUtils.cpp
++@@ -16,7 +16,6 @@
++ 
++ #include "CompResources.h"
++ #include "CompKodiProps.h"
++-#include "SrvBroker.h"
++ 
++ using namespace UTILS;
++ using namespace UTILS::CURL;
++@@ -106,9 +105,8 @@ std::unordered_set<Cookie> ParseCookies(const std::string& url,
++   return cookieList;
++ }
++ 
++-std::string GetCookies(const std::string& url)
+++std::string GetCookies(const std::string& url, ADP::RESOURCES::CCompResources& srvResources)
++ {
++-  auto& srvResources = CSrvBroker::GetResources();
++   std::lock_guard<std::mutex> lock(srvResources.GetCookiesMutex());
++ 
++   // Get hostname (www.example.com)
++@@ -155,9 +153,10 @@ std::string GetCookies(const std::string& url)
++   return cookiesStr;
++ }
++ 
++-void StoreCookies(const std::string& url, const std::vector<std::string>& cookiesStr)
+++void StoreCookies(const std::string& url,
+++                  const std::vector<std::string>& cookiesStr,
+++                  ADP::RESOURCES::CCompResources& srvResources)
++ {
++-  auto& srvResources = CSrvBroker::GetResources();
++   std::lock_guard<std::mutex> lock(srvResources.GetCookiesMutex());
++   std::unordered_set<Cookie>& cookies = srvResources.Cookies();
++ 
++@@ -185,12 +184,14 @@ void StoreCookies(const std::string& url, const std::vector<std::string>& cookie
++ }
++ } // unnamed namespace
++ 
++-UTILS::CURL::CUrl::CUrl(const std::string& url, const RequestType reqType /* = RequestType::AUTO */)
+++UTILS::CURL::CUrl::CUrl(const std::string& url,
+++                        const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++                        ADP::RESOURCES::CCompResources& resources,
+++                        const RequestType reqType /* = RequestType::AUTO */)
+++  : m_kodiProps(kodiProps), m_resources(resources)
++ {
++   if (m_file.CURLCreate(url))
++   {
++-    auto& kodiProps = CSrvBroker::GetKodiProps();
++-
++     if (reqType == RequestType::HEAD)
++       m_file.CURLAddOption(ADDON_CURL_OPTION_PROTOCOL, "customrequest", "HEAD");
++ 
++@@ -210,11 +211,15 @@ UTILS::CURL::CUrl::CUrl(const std::string& url, const RequestType reqType /* = R
++     // NOTE: if kodi property inputstream.adaptive.stream_headers is set with "cookie" header
++     // the cookies set by the property will replace these
++     if (kodiProps.GetConfig().internalCookies)
++-      m_file.CURLAddOption(ADDON_CURL_OPTION_PROTOCOL, "cookie", GetCookies(url));
+++      m_file.CURLAddOption(ADDON_CURL_OPTION_PROTOCOL, "cookie", GetCookies(url, m_resources));
++   }
++ }
++ 
++-UTILS::CURL::CUrl::CUrl(const std::string& url, const std::string& postData) : CUrl::CUrl(url)
+++UTILS::CURL::CUrl::CUrl(const std::string& url,
+++                        const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++                        ADP::RESOURCES::CCompResources& resources,
+++                        const std::string& postData)
+++  : CUrl::CUrl(url, kodiProps, resources)
++ {
++   if (m_file.IsOpen() && !postData.empty())
++   {
++@@ -224,8 +229,8 @@ UTILS::CURL::CUrl::CUrl(const std::string& url, const std::string& postData) : C
++ 
++ UTILS::CURL::CUrl::~CUrl()
++ {
++-  if (CSrvBroker::GetKodiProps().GetConfig().internalCookies)
++-    StoreCookies(GetEffectiveUrl(), GetResponseHeaders("set-cookie"));
+++  if (m_kodiProps.GetConfig().internalCookies)
+++    StoreCookies(GetEffectiveUrl(), GetResponseHeaders("set-cookie"), m_resources);
++ 
++   m_file.Close();
++ }
++@@ -326,6 +331,8 @@ bool UTILS::CURL::CUrl::IsEOF()
++ }
++ 
++ bool UTILS::CURL::DownloadFile(const std::string& url,
+++                               const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++                               ADP::RESOURCES::CCompResources& resources,
++                                const std::map<std::string, std::string>& reqHeaders,
++                                const std::vector<std::string>& respHeaders,
++                                HTTPResponse& resp)
++@@ -337,7 +344,7 @@ bool UTILS::CURL::DownloadFile(const std::string& url,
++ 
++   while (retries-- > 0)
++   {
++-    CURL::CUrl curl{url};
+++    CURL::CUrl curl{url, kodiProps, resources};
++     curl.AddHeaders(reqHeaders);
++ 
++     int statusCode = curl.Open();
++diff --git a/src/utils/CurlUtils.h b/src/utils/CurlUtils.h
++index 8d5c8257a0..478cfcbcdf 100644
++--- a/src/utils/CurlUtils.h
+++++ b/src/utils/CurlUtils.h
++@@ -20,6 +20,18 @@
++ #include <string>
++ #include <string_view>
++ 
+++namespace ADP
+++{
+++namespace KODI_PROPS
+++{
+++class CCompKodiProps;
+++}
+++namespace RESOURCES
+++{
+++class CCompResources;
+++}
+++} // namespace ADP
+++
++ namespace UTILS
++ {
++ namespace CURL
++@@ -46,15 +58,25 @@ public:
++  /*!
++   * \brief Create CUrl.
++   * \param url The url of the file to download
+++  * \param kodiProps The Kodi properties of the session
+++  * \param resources The resources of the session
++   */
++-  CUrl(const std::string& url, const RequestType reqType = RequestType::AUTO);
+++  CUrl(const std::string& url,
+++       const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++       ADP::RESOURCES::CCompResources& resources,
+++       const RequestType reqType = RequestType::AUTO);
++ 
++  /*!
++   * \brief Create CUrl for POST request, if the data are empty, GET will be performed.
++   * \param url The request url
+++  * \param kodiProps The Kodi properties of the session
+++  * \param resources The resources of the session
++   * \param postData The data for the POST request
++   */
++-  CUrl(const std::string& url, const std::string& postData);
+++  CUrl(const std::string& url,
+++       const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++       ADP::RESOURCES::CCompResources& resources,
+++       const std::string& postData);
++   ~CUrl();
++ 
++  /*!
++@@ -121,6 +143,8 @@ public:
++ private:
++   kodi::vfs::CFile m_file;
++   size_t m_bytesRead{0};
+++  const ADP::KODI_PROPS::CCompKodiProps& m_kodiProps;
+++  ADP::RESOURCES::CCompResources& m_resources;
++ };
++ 
++ struct HTTPResponse
++@@ -149,6 +173,8 @@ struct Cookie
++ /*!
++   * \brief Helper method to download a file.
++   * \param url Url of the file to download
+++  * \param kodiProps The Kodi properties of the session
+++  * \param resources The resources of the session
++   * \param reqHeaders Headers to use for the HTTP request
++   * \param respHeaders Headers to get from the HTTP response,
++   *                    by default content-type header is always retrieved.
++@@ -156,6 +182,8 @@ struct Cookie
++   * \return True if has success, otherwise false
++   */
++ bool DownloadFile(const std::string& url,
+++                  const ADP::KODI_PROPS::CCompKodiProps& kodiProps,
+++                  ADP::RESOURCES::CCompResources& resources,
++                   const std::map<std::string, std::string>& reqHeaders,
++                   const std::vector<std::string>& respHeaders,
++                   HTTPResponse& resp);
+diff --git a/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-03-srvbroker-share-settings-and-thread-pool-between-ins.patch b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-03-srvbroker-share-settings-and-thread-pool-between-ins.patch
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-03-srvbroker-share-settings-and-thread-pool-between-ins.patch
+@@ -0,0 +0,239 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Mon, 9 Nov 2026 21:56:25 -0600
++Subject: [PATCH 03/10] [SrvBroker] Share settings and thread pool between
++ instances
++
++The settings and the global thread pool were recreated by each new
++instance and destroyed by each Close, so one instance could pull them
++from under another that was still playing.
++---
++ src/SrvBroker.cpp           | 16 ++++++++++++----
++ src/SrvBroker.h             | 12 ++++++++----
++ src/main.cpp                | 11 +++++++----
++ src/main.h                  |  1 +
++ src/test/CMakeLists.txt     |  1 +
++ src/test/TestDASHTree.cpp   |  3 ++-
++ src/test/TestHLSTree.cpp    |  3 ++-
++ src/test/TestSmoothTree.cpp |  3 ++-
++ src/utils/ThreadPool.cpp    |  3 +++
++ 9 files changed, 38 insertions(+), 15 deletions(-)
++
++diff --git a/src/SrvBroker.cpp b/src/SrvBroker.cpp
++index 03ea8063e8..f7ac278246 100644
++--- a/src/SrvBroker.cpp
+++++ b/src/SrvBroker.cpp
++@@ -9,18 +9,26 @@
++ #include "SrvBroker.h"
++ 
++ #include "CompSettings.h"
+++#include "utils/ThreadPool.h"
++ 
++ using namespace ADP;
++ 
++ CSrvBroker::CSrvBroker() = default;
++ CSrvBroker::~CSrvBroker() = default;
++ 
++-void CSrvBroker::Initialize()
+++void CSrvBroker::Acquire()
++ {
++-  m_compSettings = std::make_unique<SETTINGS::CCompSettings>();
+++  std::lock_guard<std::mutex> lock(m_mutex);
+++  if (m_refCount++ == 0)
+++    m_compSettings = std::make_unique<SETTINGS::CCompSettings>();
++ }
++ 
++-void CSrvBroker::Deinitialize()
+++void CSrvBroker::Release()
++ {
++-  m_compSettings.reset();
+++  std::lock_guard<std::mutex> lock(m_mutex);
+++  if (--m_refCount == 0)
+++  {
+++    UTILS::THREAD::GlobalThreadPool.Reset();
+++    m_compSettings.reset();
+++  }
++ }
++diff --git a/src/SrvBroker.h b/src/SrvBroker.h
++index bed186e7c1..c6187d6319 100644
++--- a/src/SrvBroker.h
+++++ b/src/SrvBroker.h
++@@ -15,6 +15,7 @@
++ #endif
++ 
++ #include <memory>
+++#include <mutex>
++ 
++ // forward
++ namespace ADP::SETTINGS
++@@ -32,9 +33,9 @@ public:
++   void operator=(const CSrvBroker&) = delete; // Not assignable
++ 
++   /*
++-   * \brief Initialize service broker components, when the add-on is created.
+++   * \brief Initialize service broker components, when the first add-on instance is created.
++    */
++-  void Initialize();
+++  void Acquire();
++ 
++   static CSrvBroker* GetInstance()
++   {
++@@ -43,9 +44,10 @@ public:
++   }
++ 
++   /*
++-   * \brief Deinitialize service broker components, when the add-on is terminated.
+++   * \brief Deinitialize service broker components and stop the global thread pool,
+++   *        when the last add-on instance is destroyed.
++    */
++-  void Deinitialize();
+++  void Release();
++ 
++   /*
++    * \brief Get settings component, to manage add-on XML settings.
++@@ -60,4 +62,6 @@ private:
++   ~CSrvBroker();
++ 
++   std::unique_ptr<ADP::SETTINGS::CCompSettings> m_compSettings;
+++  std::mutex m_mutex;
+++  int m_refCount{0};
++ };
++diff --git a/src/main.cpp b/src/main.cpp
++index 1c6e2c83d5..9c37b04663 100644
++--- a/src/main.cpp
+++++ b/src/main.cpp
++@@ -13,7 +13,6 @@
++ #include "SrvBroker.h"
++ #include "Stream.h"
++ #include "utils/GUIUtils.h"
++-#include "utils/ThreadPool.h"
++ #include "utils/log.h"
++ 
++ using namespace PLAYLIST;
++@@ -22,7 +21,13 @@ using namespace SESSION;
++ CInputStreamAdaptive::CInputStreamAdaptive(const kodi::addon::IInstanceInfo& instance)
++   : CInstanceInputStream(instance)
++ {
++-  CSrvBroker::GetInstance()->Initialize();
+++  CSrvBroker::GetInstance()->Acquire();
+++}
+++
+++CInputStreamAdaptive::~CInputStreamAdaptive()
+++{
+++  m_session = nullptr;
+++  CSrvBroker::GetInstance()->Release();
++ }
++ 
++ ADDON_STATUS CInputStreamAdaptive::CreateInstance(const kodi::addon::IInstanceInfo& instance,
++@@ -57,8 +62,6 @@ void CInputStreamAdaptive::Close(void)
++ {
++   LOG::Log(LOGDEBUG, "Close()");
++   m_session = nullptr;
++-  UTILS::THREAD::GlobalThreadPool.Reset();
++-  CSrvBroker::GetInstance()->Deinitialize();
++ }
++ 
++ bool CInputStreamAdaptive::GetStreamIds(std::vector<unsigned int>& ids)
++diff --git a/src/main.h b/src/main.h
++index 267096845d..4822274649 100644
++--- a/src/main.h
+++++ b/src/main.h
++@@ -24,6 +24,7 @@ class ATTR_DLL_LOCAL CInputStreamAdaptive : public kodi::addon::CInstanceInputSt
++ {
++ public:
++   CInputStreamAdaptive(const kodi::addon::IInstanceInfo& instance);
+++  ~CInputStreamAdaptive() override;
++   ADDON_STATUS CreateInstance(const kodi::addon::IInstanceInfo& instance,
++                               KODI_ADDON_INSTANCE_HDL& hdl) override;
++ 
++diff --git a/src/test/CMakeLists.txt b/src/test/CMakeLists.txt
++index 38a7c1da52..93eceda576 100644
++--- a/src/test/CMakeLists.txt
+++++ b/src/test/CMakeLists.txt
++@@ -52,6 +52,7 @@ add_executable(${BINARY}
++     ../utils/JsonUtils.cpp
++     ../utils/oscompat.cpp
++     ../utils/StringUtils.cpp
+++    ../utils/ThreadPool.cpp
++     ../utils/UrlUtils.cpp
++     ../utils/Utils.cpp
++     ../utils/XMLUtils.cpp
++diff --git a/src/test/TestDASHTree.cpp b/src/test/TestDASHTree.cpp
++index 5ee2a65099..b2625b0061 100644
++--- a/src/test/TestDASHTree.cpp
+++++ b/src/test/TestDASHTree.cpp
++@@ -24,7 +24,7 @@ class DASHTreeTest : public ::testing::Test
++ protected:
++   void SetUp() override
++   {
++-    CSrvBroker::GetInstance()->Initialize();
+++    CSrvBroker::GetInstance()->Acquire();
++     m_reprChooser = new CTestRepresentationChooserDefault();
++     tree = new DASHTestTree();
++   }
++@@ -37,6 +37,7 @@ protected:
++     tree = nullptr;
++     delete m_reprChooser;
++     m_reprChooser = nullptr;
+++    CSrvBroker::GetInstance()->Release();
++   }
++ 
++   void OpenTestFile(std::string filePath) { OpenTestFile(filePath, "http://foo.bar/" + filePath); }
++diff --git a/src/test/TestHLSTree.cpp b/src/test/TestHLSTree.cpp
++index 37bbce233e..8dc8340e64 100644
++--- a/src/test/TestHLSTree.cpp
+++++ b/src/test/TestHLSTree.cpp
++@@ -20,7 +20,7 @@ class HLSTreeTest : public ::testing::Test
++ protected:
++   void SetUp() override
++   {
++-    CSrvBroker::GetInstance()->Initialize();
+++    CSrvBroker::GetInstance()->Acquire();
++     m_reprChooser = new CTestRepresentationChooserDefault();
++     tree = new HLSTestTree();
++   }
++@@ -33,6 +33,7 @@ protected:
++     tree = nullptr;
++     delete m_reprChooser;
++     m_reprChooser = nullptr;
+++    CSrvBroker::GetInstance()->Release();
++   }
++ 
++   void OpenTestFileMaster(std::string filePath)
++diff --git a/src/test/TestSmoothTree.cpp b/src/test/TestSmoothTree.cpp
++index 88e1e8a75e..6cd70465ff 100644
++--- a/src/test/TestSmoothTree.cpp
+++++ b/src/test/TestSmoothTree.cpp
++@@ -21,7 +21,7 @@ class SmoothTreeTest : public ::testing::Test
++ protected:
++   void SetUp() override
++   {
++-    CSrvBroker::GetInstance()->Initialize();
+++    CSrvBroker::GetInstance()->Acquire();
++     m_reprChooser = new CTestRepresentationChooserDefault();
++     tree = new SmoothTestTree();
++   }
++@@ -34,6 +34,7 @@ protected:
++     tree = nullptr;
++     delete m_reprChooser;
++     m_reprChooser = nullptr;
+++    CSrvBroker::GetInstance()->Release();
++   }
++ 
++   void OpenTestFile(std::string filePath) { OpenTestFile(filePath, "http://foo.bar/" + filePath); }
++diff --git a/src/utils/ThreadPool.cpp b/src/utils/ThreadPool.cpp
++index e2d00a55ac..bd6eebcabf 100644
++--- a/src/utils/ThreadPool.cpp
+++++ b/src/utils/ThreadPool.cpp
++@@ -24,8 +24,11 @@ void UTILS::THREAD::ThreadPool::Stop()
++ void UTILS::THREAD::ThreadPool::Reset()
++ {
++   Stop();
+++
+++  std::lock_guard lock(m_mutex);
++   m_activeExecutors = 0;
++   m_executors.clear();
+++  m_taskQueue = {};
++   m_isStopped = false;
++ }
++ 
+diff --git a/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-04-cdm-share-the-cdm-module-between-adapters.patch b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-04-cdm-share-the-cdm-module-between-adapters.patch
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-04-cdm-share-the-cdm-module-between-adapters.patch
+@@ -0,0 +0,123 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Mon, 9 Nov 2026 21:57:19 -0600
++Subject: [PATCH 04/10] [cdm] Share the CDM module between adapters
++
++Each adapter loaded the CDM library, initialized the module and
++deinitialized it again on unload. The module functions are process-wide,
++so closing one session deinitialized the module under another live one.
++---
++ lib/cdm/cdm/media/cdm/cdm_adapter.cc | 68 ++++++++++++++++++++++++----
++ 1 file changed, 59 insertions(+), 9 deletions(-)
++
++diff --git a/lib/cdm/cdm/media/cdm/cdm_adapter.cc b/lib/cdm/cdm/media/cdm/cdm_adapter.cc
++index 57101c2533..5f375cf9f3 100644
++--- a/lib/cdm/cdm/media/cdm/cdm_adapter.cc
+++++ b/lib/cdm/cdm/media/cdm/cdm_adapter.cc
++@@ -13,6 +13,7 @@
++ 
++ #include <chrono>
++ #include <cstring>
+++#include <map>
++ #include <thread>
++ 
++ #include <sys/stat.h>
++@@ -63,6 +64,60 @@ const char PATH_SEPARATOR = '/';
++ 
++ constexpr std::chrono::seconds INIT_FUTURE_TIMEOUT_SEC{3};
++ 
+++// The CDM module functions are process-wide, so the library is shared by all adapters
+++// and the module is initialized once, until the last adapter releases it
+++struct CdmModule
+++{
+++  base::NativeLibrary library{nullptr};
+++  int ref_count{0};
+++  bool is_initialized{false};
+++};
+++
+++std::mutex cdm_modules_mutex;
+++std::map<std::string, CdmModule> cdm_modules;
+++
+++base::NativeLibrary AcquireCdmModule(const std::string& cdm_path,
+++                                     base::NativeLibraryLoadError* error)
+++{
+++  std::lock_guard<std::mutex> lock(cdm_modules_mutex);
+++  CdmModule& module = cdm_modules[cdm_path];
+++  if (!module.library)
+++  {
+++    module.library = base::LoadNativeLibrary(cdm_path, error);
+++    if (!module.library)
+++    {
+++      cdm_modules.erase(cdm_path);
+++      return nullptr;
+++    }
+++  }
+++  module.ref_count++;
+++  return module.library;
+++}
+++
+++void InitializeCdmModule(const std::string& cdm_path, void (*init_func)())
+++{
+++  std::lock_guard<std::mutex> lock(cdm_modules_mutex);
+++  auto it = cdm_modules.find(cdm_path);
+++  if (it != cdm_modules.end() && !it->second.is_initialized)
+++  {
+++    init_func();
+++    it->second.is_initialized = true;
+++  }
+++}
+++
+++void ReleaseCdmModule(const std::string& cdm_path, void (*deinit_func)())
+++{
+++  std::lock_guard<std::mutex> lock(cdm_modules_mutex);
+++  auto it = cdm_modules.find(cdm_path);
+++  if (it == cdm_modules.end() || --it->second.ref_count > 0)
+++    return;
+++
+++  if (it->second.is_initialized && deinit_func)
+++    deinit_func();
+++  base::UnloadNativeLibrary(it->second.library);
+++  cdm_modules.erase(it);
+++}
+++
++ void* GetCdmHost(int host_interface_version, void* user_data)
++ {
++   if (!user_data)
++@@ -191,7 +246,7 @@ bool CdmAdapter::LoadCDM()
++   UnloadCDM();
++ 
++   base::NativeLibraryLoadError error;
++-  library_ = base::LoadNativeLibrary(cdm_path_, &error);
+++  library_ = AcquireCdmModule(cdm_path_, &error);
++ 
++   if (!library_)
++   {
++@@ -232,7 +287,7 @@ bool CdmAdapter::Initialize()
++   base::LoadNativeLibrary("dxva2.dll", &error);
++ #endif  // defined(OS_WIN)
++ 
++-  init_cdm_func();
+++  InitializeCdmModule(cdm_path_, init_cdm_func);
++   
++ #ifndef TARGET_WEBOS
++   cdm12_ = static_cast<cdm::ContentDecryptionModule_12*>(create_cdm_func(
++@@ -321,17 +376,12 @@ void CdmAdapter::UnloadCDM()
++   create_cdm_func = nullptr;
++   get_cdm_verion_func = nullptr;
++ 
++-  if (deinit_cdm_func)
++-  {
++-    deinit_cdm_func();
++-    deinit_cdm_func = nullptr;
++-  }
++-
++   if (library_)
++   {
++-    base::UnloadNativeLibrary(library_);
+++    ReleaseCdmModule(cdm_path_, deinit_cdm_func);
++     library_ = nullptr;
++   }
+++  deinit_cdm_func = nullptr;
++ }
++ 
++ void CdmAdapter::SendClientMessage(const char* session, uint32_t session_size, CdmAdapterClient::CDMADPMSG msg, const uint8_t *data, size_t data_size, uint32_t status)
+diff --git a/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-05-decrypters-remove-the-remaining-state-shared-by-inst.patch b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-05-decrypters-remove-the-remaining-state-shared-by-inst.patch
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-05-decrypters-remove-the-remaining-state-shared-by-inst.patch
+@@ -0,0 +0,121 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Mon, 9 Nov 2026 21:58:11 -0600
++Subject: [PATCH 05/10] [decrypters] Remove the remaining state shared by
++ instances
++
++The stream debug id and the ClearKey session counter were incremented
++from several threads without synchronization. The Android JNI env getter
++read a pointer to the newest Widevine decrypter, which dangled once that
++decrypter was deleted before an older one.
++---
++ src/common/AdaptiveStream.cpp                    |  2 +-
++ src/common/AdaptiveStream.h                      |  2 +-
++ .../ClearKeyCencSingleSampleDecrypter.cpp        |  2 +-
++ .../clearkey/ClearKeyCencSingleSampleDecrypter.h |  3 ++-
++ .../widevine/WVCencSingleSampleDecrypter.cpp     |  2 +-
++ src/decrypters/widevineandroid/WVDecrypter.cpp   | 16 ++++------------
++ 6 files changed, 10 insertions(+), 17 deletions(-)
++
++diff --git a/src/common/AdaptiveStream.cpp b/src/common/AdaptiveStream.cpp
++index 98d1462a00..dc01461a64 100644
++--- a/src/common/AdaptiveStream.cpp
+++++ b/src/common/AdaptiveStream.cpp
++@@ -34,7 +34,7 @@ using namespace ADP;
++ using namespace PLAYLIST;
++ using namespace UTILS;
++ 
++-uint32_t adaptive::AdaptiveStream::globalClsId = 0;
+++std::atomic<uint32_t> adaptive::AdaptiveStream::globalClsId{0};
++ 
++ adaptive::AdaptiveStream::AdaptiveStream(AdaptiveTree* tree,
++                                          PLAYLIST::CAdaptationSet* adp,
++diff --git a/src/common/AdaptiveStream.h b/src/common/AdaptiveStream.h
++index 3cbd04e237..66a372cb88 100644
++--- a/src/common/AdaptiveStream.h
+++++ b/src/common/AdaptiveStream.h
++@@ -296,6 +296,6 @@ enum class EVENT_TYPE
++ 
++     // Class ID for debug log purpose, allow the LOG prints of each AdaptiveStream to be distinguished
++     uint32_t clsId;
++-    static uint32_t globalClsId; // Incremental value for each new class created
+++    static std::atomic<uint32_t> globalClsId; // Incremental value for each new class created
++   };
++ };
++diff --git a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
++index b294deac00..141324298a 100644
++--- a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
+++++ b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.cpp
++@@ -27,7 +27,7 @@
++ using njson = nlohmann::json;
++ using namespace UTILS;
++ 
++-uint32_t CClearKeyCencSingleSampleDecrypter::g_sessionIdCount = 1;
+++std::atomic<uint32_t> CClearKeyCencSingleSampleDecrypter::g_sessionIdCount{1};
++ 
++ CClearKeyCencSingleSampleDecrypter::CClearKeyCencSingleSampleDecrypter(
++     const std::vector<uint8_t>& defaultKeyId,
++diff --git a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
++index 860dd1981b..7f7ab1b9c2 100644
++--- a/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
+++++ b/src/decrypters/clearkey/ClearKeyCencSingleSampleDecrypter.h
++@@ -10,6 +10,7 @@
++ #include "decrypters/IDecrypter.h"
++ #include "utils/CryptoUtils.h"
++ 
+++#include <atomic>
++ #include <cstdint>
++ #include <map>
++ #include <mutex>
++@@ -87,5 +88,5 @@ private:
++   DRM::Config m_config;
++   std::vector<uint8_t> m_defaultKeyId;
++   std::string m_sessionId;
++-  static uint32_t g_sessionIdCount;
+++  static std::atomic<uint32_t> g_sessionIdCount;
++ };
++diff --git a/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp b/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
++index a6418bebc5..b18ba25a6a 100644
++--- a/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
+++++ b/src/decrypters/widevine/WVCencSingleSampleDecrypter.cpp
++@@ -1059,7 +1059,7 @@ VIDEOCODEC_RETVAL CWVCencSingleSampleDecrypter::VideoFrameDataToPicture(
++   }
++   else if ((picture->flags & VIDEOCODEC_PICTURE_FLAG_DRAIN))
++   {
++-    static DEMUX_PACKET drainSample{};
+++    DEMUX_PACKET drainSample{};
++     if (m_isDrained || DecryptAndDecodeVideo(codecInstance, &drainSample) == VC_ERROR)
++     {
++       m_isDrained = true;
++diff --git a/src/decrypters/widevineandroid/WVDecrypter.cpp b/src/decrypters/widevineandroid/WVDecrypter.cpp
++index ff51be3365..ba75b28e3f 100644
++--- a/src/decrypters/widevineandroid/WVDecrypter.cpp
+++++ b/src/decrypters/widevineandroid/WVDecrypter.cpp
++@@ -23,17 +23,7 @@
++ using namespace DRM;
++ using namespace UTILS;
++ 
++-namespace
++-{
++-kodi::platform::CInterfaceAndroidSystem* ANDROID_SYSTEM{nullptr};
++-} // unnamed namespace
++-
++-CWVDecrypterA::CWVDecrypterA()
++-{
++-  // CInterfaceAndroidSystem need to be initialized at runtime
++-  // then we have to set it to global variable just now
++-  ANDROID_SYSTEM = &m_androidSystem;
++-};
+++CWVDecrypterA::CWVDecrypterA() = default;
++ 
++ CWVDecrypterA::~CWVDecrypterA()
++ {
++@@ -187,5 +177,7 @@ bool CWVDecrypterA::Initialize()
++ // Definition for the xbmc_jnienv method of the jni utils (jutils.hpp)
++ JNIEnv* xbmc_jnienv()
++ {
++-  return static_cast<JNIEnv*>(ANDROID_SYSTEM->GetJNIEnv());
+++  // CInterfaceAndroidSystem need to be initialized at runtime, after the add-on creation
+++  static kodi::platform::CInterfaceAndroidSystem androidSystem;
+++  return static_cast<JNIEnv*>(androidSystem.GetJNIEnv());
++ }
+diff --git a/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-06-main-decline-a-prefetch-open-that-would-show-a-dialo.patch b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-06-main-decline-a-prefetch-open-that-would-show-a-dialo.patch
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-06-main-decline-a-prefetch-open-that-would-show-a-dialo.patch
+@@ -0,0 +0,284 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Mon, 9 Nov 2026 22:00:28 -0600
++Subject: [PATCH 06/10] [main] Decline a prefetch open that would show a dialog
++
++Kodi can open the next playlist item while the current one still plays.
++Such an open would show its error dialogs and the ask-quality chooser
++over the playing item.
++---
++ src/Session.cpp                | 24 ++++++++++++++++++++----
++ src/Session.h                  |  8 ++++++--
++ src/common/Chooser.h           |  6 ++++++
++ src/common/ChooserAskQuality.h |  2 ++
++ src/decrypters/DrmEngine.cpp   | 20 ++++++++++++++------
++ src/decrypters/DrmEngine.h     | 17 +++++++++++++++++
++ src/main.cpp                   | 13 ++++++++++---
++ 7 files changed, 75 insertions(+), 15 deletions(-)
++
++diff --git a/src/Session.cpp b/src/Session.cpp
++index 4efd63e11a..a17c0f03e2 100644
++--- a/src/Session.cpp
+++++ b/src/Session.cpp
++@@ -116,11 +116,17 @@ void SESSION::CSession::DeleteStreams()
++ +---------------------------------------------------------------------*/
++ 
++ SResult SESSION::CSession::Initialize(std::string manifestUrl,
++-                                     const ADP::RESOURCES::ScreenInfo& screenInfo)
+++                                     const ADP::RESOURCES::ScreenInfo& screenInfo,
+++                                     bool isPrefetch)
++ {
++   m_reprChooser =
++       CHOOSER::CreateRepresentationChooser(m_kodiProps.GetChooserProps(), screenInfo);
++ 
+++  if (isPrefetch && m_reprChooser->IsInteractive())
+++    return SResult::Error("The prefetch is not supported with the ask quality stream selection");
+++
+++  m_drmEngine.SetPrefetch(isPrefetch);
+++
++   switch (CSrvBroker::GetSettings().GetMediaType())
++   {
++     case 1:
++@@ -149,6 +155,8 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl,
++     manifestHeaders["challengeB64"] = STRING::URLEncode(session.challenge);
++     manifestHeaders["sessionId"] = session.id;
++   }
+++  if (m_drmEngine.GetPrefetchError())
+++    return SResult::Error(*m_drmEngine.GetPrefetchError());
++ 
++   URL::RemovePipePart(manifestUrl); // No pipe char uses, must be used Kodi properties only
++ 
++@@ -189,8 +197,15 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl,
++   m_adaptiveTree->PostOpen();
++   m_reprChooser->PostInit();
++ 
++-  InitializePeriod();
+++  InitializePeriod(isPrefetch);
+++
+++  if (m_drmEngine.GetPrefetchError())
+++    return SResult::Error(*m_drmEngine.GetPrefetchError());
+++  if (isPrefetch && m_streams.empty())
+++    return SResult::Error("No stream can be played");
++ 
+++  // streams open once the item plays, so their errors show
+++  m_drmEngine.SetPrefetch(false);
++   return SResultCode::OK;
++ }
++ 
++@@ -295,7 +310,7 @@ bool SESSION::CSession::CheckPlayableStreams(PLAYLIST::CPeriod* period)
++   return true;
++ }
++ 
++-void SESSION::CSession::InitializePeriod()
+++void SESSION::CSession::InitializePeriod(bool isPrefetch /* = false */)
++ {
++   if (m_adaptiveTree->IsChangingPeriod())
++   {
++@@ -409,7 +424,8 @@ void SESSION::CSession::InitializePeriod()
++   {
++     LOG::LogF(LOGERROR,
++               "No stream can be played, common causes: resolution limits or HDCP problem");
++-    GUI::ErrorDialog(GUI::GetLocalizedString(30309));
+++    if (!isPrefetch)
+++      GUI::ErrorDialog(GUI::GetLocalizedString(30309));
++   }
++ 
++   // Ensure that video streams are always placed before all other types
++diff --git a/src/Session.h b/src/Session.h
++index 26d68edda6..f59933d93e 100644
++--- a/src/Session.h
+++++ b/src/Session.h
++@@ -40,16 +40,20 @@ public:
++   /*! \brief Initialize the session
++    *  \param manifestUrl The manifest URL
++    *  \param screenInfo The screen info
+++   *  \param isPrefetch Fail instead of showing any dialog
++    *  \return True if has success, false otherwise
++    */
++-  SResult Initialize(std::string manifestUrl, const ADP::RESOURCES::ScreenInfo& screenInfo);
+++  SResult Initialize(std::string manifestUrl,
+++                     const ADP::RESOURCES::ScreenInfo& screenInfo,
+++                     bool isPrefetch);
++ 
++   bool CheckPlayableStreams(PLAYLIST::CPeriod* period);
++ 
++   /*!
++    * \brief Initialize adaptive tree period
+++   * \param isPrefetch Do not show the error dialog when no stream can be played
++    */
++-  void InitializePeriod();
+++  void InitializePeriod(bool isPrefetch = false);
++ 
++   /*! \brief Get the sample reader of the next sample stream. This also set flags
++    *         if the stream has changed, use CheckChange method to check it.
++diff --git a/src/common/Chooser.h b/src/common/Chooser.h
++index a6252aa701..0411022105 100644
++--- a/src/common/Chooser.h
+++++ b/src/common/Chooser.h
++@@ -83,6 +83,12 @@ public:
++    */
++   virtual StreamSelection GetStreamSelectionMode() { return StreamSelection::AUTO; }
++ 
+++  /*!
+++   * \brief Specifies if the chooser can show a dialog to ask the user for the stream quality.
+++   * \return True if it can show a dialog, otherwise false
+++   */
+++  virtual bool IsInteractive() const { return false; }
+++
++   /*!
++    * \brief Called at each DRM initialization to set if the secure session is currently being used.
++    * \param isSecureSession Set true if a secure session is in use
++diff --git a/src/common/ChooserAskQuality.h b/src/common/ChooserAskQuality.h
++index 3968090077..2908be03b6 100644
++--- a/src/common/ChooserAskQuality.h
+++++ b/src/common/ChooserAskQuality.h
++@@ -25,6 +25,8 @@ public:
++ 
++   void PostInit() override;
++ 
+++  bool IsInteractive() const override { return true; }
+++
++   PLAYLIST::CAdaptationSet* GetPreferredVideoAdpSet(
++       PLAYLIST::CPeriod* period, PLAYLIST::CAdaptationSet* adpSetPreferred) override;
++ 
++diff --git a/src/decrypters/DrmEngine.cpp b/src/decrypters/DrmEngine.cpp
++index 3a8492c731..783ea67ce5 100644
++--- a/src/decrypters/DrmEngine.cpp
+++++ b/src/decrypters/DrmEngine.cpp
++@@ -336,7 +336,7 @@ bool DRM::CDRMEngine::PreInitializeDRM(DRMSession& session)
++   {
++     m_status = EngineStatus::DRM_ERROR;
++     LOG::LogF(LOGERROR, "Cannot get the DRM instance for keysystem %s", m_keySystem.c_str());
++-    GUI::ErrorDialog(GUI::GetLocalizedString(30303));
+++    ErrorDialog(GUI::GetLocalizedString(30303));
++     return false;
++   }
++ 
++@@ -361,7 +361,7 @@ bool DRM::CDRMEngine::PreInitializeDRM(DRMSession& session)
++   {
++     LOG::LogF(LOGERROR, "Failed to create the DRM session");
++     m_status = EngineStatus::DRM_ERROR;
++-    GUI::ErrorDialog(ret.Message());
+++    ErrorDialog(ret.Message());
++     return false;
++   }
++ 
++@@ -427,7 +427,7 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::InitializeSession(
++   if (!SelectDRM(drmInfos))
++   {
++     LOG::LogF(LOGERROR, "The stream requires an unsupported DRM.");
++-    GUI::ErrorDialog("The stream requires an unsupported DRM.");
+++    ErrorDialog("The stream requires an unsupported DRM.");
++     m_status = EngineStatus::DRM_ERROR;
++     return nullptr;
++   }
++@@ -552,7 +552,7 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::InitializeSession(
++       {
++         m_status = EngineStatus::DRM_ERROR;
++         LOG::LogF(LOGERROR, "Cannot get the DRM instance for keysystem %s", m_keySystem.c_str());
++-        GUI::ErrorDialog(GUI::GetLocalizedString(30303));
+++        ErrorDialog(GUI::GetLocalizedString(30303));
++         return nullptr;
++       }
++ 
++@@ -574,7 +574,7 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::InitializeSession(
++         m_status = EngineStatus::DECRYPTER_ERROR;
++         LOG::Log(LOGERROR, "Failed to initialize the %s DRM decrypter",
++                  newSes.drm->GetName().c_str());
++-        GUI::ErrorDialog(GUI::GetLocalizedString(30303));
+++        ErrorDialog(GUI::GetLocalizedString(30303));
++         return nullptr;
++       }
++ 
++@@ -585,7 +585,7 @@ const std::shared_ptr<DRMSession> DRM::CDRMEngine::InitializeSession(
++       {
++         LOG::LogF(LOGERROR, "Failed to create the DRM session");
++         m_status = EngineStatus::DRM_ERROR;
++-        GUI::ErrorDialog(ret.Message());
+++        ErrorDialog(ret.Message());
++         return nullptr;
++       }
++ 
++@@ -946,6 +946,14 @@ std::shared_ptr<DRM::IDecrypter> DRM::CDRMEngine::GetDrmInstance(std::string_vie
++   return it != m_drms.cend() ? it->drm : nullptr;
++ }
++ 
+++void DRM::CDRMEngine::ErrorDialog(const std::string& msg)
+++{
+++  if (!m_isPrefetch)
+++    GUI::ErrorDialog(msg);
+++  else if (!m_prefetchError)
+++    m_prefetchError = msg;
+++}
+++
++ void DRM::CDRMEngine::Dispose()
++ {
++   LOG::Log(LOGDEBUG, "Dispose DRM Engine");
++diff --git a/src/decrypters/DrmEngine.h b/src/decrypters/DrmEngine.h
++index a68f27c734..7c6847d5c4 100644
++--- a/src/decrypters/DrmEngine.h
+++++ b/src/decrypters/DrmEngine.h
++@@ -85,6 +85,18 @@ public:
++    */
++   void Dispose();
++ 
+++  /*!
+++   * \brief Set whether the engine works for a prefetch open, which must not show a dialog.
+++   * \param isPrefetch True for a prefetch open
+++   */
+++  void SetPrefetch(bool isPrefetch) { m_isPrefetch = isPrefetch; }
+++
+++  /*!
+++   * \brief Get the error that would have shown a dialog during a prefetch open.
+++   * \return The error message, otherwise no value
+++   */
+++  const std::optional<std::string>& GetPrefetchError() const { return m_prefetchError; }
+++
++ private:
++   /*!
++    * \brief Initialize the DRM engine.
++@@ -112,6 +124,9 @@ private:
++   // \brief Get a DRM instance for the specified key system, it will return nullptr if not found
++   std::shared_ptr<DRM::IDecrypter> GetDrmInstance(std::string_view ks) const;
++ 
+++  // \brief Show an error dialog, or keep the error to decline a prefetch open
+++  void ErrorDialog(const std::string& msg);
+++
++   const ADP::KODI_PROPS::CCompKodiProps& m_kodiProps;
++   ADP::RESOURCES::CCompResources& m_resources;
++   std::string m_keySystem; // Choosen key system
++@@ -120,6 +135,8 @@ private:
++ 
++   EngineStatus m_status{EngineStatus::NONE};
++   bool m_isPreinitialized{false};
+++  bool m_isPrefetch{false};
+++  std::optional<std::string> m_prefetchError;
++ };
++ 
++ } // namespace DRM
++diff --git a/src/main.cpp b/src/main.cpp
++index 9c37b04663..9dae755895 100644
++--- a/src/main.cpp
+++++ b/src/main.cpp
++@@ -47,11 +47,18 @@ bool CInputStreamAdaptive::Open(const kodi::addon::InputstreamProperty& props)
++ 
++   m_session = std::make_shared<CSession>(props.GetProperties());
++ 
++-  SResult ret = m_session->Initialize(props.GetURL(), m_screenInfo);
+++  SResult ret = m_session->Initialize(props.GetURL(), m_screenInfo, props.IsPrefetch());
++   if (ret.IsFailed())
++   {
++-    LOG::Log(LOGERROR, ret.Message().c_str());
++-    UTILS::GUI::ErrorDialog(ret.Message());
+++    if (props.IsPrefetch())
+++    {
+++      LOG::Log(LOGINFO, "Prefetch declined: %s", ret.Message().c_str());
+++    }
+++    else
+++    {
+++      LOG::Log(LOGERROR, ret.Message().c_str());
+++      UTILS::GUI::ErrorDialog(ret.Message());
+++    }
++     m_session = nullptr;
++     return false;
++   }
+diff --git a/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-07-main-keep-the-streams-kodi-opens-again-before-the-fi.patch b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-07-main-keep-the-streams-kodi-opens-again-before-the-fi.patch
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-07-main-keep-the-streams-kodi-opens-again-before-the-fi.patch
+@@ -0,0 +0,54 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Tue, 10 Nov 2026 00:45:11 -0600
++Subject: [PATCH 07/10] [main] Keep the streams Kodi opens again before the
++ first DemuxRead
++
++An OpenStream on an enabled stream was taken as Kodi's reopen of all
++streams, which skips every later subtitle open until the next DemuxRead.
++A prefetched item gets its pre-opened streams opened again at the join,
++so a subtitle stream the prefetch did not open was never opened.
++---
++ src/main.cpp | 9 +++++++++
++ src/main.h   | 1 +
++ 2 files changed, 10 insertions(+)
++
++diff --git a/src/main.cpp b/src/main.cpp
++index 9dae755895..6b43ba73a6 100644
++--- a/src/main.cpp
+++++ b/src/main.cpp
++@@ -221,6 +221,14 @@ bool CInputStreamAdaptive::OpenStream(int streamid)
++ 
++   const bool isStreamChanged{stream->m_adStream.StreamChanged()};
++ 
+++  // Kodi opens a stream its prefetch already opened again before the first DemuxRead,
+++  // this is no reopen round and the streams not yet opened must still open
+++  if (!m_isDemuxReadStarted && stream->IsEnabled() && !isStreamChanged)
+++  {
+++    LOG::Log(LOGDEBUG, "OpenStream(%d): The stream has already been opened", streamid);
+++    return false;
+++  }
+++
++   if (stream->IsEnabled())
++   {
++     // Stream quality changed (by "adaptive" streaming, not OSD)
++@@ -352,6 +360,7 @@ DEMUX_PACKET* CInputStreamAdaptive::DemuxRead(void)
++   // On Kodi core CDVDDemuxClient::ParsePacket occurs after the DemuxRead callback
++   // since it can cause to reopen all streams, reset the check just before
++   m_checkCoreReopen = false;
+++  m_isDemuxReadStarted = true;
++ 
++   ISampleReader* sr{nullptr};
++ 
++diff --git a/src/main.h b/src/main.h
++index 4822274649..0a294f3fb7 100644
++--- a/src/main.h
+++++ b/src/main.h
++@@ -61,6 +61,7 @@ private:
++   ADP::RESOURCES::ScreenInfo m_screenInfo;
++ 
++   bool m_checkCoreReopen{false}; // Check if Kodi core will reopen all streams
+++  bool m_isDemuxReadStarted{false};
++ };
++ 
++ /*******************************************************/
+diff --git a/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-08-main-start-a-prefetched-item-s-first-reads-at-stream.patch b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-08-main-start-a-prefetched-item-s-first-reads-at-stream.patch
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-08-main-start-a-prefetched-item-s-first-reads-at-stream.patch
+@@ -0,0 +0,75 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Tue, 10 Nov 2026 00:45:01 -0600
++Subject: [PATCH 08/10] [main] Start a prefetched item's first reads at stream
++ open
++
++A prefetched item read its first samples only on the first DemuxRead
++after the join. That started each stream's reader in turn and waited
++for it, so the audio segment download began after the video one.
++---
++ src/main.cpp                    | 11 +++++++++++
++ src/main.h                      |  1 +
++ src/samplereader/SampleReader.h |  8 ++++++++
++ 3 files changed, 20 insertions(+)
++
++diff --git a/src/main.cpp b/src/main.cpp
++index 6b43ba73a6..ef759b5d4e 100644
++--- a/src/main.cpp
+++++ b/src/main.cpp
++@@ -46,6 +46,7 @@ bool CInputStreamAdaptive::Open(const kodi::addon::InputstreamProperty& props)
++   LOG::Log(LOGDEBUG, "Open()");
++ 
++   m_session = std::make_shared<CSession>(props.GetProperties());
+++  m_isPrefetchOpen = props.IsPrefetch();
++ 
++   SResult ret = m_session->Initialize(props.GetURL(), m_screenInfo, props.IsPrefetch());
++   if (ret.IsFailed())
++@@ -347,6 +348,16 @@ bool CInputStreamAdaptive::OpenStream(int streamid)
++   // If stream use DRM always update stream info
++   const bool isInfoChanged = stream->GetReader()->GetInformation(stream->m_info) ||
++                              !stream->m_info.GetCryptoSession().GetSessionId().empty();
+++
+++  // the streams of a prefetch read their first sample while the current item plays. Subtitles
+++  // wait, Kodi disables a hidden one right after opening it, and so does a video stream carrying
+++  // included streams, until they are linked to its reader
+++  const INPUTSTREAM_TYPE streamType{stream->m_info.GetStreamType()};
+++  if (m_isPrefetchOpen && !m_isDemuxReadStarted &&
+++      (streamType == INPUTSTREAM_TYPE_AUDIO ||
+++       (streamType == INPUTSTREAM_TYPE_VIDEO && m_session->GetIncludedStreamMask() == 0)))
+++    stream->GetReader()->StartAsync();
+++
++   return isInfoChanged;
++ }
++ 
++diff --git a/src/main.h b/src/main.h
++index 0a294f3fb7..4b89d0b4ae 100644
++--- a/src/main.h
+++++ b/src/main.h
++@@ -62,6 +62,7 @@ private:
++ 
++   bool m_checkCoreReopen{false}; // Check if Kodi core will reopen all streams
++   bool m_isDemuxReadStarted{false};
+++  bool m_isPrefetchOpen{false};
++ };
++ 
++ /*******************************************************/
++diff --git a/src/samplereader/SampleReader.h b/src/samplereader/SampleReader.h
++index b6d80eff15..7eaa646f2a 100644
++--- a/src/samplereader/SampleReader.h
+++++ b/src/samplereader/SampleReader.h
++@@ -136,6 +136,14 @@ public:
++         UTILS::THREAD::GlobalThreadPool.Execute(&ISampleReader::ReadSample, this);
++   }
++ 
+++  /*!
+++   * \brief Start the reader asynchronously, it is waited for as an asynchronous ReadSample
+++   */
+++  void StartAsync()
+++  {
+++    m_readSampleAsyncState = UTILS::THREAD::GlobalThreadPool.Execute([this] { return Start(); });
+++  }
+++
++   /*!
++    * \brief Wait for the asynchronous ReadSample to complete
++    */
+diff --git a/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-09-addon.xml-declare-the-prefetch-capability.patch b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-09-addon.xml-declare-the-prefetch-capability.patch
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-09-addon.xml-declare-the-prefetch-capability.patch
+@@ -0,0 +0,23 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Mon, 9 Nov 2026 22:00:35 -0600
++Subject: [PATCH 09/10] [addon.xml] Declare the prefetch capability
++
++Kodi opens the next playlist item ahead only through an inputstream
++add-on that declares it can run a second instance beside the playing one.
++---
++ inputstream.adaptive/addon.xml.in | 1 +
++ 1 file changed, 1 insertion(+)
++
++diff --git a/inputstream.adaptive/addon.xml.in b/inputstream.adaptive/addon.xml.in
++index 3f488565f5..3d4d537cb4 100644
++--- a/inputstream.adaptive/addon.xml.in
+++++ b/inputstream.adaptive/addon.xml.in
++@@ -10,6 +10,7 @@
++     name="adaptive"
++     extension=""
++     tags="true"
+++    prefetch="true"
++     listitemprops="drm|drm_legacy|license_type|license_key|license_url|license_url_append|license_data|license_flags|server_certificate|common_headers|manifest_upd_params|manifest_params|manifest_headers|stream_params|stream_headers|original_audio_language|play_timeshift_buffer|pre_init_data|stream_selection_type|chooser_bandwidth_max|chooser_resolution_max|chooser_resolution_secure_max|live_delay|config|manifest_config"
++     library_@PLATFORM@="@LIBRARY_FILENAME@"/>
++   <extension point="xbmc.addon.metadata">
+diff --git a/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-10-chooser-declare-the-largest-size-instead-of-forcing-.patch b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-10-chooser-declare-the-largest-size-instead-of-forcing-.patch
+new file mode 100644
+--- /dev/null
++++ b/projects/Amlogic-ce/packages/addons/canary/inputstream.adaptive.canary/patches/inputstream.adaptive-10-chooser-declare-the-largest-size-instead-of-forcing-.patch
+@@ -0,0 +0,377 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Tue, 10 Nov 2026 08:51:21 -0600
++Subject: [PATCH 10/10] [Chooser] Declare the largest size instead of forcing
++ it at start
++
++With "adjust refresh rate" on and the GUI below the largest allowed
++resolution, the first segment was forced to the top representation.
++That let Kodi switch the display mode for it, but on a slow link the
++segment took longer to load than it played, and playback stalled.
++---
++ src/Session.cpp               | 13 +++++--
++ src/Session.h                 |  4 ++-
++ src/common/Chooser.cpp        |  8 +++--
++ src/common/Chooser.h          | 25 +++++++++++++-
++ src/common/ChooserDefault.cpp | 64 +++++++++++++++++++++++------------
++ src/common/ChooserDefault.h   |  7 ++++
++ src/common/ChooserTest.cpp    | 13 +++++++
++ src/common/ChooserTest.h      |  3 ++
++ src/main.cpp                  |  3 +-
++ src/test/TestDASHTree.cpp     | 25 ++++++++++++++
++ 10 files changed, 136 insertions(+), 29 deletions(-)
++
++diff --git a/src/Session.cpp b/src/Session.cpp
++index a17c0f03e2..4bf9a926bb 100644
++--- a/src/Session.cpp
+++++ b/src/Session.cpp
++@@ -117,10 +117,11 @@ void SESSION::CSession::DeleteStreams()
++ 
++ SResult SESSION::CSession::Initialize(std::string manifestUrl,
++                                      const ADP::RESOURCES::ScreenInfo& screenInfo,
++-                                     bool isPrefetch)
+++                                     bool isPrefetch,
+++                                     bool isMaxSizeDeclared)
++ {
++-  m_reprChooser =
++-      CHOOSER::CreateRepresentationChooser(m_kodiProps.GetChooserProps(), screenInfo);
+++  m_reprChooser = CHOOSER::CreateRepresentationChooser(m_kodiProps.GetChooserProps(), screenInfo,
+++                                                       isMaxSizeDeclared);
++ 
++   if (isPrefetch && m_reprChooser->IsInteractive())
++     return SResult::Error("The prefetch is not supported with the ask quality stream selection");
++@@ -539,6 +540,12 @@ void SESSION::CSession::UpdateStream(CStream& stream)
++       stream.m_info.SetAspect(static_cast<float>(stream.m_info.GetWidth()) /
++                               stream.m_info.GetHeight());
++ 
+++    // the display mode follows the largest size the stream can switch to, not the current one
+++    const CRepresentation* maxRep{
+++        m_reprChooser->GetMaxRepresentation(stream.m_adStream.getAdaptationSet(), rep)};
+++    stream.m_info.SetMaxWidth(static_cast<uint32_t>(maxRep->GetWidth()));
+++    stream.m_info.SetMaxHeight(static_cast<uint32_t>(maxRep->GetHeight()));
+++
++     stream.m_info.SetFpsRate(rep->GetFrameRate());
++     stream.m_info.SetFpsScale(rep->GetFrameRateScale());
++ 
++diff --git a/src/Session.h b/src/Session.h
++index f59933d93e..09e6b7b0bc 100644
++--- a/src/Session.h
+++++ b/src/Session.h
++@@ -41,11 +41,13 @@ public:
++    *  \param manifestUrl The manifest URL
++    *  \param screenInfo The screen info
++    *  \param isPrefetch Fail instead of showing any dialog
+++   *  \param isMaxSizeDeclared Kodi takes the max size of a stream from its info
++    *  \return True if has success, false otherwise
++    */
++   SResult Initialize(std::string manifestUrl,
++                      const ADP::RESOURCES::ScreenInfo& screenInfo,
++-                     bool isPrefetch);
+++                     bool isPrefetch,
+++                     bool isMaxSizeDeclared);
++ 
++   bool CheckPlayableStreams(PLAYLIST::CPeriod* period);
++ 
++diff --git a/src/common/Chooser.cpp b/src/common/Chooser.cpp
++index c24cf8513b..f0a7989427 100644
++--- a/src/common/Chooser.cpp
+++++ b/src/common/Chooser.cpp
++@@ -48,7 +48,9 @@ IRepresentationChooser* GetReprChooser(std::string_view type)
++ } // unnamed namespace
++ 
++ IRepresentationChooser* CHOOSER::CreateRepresentationChooser(
++-    const KODI_PROPS::ChooserProps& props, const RESOURCES::ScreenInfo& screenInfo)
+++    const KODI_PROPS::ChooserProps& props,
+++    const RESOURCES::ScreenInfo& screenInfo,
+++    bool isMaxSizeDeclared)
++ {
++   IRepresentationChooser* reprChooser{nullptr};
++ 
++@@ -67,6 +69,7 @@ IRepresentationChooser* CHOOSER::CreateRepresentationChooser(
++   if (!reprChooser)
++     reprChooser = new CRepresentationChooserDefault();
++ 
+++  reprChooser->SetMaxSizeDeclared(isMaxSizeDeclared);
++   reprChooser->OnUpdateScreenRes(screenInfo);
++   reprChooser->Initialize(props);
++ 
++@@ -91,11 +94,12 @@ void CHOOSER::IRepresentationChooser::OnUpdateScreenRes(const ADP::RESOURCES::Sc
++   // For example we can have the GUI at 1080p and when playback starts can be
++   // auto-switched to 4k, but to allow Kodi do this we have to provide the
++   // stream resolution that match the max allowed screen resolution.
+++  // A Kodi that takes the max size from the stream info needs no forced start.
++   if (m_isAdjustRefreshRate && sInfo.width < sInfo.maxWidth && sInfo.height < sInfo.maxHeight)
++   {
++     m_screenCurrentWidth = sInfo.maxWidth;
++     m_screenCurrentHeight = sInfo.maxHeight;
++-    m_isForceStartsMaxRes = true;
+++    m_isForceStartsMaxRes = !m_isMaxSizeDeclared;
++   }
++   else
++   {
++diff --git a/src/common/Chooser.h b/src/common/Chooser.h
++index 0411022105..b31d202f6f 100644
++--- a/src/common/Chooser.h
+++++ b/src/common/Chooser.h
++@@ -68,6 +68,13 @@ public:
++    */
++   void OnUpdateScreenRes(const ADP::RESOURCES::ScreenInfo& sInfo);
++ 
+++  /*!
+++   * \brief Set if Kodi takes the max size of a stream to choose the display mode.
+++   *        To be called before the first screen resolution update.
+++   * \param isMaxSizeDeclared True if the stream info carries the max size
+++   */
+++  void SetMaxSizeDeclared(bool isMaxSizeDeclared) { m_isMaxSizeDeclared = isMaxSizeDeclared; }
+++
++   /*!
++    * \brief Set the current download speed.
++    *        To be called at each segment download.
++@@ -130,6 +137,20 @@ public:
++       PLAYLIST::CAdaptationSet* adp,
++       PLAYLIST::CRepresentation* currentRep) = 0;
++ 
+++  /*!
+++   * \brief Get the representation a stream would reach on a link faster than any
+++   *        representation, with the current screen and limits
+++   * \param adp The adaptation set of the stream
+++   * \param currentRep The current representation of the stream
+++   * \return The representation, by default the current one, for the choosers
+++   *         that never change it while playing
+++   */
+++  virtual PLAYLIST::CRepresentation* GetMaxRepresentation(PLAYLIST::CAdaptationSet* adp,
+++                                                          PLAYLIST::CRepresentation* currentRep)
+++  {
+++    return currentRep;
+++  }
+++
++   /*!
++    * \brief Prints details of the specified representation in the log
++    */
++@@ -155,9 +176,11 @@ protected:
++ 
++ private:
++   bool m_isAdjustRefreshRate{false};
+++  bool m_isMaxSizeDeclared{false};
++ };
++ 
++ IRepresentationChooser* CreateRepresentationChooser(const ADP::KODI_PROPS::ChooserProps& props,
++-                                                    const ADP::RESOURCES::ScreenInfo& screenInfo);
+++                                                    const ADP::RESOURCES::ScreenInfo& screenInfo,
+++                                                    bool isMaxSizeDeclared);
++ 
++ } // namespace CHOOSER
++diff --git a/src/common/ChooserDefault.cpp b/src/common/ChooserDefault.cpp
++index 60e89e347d..d44afe91da 100644
++--- a/src/common/ChooserDefault.cpp
+++++ b/src/common/ChooserDefault.cpp
++@@ -18,6 +18,7 @@
++ 
++ #include <algorithm>
++ #include <cmath>
+++#include <limits>
++ #include <numeric>
++ #include <string_view>
++ 
++@@ -29,6 +30,16 @@ namespace
++ 
++ constexpr const long long SCREEN_RES_REFRESH_SECS = 10;
++ 
+++uint32_t GetStreamBandwidth(StreamType streamType, uint32_t bandwidth)
+++{
+++  // From bandwidth take in consideration:
+++  // 90% of bandwidth for video - 10 % for other
+++  if (streamType == StreamType::VIDEO)
+++    return static_cast<uint32_t>(bandwidth * 0.9);
+++  else
+++    return static_cast<uint32_t>(bandwidth * 0.1);
+++}
+++
++ } // unnamed namespace
++ 
++ CRepresentationChooserDefault::CRepresentationChooserDefault()
++@@ -192,16 +203,37 @@ PLAYLIST::CRepresentation* CRepresentationChooserDefault::GetNextRepresentation(
++   if (isVideoStreamType && !m_ignoreScreenRes && !m_ignoreScreenResChange)
++     CheckResolution();
++ 
++-  CRepresentationSelector selector(m_screenWidth, m_screenHeight);
++-  uint32_t bandwidth;
+++  const uint32_t bandwidth{GetStreamBandwidth(adp->GetStreamType(), m_bandwidthCurrentLimited)};
++ 
++-  // From bandwidth take in consideration:
++-  // 90% of bandwidth for video - 10 % for other
++-  if (isVideoStreamType)
++-    bandwidth = static_cast<uint32_t>(m_bandwidthCurrentLimited * 0.9);
++-  else
++-    bandwidth = static_cast<uint32_t>(m_bandwidthCurrentLimited * 0.1);
+++  CRepresentation* nextRep{
+++      SelectRepresentation(adp, m_isForceStartsMaxRes ? std::nullopt : std::optional(bandwidth))};
+++
+++  if (isVideoStreamType && currentRep) // Only video, to avoid fill too much the log
+++  {
+++    LOG::Log(LOGDEBUG, "[Repr. chooser] Current average bandwidth: %u bit/s (filtered to %u bit/s)",
+++             m_bandwidthCurrent, bandwidth);
+++    LogDetails(currentRep, nextRep);
+++  }
+++
+++  if (m_isForceStartsMaxRes)
+++    m_isForceStartsMaxRes = false;
++ 
+++  return nextRep;
+++}
+++
+++PLAYLIST::CRepresentation* CRepresentationChooserDefault::GetMaxRepresentation(
+++    PLAYLIST::CAdaptationSet* adp, PLAYLIST::CRepresentation* currentRep)
+++{
+++  // an unlimited link is still capped by the bandwidth limit, as in SetDownloadSpeed
+++  const uint32_t bandwidthLimited{m_bandwidthMax > 0 ? m_bandwidthMax
+++                                                     : std::numeric_limits<uint32_t>::max()};
+++  return SelectRepresentation(adp, GetStreamBandwidth(adp->GetStreamType(), bandwidthLimited));
+++}
+++
+++PLAYLIST::CRepresentation* CRepresentationChooserDefault::SelectRepresentation(
+++    PLAYLIST::CAdaptationSet* adp, std::optional<uint32_t> bandwidth) const
+++{
+++  CRepresentationSelector selector(m_screenWidth, m_screenHeight);
++   CRepresentation* nextRep{nullptr};
++   int bestScore{-1};
++ 
++@@ -212,12 +244,12 @@ PLAYLIST::CRepresentation* CRepresentationChooserDefault::GetNextRepresentation(
++ 
++     int score{std::abs(rep->GetWidth() * rep->GetHeight() - m_screenWidth * m_screenHeight)};
++ 
++-    if (!m_isForceStartsMaxRes)
+++    if (bandwidth)
++     {
++-      if (rep->GetBandwidth() > bandwidth)
+++      if (rep->GetBandwidth() > *bandwidth)
++         continue;
++ 
++-      score += static_cast<int>(std::sqrt(bandwidth - rep->GetBandwidth()));
+++      score += static_cast<int>(std::sqrt(*bandwidth - rep->GetBandwidth()));
++     }
++ 
++     if (bestScore == -1 || score < bestScore)
++@@ -230,15 +262,5 @@ PLAYLIST::CRepresentation* CRepresentationChooserDefault::GetNextRepresentation(
++   if (!nextRep)
++     nextRep = selector.Lowest(adp);
++ 
++-  if (isVideoStreamType && currentRep) // Only video, to avoid fill too much the log
++-  {
++-    LOG::Log(LOGDEBUG, "[Repr. chooser] Current average bandwidth: %u bit/s (filtered to %u bit/s)",
++-             m_bandwidthCurrent, bandwidth);
++-    LogDetails(currentRep, nextRep);
++-  }
++-
++-  if (m_isForceStartsMaxRes)
++-    m_isForceStartsMaxRes = false;
++-
++   return nextRep;
++ }
++diff --git a/src/common/ChooserDefault.h b/src/common/ChooserDefault.h
++index ad53f367e6..0af9a6e4af 100644
++--- a/src/common/ChooserDefault.h
+++++ b/src/common/ChooserDefault.h
++@@ -36,6 +36,9 @@ public:
++   PLAYLIST::CRepresentation* GetNextRepresentation(PLAYLIST::CAdaptationSet* adp,
++                                                    PLAYLIST::CRepresentation* currentRep) override;
++ 
+++  PLAYLIST::CRepresentation* GetMaxRepresentation(PLAYLIST::CAdaptationSet* adp,
+++                                                  PLAYLIST::CRepresentation* currentRep) override;
+++
++ protected:
++   /*!
++    * \brief Check if screen resolution is changed, if so will refresh values
++@@ -47,6 +50,10 @@ protected:
++    */
++   void RefreshResolution();
++ 
+++  // without a bandwidth, the representation nearest to the screen size
+++  PLAYLIST::CRepresentation* SelectRepresentation(PLAYLIST::CAdaptationSet* adp,
+++                                                  std::optional<uint32_t> bandwidth) const;
+++
++   int m_screenWidth{0};
++   int m_screenHeight{0};
++   int m_screenLastWidth{0};
++diff --git a/src/common/ChooserTest.cpp b/src/common/ChooserTest.cpp
++index 0b3d55e375..0724cf950b 100644
++--- a/src/common/ChooserTest.cpp
+++++ b/src/common/ChooserTest.cpp
++@@ -115,3 +115,16 @@ PLAYLIST::CRepresentation* CRepresentationChooserTest::GetNextRepresentation(
++ 
++   return nextRep;
++ }
+++
+++PLAYLIST::CRepresentation* CRepresentationChooserTest::GetMaxRepresentation(
+++    PLAYLIST::CAdaptationSet* adp, PLAYLIST::CRepresentation* currentRep)
+++{
+++  const StreamType streamType{adp->GetStreamType()};
+++  if ((streamType != StreamType::VIDEO && streamType != StreamType::AUDIO) ||
+++      m_segmentsCountByType[streamType] == 0)
+++    return currentRep;
+++
+++  // the switch test steps up to the representation of the highest bandwidth
+++  CRepresentationSelector selector(m_screenCurrentWidth, m_screenCurrentHeight);
+++  return selector.HighestBw(adp);
+++}
++diff --git a/src/common/ChooserTest.h b/src/common/ChooserTest.h
++index be47d0a033..d84194115a 100644
++--- a/src/common/ChooserTest.h
+++++ b/src/common/ChooserTest.h
++@@ -33,6 +33,9 @@ namespace CHOOSER
++     PLAYLIST::CRepresentation* GetNextRepresentation(
++         PLAYLIST::CAdaptationSet* adp, PLAYLIST::CRepresentation* currentRep) override;
++ 
+++    PLAYLIST::CRepresentation* GetMaxRepresentation(
+++        PLAYLIST::CAdaptationSet* adp, PLAYLIST::CRepresentation* currentRep) override;
+++
++   protected:
++     enum class TestMode
++     {
++diff --git a/src/main.cpp b/src/main.cpp
++index ef759b5d4e..388faf6b52 100644
++--- a/src/main.cpp
+++++ b/src/main.cpp
++@@ -48,7 +48,8 @@ bool CInputStreamAdaptive::Open(const kodi::addon::InputstreamProperty& props)
++   m_session = std::make_shared<CSession>(props.GetProperties());
++   m_isPrefetchOpen = props.IsPrefetch();
++ 
++-  SResult ret = m_session->Initialize(props.GetURL(), m_screenInfo, props.IsPrefetch());
+++  SResult ret = m_session->Initialize(props.GetURL(), m_screenInfo, props.IsPrefetch(),
+++                                      IsInstanceAPIVersionAtLeast(3, 5, 0));
++   if (ret.IsFailed())
++   {
++     if (props.IsPrefetch())
++diff --git a/src/test/TestDASHTree.cpp b/src/test/TestDASHTree.cpp
++index b2625b0061..99dbb3e5f5 100644
++--- a/src/test/TestDASHTree.cpp
+++++ b/src/test/TestDASHTree.cpp
++@@ -846,3 +846,28 @@ TEST_F(DASHTreeTest, SkipTrickModeAdaptationSet)
++   EXPECT_EQ(adpSets[0]->GetRepresentations()[0]->GetId(), "2");
++   EXPECT_EQ(adpSets[1]->GetId(), "3");
++ }
+++
+++TEST_F(DASHTreeTest, ChooserMaxRepresentationIgnoresBandwidth)
+++{
+++  auto adpSet = PLAYLIST::CAdaptationSet::MakeUniquePtr();
+++  adpSet->SetStreamType(PLAYLIST::StreamType::VIDEO);
+++
+++  const std::vector<std::tuple<int, int, uint32_t>> reprs{
+++      {640, 360, 1000000}, {1280, 720, 3000000}, {1920, 1080, 6000000}, {3840, 2160, 16000000}};
+++  for (const auto& [width, height, bandwidth] : reprs)
+++  {
+++    auto repr = PLAYLIST::CRepresentation::MakeUniquePtr(adpSet.get());
+++    repr->SetResWidth(width);
+++    repr->SetResHeight(height);
+++    repr->SetBandwidth(bandwidth);
+++    adpSet->AddRepresentation(repr);
+++  }
+++
+++  m_reprChooser->OnUpdateScreenRes({1920, 1080, 3840, 2160});
+++  m_reprChooser->PostInit();
+++  m_reprChooser->SetDownloadSpeed(250000);
+++
+++  PLAYLIST::CRepresentation* repr = m_reprChooser->GetRepresentation(adpSet.get());
+++  EXPECT_EQ(repr->GetHeight(), 360);
+++  EXPECT_EQ(m_reprChooser->GetMaxRepresentation(adpSet.get(), repr)->GetHeight(), 1080);
+++}

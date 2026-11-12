@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 17:19:02 -0600
+Subject: [PATCH] DVDFactoryDemuxer: tell whether a file opens in the FFmpeg
+ demuxer
+
+CreateDemuxer picks the demuxer and opens it in one call. A caller gets
+no demuxer to abort until the probe has ended, and the probe of a slow
+source can run for its whole timeout.
+---
+ .../DVDDemuxers/DVDFactoryDemuxer.cpp         | 32 ++++++++++++++++---
+ .../DVDDemuxers/DVDFactoryDemuxer.h           |  3 ++
+ 2 files changed, 30 insertions(+), 5 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.cpp
+@@ -0,12 +0,38 @@
+ #include "utils/URIUtils.h"
+ #include "utils/log.h"
+ 
++namespace
++{
++CDVDDemux* OpenFFmpeg(const std::shared_ptr<CDVDInputStream>& pInputStream,
++                      bool streaminfo,
++                      bool fileinfo)
++{
++  std::unique_ptr<CDVDDemuxFFmpeg> demuxer(new CDVDDemuxFFmpeg());
++  if (demuxer->Open(pInputStream, streaminfo, fileinfo))
++    return demuxer.release();
++  else
++    return NULL;
++}
++} // namespace
++
++bool CDVDFactoryDemuxer::IsFFmpegFile(const std::shared_ptr<CDVDInputStream>& pInputStream)
++{
++  return pInputStream->IsStreamType(DVDSTREAM_TYPE_FILE) &&
++         pInputStream->GetContent() != "audio/x-xbmc-pcm" &&
++         !(pInputStream->GetContent() == "application/octet-stream" &&
++           pInputStream->GetFileName().starts_with("cdda://")) &&
++         !pInputStream->GetIDemux();
++}
++
+ CDVDDemux* CDVDFactoryDemuxer::CreateDemuxer(const std::shared_ptr<CDVDInputStream>& pInputStream,
+                                              bool fileinfo)
+ {
+   if (!pInputStream)
+     return NULL;
+ 
++  if (IsFFmpegFile(pInputStream))
++    return OpenFFmpeg(pInputStream, true, fileinfo);
++
+   // Try to open the AirTunes demuxer
+   if (pInputStream->IsStreamType(DVDSTREAM_TYPE_FILE) && pInputStream->GetContent().compare("audio/x-xbmc-pcm") == 0 )
+   {
+@@ -0,10 +0,6 @@
+       return NULL;
+   }
+ 
+-  std::unique_ptr<CDVDDemuxFFmpeg> demuxer(new CDVDDemuxFFmpeg());
+-  if (demuxer->Open(pInputStream, streaminfo, fileinfo))
+-    return demuxer.release();
+-  else
+-    return NULL;
++  return OpenFFmpeg(pInputStream, streaminfo, fileinfo);
+ }
+ 
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.h b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.h
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.h
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.h
+@@ -0,4 +0,7 @@
+ public:
+   static CDVDDemux* CreateDemuxer(const std::shared_ptr<CDVDInputStream>& pInputStream,
+                                   bool fileinfo = false);
++
++  // Whether CreateDemuxer opens the input as a file in a CDVDDemuxFFmpeg with stream info.
++  static bool IsFFmpegFile(const std::shared_ptr<CDVDInputStream>& pInputStream);
+ };

@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 09:46:19 -0600
+Subject: [PATCH] VideoPlayer: close a parked video stream without draining it
+ again
+
+A playlist join closed the parked video stream and waited for its
+queue to drain, although parking had already waited for the stream's
+end. A decoder that never reported its last picture timed out a
+second time there and froze the held picture for another 5 s.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,7 +0,8 @@
+       if (m_joinPending && m_CurrentVideo.id >= 0)
+       {
+         aml_continue_presentation(hint);
+-        CloseStream(m_CurrentVideo, true);
++        // parking waited for the stream's end, so nothing is left to drain
++        CloseStream(m_CurrentVideo, false);
+         m_joinPending = false;
+       }
+       res = OpenVideoStream(hint, reset);

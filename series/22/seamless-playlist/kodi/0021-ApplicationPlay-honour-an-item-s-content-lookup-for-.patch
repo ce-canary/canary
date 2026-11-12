@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 00:34:06 -0600
+Subject: [PATCH] ApplicationPlay: honour an item's content lookup for its mime
+ type
+
+An http item with content lookup off still had its mime type looked
+up when its playlist entry expanded and when its play details were
+gathered. Each is a HEAD request with redirects that the add-on
+disabled on purpose. The playlist prefetch typed the item the same
+way.
+
+https://github.com/xbmc/xbmc/issues/28887
+---
+ xbmc/application/ApplicationPlay.cpp   | 2 +-
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 2 +-
+ xbmc/playlists/PlayListFactory.cpp     | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/xbmc/application/ApplicationPlay.cpp b/xbmc/application/ApplicationPlay.cpp
+--- a/xbmc/application/ApplicationPlay.cpp
++++ b/xbmc/application/ApplicationPlay.cpp
+@@ -0,7 +0,7 @@
+ 
+   // Ensure the MIME type has been retrieved for http:// and shout:// streams
+   if (m_item.GetMimeType().empty())
+-    m_item.FillInMimeType();
++    m_item.FillInMimeType(m_item.ContentLookup());
+ 
+   if (VIDEO::IsDiscStub(m_item))
+     return GatherPlaybackDetailsResult::RESULT_SUCCESS; // all done
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,7 +0,7 @@
+     // typed as the application and the player type it
+     item.SetMimeTypeForInternetFile();
+     if (item.GetMimeType().empty())
+-      item.FillInMimeType();
++      item.FillInMimeType(item.ContentLookup());
+ 
+     const DVDStreamType type{CDVDFactoryInputStream::GetPrefetchType(item)};
+     if (type == DVDSTREAM_TYPE_NONE)
+diff --git a/xbmc/playlists/PlayListFactory.cpp b/xbmc/playlists/PlayListFactory.cpp
+--- a/xbmc/playlists/PlayListFactory.cpp
++++ b/xbmc/playlists/PlayListFactory.cpp
+@@ -0,7 +0,7 @@
+   {
+     // Ensure the MIME type has been retrieved for http:// and shout:// streams
+     if (item.GetMimeType().empty())
+-      const_cast<CFileItem&>(item).FillInMimeType();
++      const_cast<CFileItem&>(item).FillInMimeType(item.ContentLookup());
+ 
+     std::string strMimeType = item.GetMimeType();
+     StringUtils::ToLower(strMimeType);

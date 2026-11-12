@@ -10,13 +10,16 @@ These builds are for testing and early feature previews. Despite extensive testi
 
 **Status: active.**
 
-- CoreELEC 22: latest build `22.0-Piers_canary_20261107`, based on the nightly of `20261108`.
+- CoreELEC 22: latest build `22.0-Piers_canary_20261111`, based on the nightly of `20261111`.
 
 - **Blu-ray menu playback:** full disc menus with more seamless clip transitions.
 - **A/V sync:** vastly tighter audio and video sync with stability across playback events.
 - **Screen capture:** screenshots and Hyperion ambilight for all HDR formats and output modes.
 - **Dolby Vision FEL playback:** FEL titles play through to the end, and Blu-ray menus no longer turn black on FEL clips.
 - **Dolby Vision output:** Dolby Vision no longer turns purple when playback starts from a refresh rate the TV can't show in Dolby Vision.
+- **Faster mode switches:** playback starts sooner, the TV blanks for less time at a mode change, and Blu-ray menus keep one output mode for the whole disc.
+- **Seamless video playlists:** the next video in a playlist starts without a black screen, and streamed items join in a moment.
+- **External subtitle sync:** subtitles from a separate file stay in sync through busy scenes, seeks and chapter jumps.
 
 When everything here has landed in CoreELEC, this section will say there is no active canary. Use the normal nightly until the next testflight starts.
 
@@ -96,6 +99,24 @@ Dolby Vision FEL titles play through to the end, and Blu-ray menus no longer tur
 
 Dolby Vision no longer turns purple when playback starts from a refresh rate the TV can't show in Dolby Vision, for example right after a 120 Hz SDR clip or menu. The output now picks the right Dolby Vision colour format for the mode it switches to. Nothing to set up.
 
+## Faster mode switches
+
+Playback starts sooner and the TV blanks for less time when the output mode changes. Short Blu-ray menu clips, Dolby Vision clip changes and menu selections are all faster, and soft-telecine DVDs now set the mode once and stay at 59.94 Hz.
+
+Blu-ray menus now keep the main feature's resolution and HDR or Dolby Vision format for every intro, menu and extra, so the TV no longer switches back and forth while you navigate. It is on by default as "Keep the disc's output format", next to the other HDR conversion settings. Turn it off to let each clip use its own format. The refresh rate still follows each video.
+
+## Seamless video playlists
+
+The next video in a playlist now plays on in the running player. The last picture stays up until the next one starts, and the TV keeps its mode and HDR format when the items match. Items at another frame rate still switch the refresh rate.
+
+The next item opens while the current one finishes, for local and network files and for streaming add-ons that use InputStream Adaptive, so joins between streamed items are much shorter. Videos also play out to their last frame.
+
+Adaptive streams no longer freeze a few seconds into an item. They start at a quality the connection can carry, and the TV mode is set for the stream's best quality from the start. Nothing to set up.
+
+## External subtitle sync
+
+Subtitles from a separate file, such as .srt, .ass or .sup next to the video, now stay in sync with the picture. Busy scenes no longer make them run seconds late, and they come back right away after a seek or a chapter jump. Nothing to set up.
+
 ## Going back to a nightly
 
 Copy a nightly `.tar` to `/storage/.update` and reboot. Your normal add-ons and settings stay as they were.
@@ -110,12 +131,15 @@ Follow CoreELEC's [guide to reporting an issue](https://discourse.coreelec.org/t
 
 | Feature | Kodi | common_drivers | media_modules-aml | CoreELEC | History |
 |---|---|---|---|---|---|
-| Blu-ray menu playback | [74 commits](https://github.com/ce-canary/xbmc/compare/base/22...topic/22/menu-playback) | [5 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/av-sync...topic/22/menu-playback) | none | [17 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/screen-capture...topic/22/menu-playback) | [history](https://github.com/ce-canary/canary/commits/main/series/22/menu-playback) |
-| A/V sync | [45 commits](https://github.com/ce-canary/xbmc/compare/topic/22/menu-playback...topic/22/av-sync) | [3 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/dv-output...topic/22/av-sync) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/av-sync) |
+| Blu-ray menu playback | [76 commits](https://github.com/ce-canary/xbmc/compare/base/22...topic/22/menu-playback) | [5 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/av-sync...topic/22/menu-playback) | none | [20 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/screen-capture...topic/22/menu-playback) | [history](https://github.com/ce-canary/canary/commits/main/series/22/menu-playback) |
+| A/V sync | [44 commits](https://github.com/ce-canary/xbmc/compare/topic/22/menu-playback...topic/22/av-sync) | [3 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/dv-output...topic/22/av-sync) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/av-sync) |
 | Screen capture | [21 commits](https://github.com/ce-canary/xbmc/compare/topic/22/av-sync...topic/22/screen-capture) | [23 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/menu-playback...topic/22/screen-capture) | none | [6 commits](https://github.com/ce-canary/CoreELEC/compare/base/22...topic/22/screen-capture) | [history](https://github.com/ce-canary/canary/commits/main/series/22/screen-capture) |
-| Dolby Vision FEL playback | [6 commits](https://github.com/ce-canary/xbmc/compare/topic/22/screen-capture...topic/22/fel-playback) | none | [8 commits](https://github.com/ce-canary/media_modules-aml/compare/base/22...topic/22/fel-playback) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/fel-playback) |
+| Dolby Vision FEL playback | [6 commits](https://github.com/ce-canary/xbmc/compare/topic/22/screen-capture...topic/22/fel-playback) | none | [7 commits](https://github.com/ce-canary/media_modules-aml/compare/base/22...topic/22/fel-playback) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/fel-playback) |
 | Dolby Vision output | none | [2 commits](https://github.com/ce-canary/common_drivers/compare/base/22...topic/22/dv-output) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/dv-output) |
-| Canary-only changes | none | none | none | [3 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/menu-playback...topic/22/canary-only) | [history](https://github.com/ce-canary/canary/commits/main/series/22/canary-only) |
+| Faster mode switches | [32 commits](https://github.com/ce-canary/xbmc/compare/topic/22/fel-playback...topic/22/mode-switch-time) | [4 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/screen-capture...topic/22/mode-switch-time) | [1 commit](https://github.com/ce-canary/media_modules-aml/compare/topic/22/fel-playback...topic/22/mode-switch-time) | [1 commit](https://github.com/ce-canary/CoreELEC/compare/topic/22/canary-only...topic/22/mode-switch-time) | [history](https://github.com/ce-canary/canary/commits/main/series/22/mode-switch-time) |
+| Seamless video playlists | [48 commits](https://github.com/ce-canary/xbmc/compare/topic/22/mode-switch-time...topic/22/seamless-playlist) | none | [2 commits](https://github.com/ce-canary/media_modules-aml/compare/topic/22/mode-switch-time...topic/22/seamless-playlist) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/seamless-playlist) |
+| External subtitle sync | [6 commits](https://github.com/ce-canary/xbmc/compare/topic/22/seamless-playlist...topic/22/external-sub-sync) | none | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/external-sub-sync) |
+| Canary-only changes | none | none | none | [4 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/menu-playback...topic/22/canary-only) | [history](https://github.com/ce-canary/canary/commits/main/series/22/canary-only) |
 
 Each link shows that feature's commits and combined diff for the current build. History shows how a feature changed between builds.
 

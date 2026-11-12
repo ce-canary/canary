@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 00:55:48 -0600
+Subject: [PATCH] mpeg2: give a repeated field the same duration as the others
+
+A frame with repeat_first_field is split into three fields of
+frame_dur / 3 plus half of that, which truncates twice: 1600 instead
+of 1601 for 29.97 fps. Soft-telecine NTSC DVDs played without stream
+pts then average 59.98 Hz, and Kodi detects 60.00 Hz and switches the
+output a second time.
+---
+ drivers/frame_provider/decoder/mpeg12/vmpeg12_multi.c     | 4 ++--
+ drivers/frame_provider/decoder_v4l/mpeg12/vmpeg12_multi.c | 4 ++--
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/frame_provider/decoder/mpeg12/vmpeg12_multi.c b/drivers/frame_provider/decoder/mpeg12/vmpeg12_multi.c
+--- a/drivers/frame_provider/decoder/mpeg12/vmpeg12_multi.c
++++ b/drivers/frame_provider/decoder/mpeg12/vmpeg12_multi.c
+@@ -0,9 +0,9 @@
+ 		vf->index = index;
+ 		set_frame_info(hw, vf);
+ 		if (field_num > 1) {
+-			vf->duration = vf->duration / field_num;
+ 			vf->duration_pulldown = (field_num == 3) ?
+-				(vf->duration >> 1):0;
++				(vf->duration >> 1) - vf->duration / 3 : 0;
++			vf->duration = vf->duration / field_num;
+ 			if (i > 0)
+ 				type = nv_order;
+ 			if (i == 1) /* second field*/
+diff --git a/drivers/frame_provider/decoder_v4l/mpeg12/vmpeg12_multi.c b/drivers/frame_provider/decoder_v4l/mpeg12/vmpeg12_multi.c
+--- a/drivers/frame_provider/decoder_v4l/mpeg12/vmpeg12_multi.c
++++ b/drivers/frame_provider/decoder_v4l/mpeg12/vmpeg12_multi.c
+@@ -0,9 +0,9 @@
+ 		vf->index = index;
+ 		set_frame_info(hw, vf);
+ 		if (field_num > 1) {
+-			vf->duration = vf->duration / field_num;
+ 			vf->duration_pulldown = (field_num == 3) ?
+-				(vf->duration >> 1):0;
++				(vf->duration >> 1) - vf->duration / 3 : 0;
++			vf->duration = vf->duration / field_num;
+ 			type = nv_order;
+ 			if (i == 1) /* second field*/
+ 				type |= (first_field_type == VIDTYPE_INTERLACE_TOP) ?

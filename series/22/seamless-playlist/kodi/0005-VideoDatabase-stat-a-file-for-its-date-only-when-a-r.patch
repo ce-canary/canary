@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 16:30:26 -0600
+Subject: [PATCH] VideoDatabase: stat a file for its date only when a row is
+ written
+
+The date added was looked up before the file was found in the database,
+and an existing row threw it away. For an http file that lookup is a
+HEAD request on every playback state save, which delays the next
+playlist item.
+---
+ xbmc/video/VideoDatabase.cpp | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/xbmc/video/VideoDatabase.cpp b/xbmc/video/VideoDatabase.cpp
+--- a/xbmc/video/VideoDatabase.cpp
++++ b/xbmc/video/VideoDatabase.cpp
+@@ -0,13 +0,22 @@
+   std::string sql;
+   try
+   {
+-    const CDateTime finalDateAdded{GetDateAdded(fileAndPath, fileInfo.m_dateAdded)};
++    // the date may stat the file, a network request for a remote one, so only for a written row
++    CDateTime dateAdded;
++    const auto finalDateAdded{[&]() -> const CDateTime&
++                              {
++                                if (!dateAdded.IsValid())
++                                  dateAdded = GetDateAdded(fileAndPath, fileInfo.m_dateAdded);
++                                return dateAdded;
++                              }};
+ 
+     std::string strFileName;
+     std::string strPath;
+     SplitPath(fileAndPath, strPath, strFileName);
+ 
+-    const int idPath{AddPath(strPath, parentPath, finalDateAdded)};
++    int idPath{GetArchiveOrAliasPathId(strPath)};
++    if (idPath < 0)
++      idPath = AddPath(strPath, parentPath, finalDateAdded());
+     if (idPath < 0)
+       return -1;
+ 
+@@ -0,7 +0,7 @@
+                              ", "
+                              "dateAdded = '%s' "
+                              "WHERE idFile = %i",
+-                         finalDateAdded.GetAsDBDateTime().c_str(), idFile);
++                         finalDateAdded().GetAsDBDateTime().c_str(), idFile);
+ 
+         m_pDS->exec(sql);
+       }
+@@ -0,7 +0,7 @@
+         "INSERT INTO files (idFile, idPath, strFileName, playCount, lastPlayed, dateAdded) "
+         "VALUES(NULL, %i, '%s', " +
+             playCount + ", " + lastPlayed + ", '%s')",
+-        idPath, strFileName.c_str(), finalDateAdded.GetAsDBDateTime().c_str());
++        idPath, strFileName.c_str(), finalDateAdded().GetAsDBDateTime().c_str());
+ 
+     m_pDS->exec(sql);
+ 

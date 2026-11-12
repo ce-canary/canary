@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 10:40:20 -0600
+Subject: [PATCH] DVDVideoCodecAmlogic: reset the decoder on input after an
+ input end
+
+A packet after an end of input only clears the decoder's end flag.
+Only the HEVC decoder takes up input again from there, and only with
+a kernel patch. Kodi's other decoders start over with a reset after
+an end of stream, as at a seek.
+---
+ xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp           | 2 --
+ xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h             | 1 +
+ .../VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp      | 4 ++++
+ 3 files changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,8 +0,6 @@
+   float new_buffer_level = GetBufferLevel(chunk_size, data_len, free_len, size);
+   bool streambuffer(am_private->gcodec.dec_mode == STREAM_TYPE_STREAM);
+ 
+-  ClearInputEnd();
+-
+   if (!m_buffer_level_ready)
+   {
+     m_buffer_level_ready = (streambuffer || new_buffer_level > 5.0f);
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+@@ -0,6 +0,7 @@
+   void          SetSpeed(int speed);
+   void          SetDrain(bool drain);
+   void          SendInputEnd();
++  bool          IsInputEnded() const { return m_inputEndSent; }
+   void          SetDoviZeroLevel5(bool value);
+   void          SetVideoRect(const CRect &SrcRect, const CRect &DestRect);
+   void          SetVideoRate(int videoRate);
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+@@ -0,6 +0,10 @@
+   bool IsHdr10Plus = false;
+   int data_added = false;
+ 
++  // a decoder at its end of stream takes new input only after a reset, as at a seek
++  if (pData && m_Codec->IsInputEnded())
++    Reset();
++
+   if (pData)
+   {
+     // named by how the EL arrives; a track pair can open with solo packets, so

@@ -1,0 +1,130 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 8 Nov 2026 14:54:55 -0600
+Subject: [PATCH] DVDDemuxFFmpeg: preset progressive Blu-ray video frame rates
+
+FFmpeg times 20 frames of each H.264 and HEVC stream before it ends
+the probe, because a transport stream states no frame rate. On a DV
+menu play item the probe read 5.7 MB, 0.5 to 0.8 s over SMB. The play
+item states the rate of each progressive format exactly. Interlaced
+formats keep FFmpeg's estimate.
+---
+ .../DVDDemuxers/DVDDemuxFFmpeg.cpp            |  9 ++-
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 64 +++++++++++++++++++
+ .../DVDInputStreams/DVDInputStreamBluray.h    |  3 +
+ 3 files changed, 74 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+@@ -0,16 +0,21 @@
+       av_opt_set_int(m_pFormatContext, "analyzeduration", 500000, 0);
+ 
+ #ifdef HAVE_LIBBLURAY
+-    // ffmpeg takes a PG size only from a display set and reads on to the probesize for one; the
+-    // play item states it
++    // ffmpeg takes a PG size only from a display set and reads on to the probesize for one, and
++    // estimates a video frame rate over 20 frames; the play item states both
+     if (isBluray)
+     {
+       const auto bluray{std::static_pointer_cast<CDVDInputStreamBluray>(m_pInput)};
+       for (unsigned int i = 0; i < m_pFormatContext->nb_streams; i++)
+       {
+         AVStream* st = m_pFormatContext->streams[i];
++        int rate = 0;
++        int scale = 0;
+         if (st->codecpar->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE && st->codecpar->width == 0)
+           bluray->GetDemuxerGraphicsPlane(st->id, st->codecpar->width, st->codecpar->height);
++        else if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && st->r_frame_rate.num == 0 &&
++                 st->avg_frame_rate.num == 0 && bluray->GetDemuxerFrameRate(st->id, rate, scale))
++          st->r_frame_rate = st->avg_frame_rate = AVRational{rate, scale};
+       }
+     }
+ #endif
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
+@@ -0,6 +0,70 @@
+   }
+ }
+ 
++bool CDVDInputStreamBluray::GetDemuxerFrameRate(int pid, int& rate, int& scale) const
++{
++  if (!m_demuxerClip || m_demuxerClip->video_stream_count == 0)
++    return false;
++
++  // a stream the play item does not list, such as an MVC view, runs with the primary video
++  const BLURAY_STREAM_INFO* info{&m_demuxerClip->video_streams[0]};
++  const auto pick = [pid, &info](const BLURAY_STREAM_INFO* streams, uint8_t count)
++  {
++    for (const BLURAY_STREAM_INFO& stream : std::span(streams, count))
++    {
++      if (stream.pid == static_cast<uint16_t>(pid))
++        info = &stream;
++    }
++  };
++  pick(m_demuxerClip->video_streams, m_demuxerClip->video_stream_count);
++  pick(m_demuxerClip->sec_video_streams, m_demuxerClip->sec_video_stream_count);
++#if (BLURAY_VERSION >= BLURAY_VERSION_CODE(1, 5, 0))
++  pick(m_demuxerClip->dv_streams, m_demuxerClip->dv_stream_count);
++#endif
++
++  switch (info->format)
++  {
++    case BLURAY_VIDEO_FORMAT_480P:
++    case BLURAY_VIDEO_FORMAT_576P:
++    case BLURAY_VIDEO_FORMAT_720P:
++    case BLURAY_VIDEO_FORMAT_1080P:
++    case BLURAY_VIDEO_FORMAT_2160P:
++      break;
++    default:
++      return false;
++  }
++
++  switch (info->rate)
++  {
++    case BLURAY_VIDEO_RATE_24000_1001:
++      rate = 24000;
++      scale = 1001;
++      return true;
++    case BLURAY_VIDEO_RATE_24:
++      rate = 24;
++      scale = 1;
++      return true;
++    case BLURAY_VIDEO_RATE_25:
++      rate = 25;
++      scale = 1;
++      return true;
++    case BLURAY_VIDEO_RATE_30000_1001:
++      rate = 30000;
++      scale = 1001;
++      return true;
++    case BLURAY_VIDEO_RATE_50:
++      rate = 50;
++      scale = 1;
++      return true;
++    case BLURAY_VIDEO_RATE_60000_1001:
++      rate = 60000;
++      scale = 1001;
++      return true;
++    default:
++      return false;
++  }
++}
++
+ const BLURAY_CLIP_INFO* CDVDInputStreamBluray::GetNextItemClip() const
+ {
+   if (m_bMVCPlayback || m_hasMVCExtension)
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h
+@@ -0,6 +0,9 @@
+   //! the graphics plane of the presentation graphic stream `pid` of the play item the demuxer
+   //! opened on, false when the play item does not list the stream or its video format
+   bool GetDemuxerGraphicsPlane(int pid, int& width, int& height) const;
++  //! the frame rate `rate`/`scale` of video stream `pid` of the play item the demuxer opened on,
++  //! false for an interlaced format or a rate the play item does not state
++  bool GetDemuxerFrameRate(int pid, int& rate, int& scale) const;
+   bool IsTitleEnded() const { return m_endedTitleTime > 0; }
+   bool IsTitleEndWait() const { return m_titleEndWait; }
+   //! whether a held title end still waits for its last picture to be presented

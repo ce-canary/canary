@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 8 Nov 2026 16:18:04 -0600
+Subject: [PATCH] GraphicContext: skip a repeated fullscreen video set
+
+VideoPlayer sets fullscreen video before Configure, and the fullscreen
+window sets it again when it opens at AV start. The second set
+triggered a second resolution switch for the same stream while it
+played.
+---
+ xbmc/windowing/GraphicContext.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/xbmc/windowing/GraphicContext.cpp b/xbmc/windowing/GraphicContext.cpp
+--- a/xbmc/windowing/GraphicContext.cpp
++++ b/xbmc/windowing/GraphicContext.cpp
+@@ -0,6 +0,10 @@
+ {
+   std::unique_lock lock(*this);
+ 
++  // the player sets fullscreen video before its window opens; the open must not switch again
++  if (bOnOff && m_bFullScreenVideo && m_bFullScreenRoot)
++    return;
++
+   m_bFullScreenVideo = bOnOff;
+ 
+   if (m_bFullScreenRoot)

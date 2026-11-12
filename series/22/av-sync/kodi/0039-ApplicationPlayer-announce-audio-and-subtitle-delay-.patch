@@ -154,5 +154,5 @@ diff --git a/xbmc/interfaces/json-rpc/schema/version.txt b/xbmc/interfaces/json-
 --- a/xbmc/interfaces/json-rpc/schema/version.txt
 +++ b/xbmc/interfaces/json-rpc/schema/version.txt
 @@ -0 +0 @@
--JSONRPC_VERSION 13.1000.0
-+JSONRPC_VERSION 13.1001.0
+-JSONRPC_VERSION 13.2000.0
++JSONRPC_VERSION 13.2001.0

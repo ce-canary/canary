@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 13:54:46 -0600
+Subject: [PATCH] VideoPlayerVideo: wake the player when a drain ends
+
+The player waits for the end of a played out item's drain by
+polling every 100 ms. When the video ends last, a playlist join
+therefore began up to 100 ms after the decoder's last picture was
+output.
+---
+ xbmc/cores/VideoPlayer/DVDMessage.h         | 1 +
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp | 2 ++
+ 2 files changed, 3 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDMessage.h b/xbmc/cores/VideoPlayer/DVDMessage.h
+--- a/xbmc/cores/VideoPlayer/DVDMessage.h
++++ b/xbmc/cores/VideoPlayer/DVDMessage.h
+@@ -0,6 +0,7 @@
+     PLAYER_REPORT_STATE,
+     PLAYER_FRAME_ADVANCE,
+     PLAYER_DISPLAY_RESET,           // report display reset event
++    PLAYER_STREAM_DRAINED,          // sent when a sub player's drain ended
+ 
+     // demuxer related messages
+     DEMUXER_PACKET,                 // data packet
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+@@ -0,6 +0,8 @@
+       // not finished while the step runs, the requeued drain is out of the queue
+       m_eos = false;
+       m_eos = !drainStep(pMsg);
++      if (m_eos)
++        m_messageParent.Put(std::make_shared<CDVDMsg>(CDVDMsg::PLAYER_STREAM_DRAINED));
+     }
+     else if (pMsg->IsType(CDVDMsg::GENERAL_PAUSE))
+     {

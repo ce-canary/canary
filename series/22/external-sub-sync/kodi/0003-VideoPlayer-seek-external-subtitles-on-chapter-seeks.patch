@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 28 Sep 2026 11:52:57 -0500
+Subject: [PATCH] VideoPlayer: seek external subtitles on chapter seeks
+
+A time seek also seeks the subtitle file demuxer, but a chapter seek
+does not. After a jump back, subtitles stay missing until playback
+reaches the old read position. After a jump forward, the subtitles in
+between are decoded first and old ones flash on screen.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,8 @@
+         m_seekStart = true;
+         if (start != DVD_NOPTS_VALUE)
+         {
++          if (m_pSubtitleDemuxer)
++            m_pSubtitleDemuxer->SeekTime(DVD_TIME_TO_MSEC(start), true);
+           const int64_t targetTime{
+               m_Edl.GetTimeWithoutCuts(std::chrono::milliseconds(DVD_TIME_TO_MSEC(start))).count()};
+           offset = targetTime - beforeSeek;

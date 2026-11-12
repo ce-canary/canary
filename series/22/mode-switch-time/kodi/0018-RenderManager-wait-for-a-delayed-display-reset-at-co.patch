@@ -1,0 +1,142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 11:11:58 -0600
+Subject: [PATCH] RenderManager: wait for a delayed display reset at configure
+
+With a delayed refresh change the display reset ran after a mode
+switch, and the window system cleared its flag before the reset. The
+reset waits on the audio engine for up to five seconds, which counted
+against the configure timeout and could drop the picture.
+---
+ .../cores/VideoPlayer/VideoRenderers/RenderManager.cpp |  8 +++++---
+ xbmc/utils/AMLUtils.cpp                                | 10 ++++++++++
+ xbmc/utils/AMLUtils.h                                  |  5 +++++
+ xbmc/windowing/amlogic/WinSystemAmlogic.h              |  6 +++++-
+ xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.cpp |  4 +++-
+ 5 files changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,6 +0,7 @@
+ #include "windowing/GraphicContext.h"
+ #include "windowing/WinSystem.h"
+ 
++#include <algorithm>
+ #include <memory>
+ #include <mutex>
+ 
+@@ -0,7 +0,8 @@
+     m_presentevent.notifyAll();
+   }
+ 
+-  // a display mode switch the render loop runs meanwhile does not count against the timeout
++  // a display mode switch or a delayed display reset the render loop runs meanwhile does not
++  // count against the timeout
+   const std::chrono::seconds timeout(m_render_timeout);
+   auto deadline = std::chrono::steady_clock::now() + timeout;
+   while (!m_stateEvent.Wait(std::chrono::duration_cast<std::chrono::milliseconds>(
+@@ -0,10 +0,10 @@
+   {
+     std::unique_lock lock(m_statelock);
+     const auto now = std::chrono::steady_clock::now();
+-    if (m_switching)
++    if (m_switching || aml_display_reset_pending())
+       deadline = now + timeout;
+     else
+-      deadline = std::max(deadline, m_switchEnd + timeout);
++      deadline = std::max({deadline, m_switchEnd + timeout, aml_display_reset_end() + timeout});
+     if (deadline <= now)
+     {
+       CLog::Log(LOGWARNING, "CRenderManager::Configure - timeout waiting for configure");
+diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
+--- a/xbmc/utils/AMLUtils.cpp
++++ b/xbmc/utils/AMLUtils.cpp
+@@ -0,6 +0,16 @@
+   return (StringUtils::EqualsNoCase(videostarted.Get<std::string>().value_or("0x0"), "0x1"));
+ }
+ 
++bool aml_display_reset_pending()
++{
++  return static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->IsDisplayResetPending();
++}
++
++std::chrono::steady_clock::time_point aml_display_reset_end()
++{
++  return static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetDisplayResetEnd();
++}
++
+ #if defined(HAVE_LIBBLURAY)
+ namespace
+ {
+diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
+--- a/xbmc/utils/AMLUtils.h
++++ b/xbmc/utils/AMLUtils.h
+@@ -0,6 +0,8 @@
+ 
+ #include "utils/StreamDetails.h"
+ 
++#include <chrono>
++
+ extern "C"
+ {
+ #include <libavutil/pixfmt.h>
+@@ -0,6 +0,9 @@
+ };
+ AMLVideoOutput aml_video_output(const CDVDStreamInfo& source);
+ bool aml_video_started();
++bool aml_display_reset_pending();
++// when the last delayed display reset ended, the clock's epoch when none ran
++std::chrono::steady_clock::time_point aml_display_reset_end();
+ // `next` is the clip of the next item, nullptr when unknown
+ void aml_continue_presentation(const BLURAY_CLIP_INFO* next);
+ void aml_end_presentation(bool stop);
+diff --git a/xbmc/windowing/amlogic/WinSystemAmlogic.h b/xbmc/windowing/amlogic/WinSystemAmlogic.h
+--- a/xbmc/windowing/amlogic/WinSystemAmlogic.h
++++ b/xbmc/windowing/amlogic/WinSystemAmlogic.h
+@@ -0,6 +0,7 @@
+ #include "utils/EGLUtils.h"
+ 
+ #include <atomic>
++#include <chrono>
+ #include <gbm.h>
+ 
+ class IDispResource;
+@@ -0,6 +0,8 @@
+   void MonitorStop();
+ 
+   CAMLDisplay* GetAmlDisplay() const { return m_amlDisplay.get(); }
++  bool IsDisplayResetPending() const { return m_delayDispReset.load(); }
++  std::chrono::steady_clock::time_point GetDisplayResetEnd() const { return m_dispResetEnd.load(); }
+ protected:
+   std::string m_framebuffer_name;
+   bool IsHotplugPending() const { return m_hotplugPending.load(); }
+@@ -0,8 +0,9 @@
+ 
+   RenderStereoMode m_stereo_mode;
+ 
+-  bool m_delayDispReset;
++  std::atomic<bool> m_delayDispReset;
+   XbmcThreads::EndTime<> m_dispResetTimer;
++  std::atomic<std::chrono::steady_clock::time_point> m_dispResetEnd{};
+ 
+   CCriticalSection m_resourceSection;
+   std::vector<IDispResource*> m_resources;
+diff --git a/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.cpp b/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.cpp
+--- a/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.cpp
++++ b/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.cpp
+@@ -0,11 +0,13 @@
+ 
+   if (m_delayDispReset && m_dispResetTimer.IsTimePast())
+   {
+-    m_delayDispReset = false;
+     std::unique_lock<CCriticalSection> lock(m_resourceSection);
+     // tell any shared resources
+     for (std::vector<IDispResource *>::iterator i = m_resources.begin(); i != m_resources.end(); ++i)
+       (*i)->OnResetDisplay();
++    // a configure waits until the resources are reset
++    m_dispResetEnd = std::chrono::steady_clock::now();
++    m_delayDispReset = false;
+     // the player clock runs again: pick now, not a vsync later
+     CAMLCodec::RequestVsyncStep();
+   }

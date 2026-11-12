@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 10 Nov 2026 23:41:33 -0600
+Subject: [PATCH] RenderManager: take the picture of a closed stream off the
+ timeline
+
+A picture kept on the plane after its video stream closed still gave its
+pts as the time on screen. After a Blu-ray item held to its out time, the
+presented time stepped back to that picture until the next stream showed
+its first one.
+---
+ xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,6 +0,11 @@
+   std::unique_lock lock(m_statelock);
+ 
+   m_awaitConfigure = false;
++
++  // a picture kept on the plane is off the timeline of the next stream
++  std::unique_lock lock2(m_presentlock);
++  m_displayedPts = DVD_NOPTS_VALUE;
++  m_offTimelineSource = m_presentsource;
+ }
+ 
+ void CRenderManager::ToggleDebug()

@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 23:44:38 -0600
+Subject: [PATCH] VideoPlayer: stop the video stall output of a parked item
+
+A stalled video thread outputs its last picture again on every timeout.
+A parked item keeps its video stream, so these copies run on into the
+next item, whose open resets the clock. Copies stamped on the old
+timeline then fill the render queue and the old stream never closes.
+---
+ xbmc/cores/VideoPlayer/IVideoPlayer.h       |  1 +
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp      |  2 ++
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp | 13 +++++++++++--
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.h   |  2 ++
+ 4 files changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/IVideoPlayer.h b/xbmc/cores/VideoPlayer/IVideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/IVideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/IVideoPlayer.h
+@@ -0,6 +0,7 @@
+   virtual int GetVideoBitrate() = 0;
+   virtual void SetSpeed(int iSpeed) = 0;
+   virtual bool IsEOS() { return false; };
++  virtual void Park() {}
+   virtual bool SupportsExtention() const = 0;
+   virtual int  GetDataLevel() const = 0;
+   virtual void SetMaxDataSize(int iMaxDataSize) {}
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,8 @@
+   if (m_bAbortRequest)
+     return false;
+ 
++  m_VideoPlayerVideo->Park();
++
+   // the player plays until its audio played out, as at a stock end
+   {
+     std::unique_lock lock(m_parkSection);
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+@@ -0,6 +0,7 @@
+   m_stalled = m_messageQueue.GetPacketCount(CDVDMsg::DEMUXER_PACKET) == 0;
+   m_rewindStalled = false;
+   m_eos = true;
++  m_parked = false;
+   m_packets.clear();
+   m_syncState = IDVDStreamPlayer::SYNC_STARTING;
+   ResetSeekDrop();
+@@ -0,6 +0,10 @@
+     }
+     else if (ret == MSGQ_TIMEOUT)
+     {
++      // a parked stream's held copy waits for a clock the next item resets
++      if (m_outputSate == OUTPUT_AGAIN && m_parked)
++        m_outputSate = OUTPUT_NORMAL;
++
+       if (m_outputSate == OUTPUT_AGAIN &&
+           m_picture.videoBuffer)
+       {
+@@ -0,8 +0,9 @@
+         pts += frametime * 4;
+       }
+ 
+-      // Waiting timed out, output last picture
+-      if (m_picture.videoBuffer)
++      // Waiting timed out, output last picture; a parked stream's pictures would be stamped on
++      // the clock of the next item, the renderer holds the last one
++      if (m_picture.videoBuffer && !m_parked)
+       {
+         m_picture.pts = pts;
+         m_outputSate = OutputPicture(&m_picture);
+@@ -0,6 +0,7 @@
+       m_renderManager.ShowVideo(false);
+       m_rewindStalled = false;
+       m_eos = true;
++      m_parked = false;
+     }
+     else if (pMsg->IsType(CDVDMsg::GENERAL_FLUSH)) // private message sent by (CVideoPlayerVideo::Flush())
+     {
+@@ -0,6 +0,7 @@
+       m_packets.clear();
+       pts = 0;
+       m_rewindStalled = false;
++      m_parked = false;
+       ResetSeekDrop();
+ 
+       m_ptsTracker.Flush();
+@@ -0,6 +0,7 @@
+       }
+ 
+       m_eos = false;
++      m_parked = false;
+       if (m_stalled)
+       {
+         CLog::Log(LOGDEBUG, "CVideoPlayerVideo - Stillframe left, switching to normal playback");
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.h b/xbmc/cores/VideoPlayer/VideoPlayerVideo.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.h
+@@ -0,6 +0,7 @@
+   bool IsStalled() const override { return m_stalled; }
+   bool IsRewindStalled() const override { return m_rewindStalled; }
+   bool IsEOS() override;
++  void Park() override { m_parked = true; }
+   double GetCurrentPts() override;
+   double GetOutputDelay() override; /* returns the expected delay, from that a packet is put in queue */
+   std::string GetPlayerInfo() override;
+@@ -0,6 +0,7 @@
+   std::atomic_bool m_stalled = false;
+   std::atomic_bool m_rewindStalled;
+   std::atomic_bool m_eos{false};
++  std::atomic_bool m_parked{false};
+   bool m_paused;
+   IDVDStreamPlayer::ESyncState m_syncState;
+   std::atomic_bool m_bAbortOutput;

@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 21:50:43 -0600
+Subject: [PATCH] BinaryAddonManager: lock the running add-ons when releasing
+ one
+
+GetAddonBase finds or adds an add-on under the lock, but ReleaseAddonBase
+finds and erases it without one. An instance created on one thread while
+another thread releases the last instance of the same add-on can race on
+the map, or keep a base that is no longer listed, so the next instance
+loads the add-on a second time.
+---
+ xbmc/addons/binary-addons/BinaryAddonManager.cpp | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/xbmc/addons/binary-addons/BinaryAddonManager.cpp b/xbmc/addons/binary-addons/BinaryAddonManager.cpp
+--- a/xbmc/addons/binary-addons/BinaryAddonManager.cpp
++++ b/xbmc/addons/binary-addons/BinaryAddonManager.cpp
+@@ -0,6 +0,8 @@
+ void CBinaryAddonManager::ReleaseAddonBase(const std::shared_ptr<CBinaryAddonBase>& addonBase,
+                                            IAddonInstanceHandler* handler)
+ {
++  std::unique_lock lock(m_critSection);
++
+   const auto& addon = m_runningAddons.find(addonBase->ID());
+   if (addon == m_runningAddons.end())
+     return;

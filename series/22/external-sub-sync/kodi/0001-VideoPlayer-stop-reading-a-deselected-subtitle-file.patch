@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 11 Nov 2026 08:57:32 -0600
+Subject: [PATCH] VideoPlayer: stop reading a deselected subtitle file
+
+A subtitle file stays the player's subtitle demuxer after its stream
+is closed or replaced. Its packets are still read in place of audio
+and video, then discarded, and seeks still seek it.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,7 @@
+   }
+ #endif
+   m_CurrentSubtitle.Clear();
++  m_pSubtitleDemuxer.reset();
+ }
+ 
+ bool CVideoPlayer::IsBlurayTitleEnded() const
+@@ -0,6 +0,7 @@
+ {
+   CDemuxStream* stream = NULL;
+   CDVDStreamInfo hint;
++  std::shared_ptr<CDVDDemux> subtitleDemuxer;
+ 
+   CLog::Log(LOGINFO, "Opening stream: {} source: {}", iStream, source);
+   m_playersFlushed = false;
+@@ -0,7 +0,6 @@
+     const SelectionStream& st = m_SelectionStreams.Get(current.type, index);
+ 
+     CLog::Log(LOGINFO, "Opening Subtitle file: {}", CURL::GetRedacted(st.filename));
+-    m_pSubtitleDemuxer.reset();
+     const auto demux = m_subtitleDemuxerMap.find(demuxerId);
+     if (demux == m_subtitleDemuxerMap.end())
+     {
+@@ -0,7 +0,7 @@
+       return false;
+     }
+ 
+-    m_pSubtitleDemuxer = demux->second;
++    subtitleDemuxer = demux->second;
+ 
+     double pts = m_VideoPlayerVideo->GetCurrentPts();
+     if(pts == DVD_NOPTS_VALUE)
+@@ -0,13 +0,13 @@
+     if(pts == DVD_NOPTS_VALUE)
+       pts = 0;
+     pts += m_offset_pts;
+-    if (!m_pSubtitleDemuxer->SeekTime((int)(1000.0 * pts / (double)DVD_TIME_BASE)))
++    if (!subtitleDemuxer->SeekTime((int)(1000.0 * pts / (double)DVD_TIME_BASE)))
+       CLog::Log(LOGDEBUG, "{} - failed to start subtitle demuxing from: {:f}", __FUNCTION__, pts);
+-    stream = m_pSubtitleDemuxer->GetStream(demuxerId, iStream);
++    stream = subtitleDemuxer->GetStream(demuxerId, iStream);
+     if(!stream || stream->disabled)
+       return false;
+ 
+-    m_pSubtitleDemuxer->EnableStream(demuxerId, iStream, true);
++    subtitleDemuxer->EnableStream(demuxerId, iStream, true);
+ 
+     hint.Assign(*stream, true);
+   }
+@@ -0,6 +0,9 @@
+ 
+   if (res)
+   {
++    if (current.type == StreamType::SUBTITLE)
++      m_pSubtitleDemuxer = subtitleDemuxer;
++
+     int oldId = current.id;
+     current.id = iStream;
+     current.demuxerId = demuxerId;
+@@ -0,6 +0,9 @@
+   //! identification from reaching the demuxer.
+   SetEnableStream(current, false);
+ 
++  if (STREAM_SOURCE_MASK(current.source) == STREAM_SOURCE_DEMUX_SUB)
++    m_pSubtitleDemuxer.reset();
++
+   IDVDStreamPlayer* player = GetStreamPlayer(current.player);
+   if (player)
+   {

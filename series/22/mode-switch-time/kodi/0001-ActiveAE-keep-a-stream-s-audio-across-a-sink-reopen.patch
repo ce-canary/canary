@@ -1,0 +1,127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 8 Nov 2026 20:35:01 -0600
+Subject: [PATCH] ActiveAE: keep a stream's audio across a sink reopen
+
+A sink reopen flushed every stream's buffers, also the input not yet
+converted for any sink. A display reset at playback start dropped the
+opening audio the player had already counted. The start sync then padded
+about 0.3 s of silence in its place.
+---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 34 ++++++++++++++-----
+ .../Engines/ActiveAE/ActiveAEStream.cpp       | 25 ++++++++++++++
+ .../Engines/ActiveAE/ActiveAEStream.h         |  2 ++
+ 3 files changed, 53 insertions(+), 8 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,17 +0,33 @@
+         (*it)->InitRemapper();
+       }
+       double resampleRatio = 1.0;
++      std::deque<CSampleBuffer*> keptSamples;
+       if (initSink && (*it)->m_processingBuffers)
+       {
+-        resampleRatio = (*it)->m_processingBuffers->GetRR();
+-        (*it)->m_processingBuffers->Flush();
+-        m_discardBufferPools.push_back((*it)->m_processingBuffers->GetResampleBuffers());
+-        m_discardBufferPools.push_back((*it)->m_processingBuffers->GetAtempoBuffers());
+-        (*it)->m_processingBuffers.reset();
+-        // a start cut was measured against the flushed buffers
+-        if ((*it)->m_pClock)
+-          (*it)->m_pClock->TakeStartCut();
++        CActiveAEStreamBuffers* buffers = (*it)->m_processingBuffers.get();
++        float kept = buffers->GetDelay();
++        float dropped = 0.0f;
++        // a new output format leaves only the input buffers valid
++        if (!CompareFormat(buffers->m_outputFormat, outputFormat) ||
++            buffers->m_outputFormat.m_frames != outputFormat.m_frames)
++        {
++          resampleRatio = buffers->GetRR();
++          keptSamples = buffers->TakeInputBuffers((*it)->m_inputBuffers.get());
++          kept = 0.0f;
++          for (const auto* buf : keptSamples)
++            kept += (*it)->m_inputBuffers->GetPlayingTime(buf);
++          dropped = buffers->GetDelay();
++          buffers->Flush();
++          m_discardBufferPools.push_back(buffers->GetResampleBuffers());
++          m_discardBufferPools.push_back(buffers->GetAtempoBuffers());
++          (*it)->m_processingBuffers.reset();
++          // a start cut was measured against the dropped buffers
++          if (dropped > 0.0f && (*it)->m_pClock)
++            (*it)->m_pClock->TakeStartCut();
++        }
+         (*it)->m_syncState = CAESyncInfo::AESyncState::SYNC_START;
++        CLog::Log(LOGDEBUG, LOGAUDIO, "ActiveAE::Configure - reopen kept {:.3f}ms dropped {:.3f}ms",
++                  kept * 1000, dropped * 1000);
+       }
+       if (!(*it)->m_processingBuffers)
+       {
+@@ -0,6 +0,8 @@
+         // A stream only sends its resample ratio when it changes, so keep it
+         // across a sink change
+         (*it)->m_processingBuffers->SetRR(resampleRatio, m_settings.atempoThreshold);
++        (*it)->m_processingBuffers->m_inputSamples = std::move(keptSamples);
++        (*it)->m_processingBuffers->SetDrain((*it)->m_drain);
+       }
+       if (m_mode == MODE_TRANSCODE || m_streams.size() > 1)
+         (*it)->m_processingBuffers->FillBuffer();
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.cpp
+@@ -0,6 +0,7 @@
+                                                const AEAudioFormat& outputFormat,
+                                                AEQuality quality)
+   : m_inputFormat(inputFormat),
++    m_outputFormat(outputFormat),
+     m_resampleBuffers(
+         std::make_unique<CActiveAEBufferPoolResample>(inputFormat, outputFormat, quality)),
+     m_atempoBuffers(std::make_unique<CActiveAEBufferPoolAtempo>(outputFormat))
+@@ -0,6 +0,30 @@
+   return std::move(m_atempoBuffers);
+ }
+ 
++// moves the buffers of `pool` out of the chain, oldest first, and leaves the rest for `Flush`
++std::deque<CSampleBuffer*> CActiveAEStreamBuffers::TakeInputBuffers(const CActiveAEBufferPool* pool)
++{
++  std::deque<CSampleBuffer*> taken;
++
++  for (auto* samples :
++       {&m_outputSamples, &m_atempoBuffers->m_outputSamples, &m_atempoBuffers->m_inputSamples,
++        &m_resampleBuffers->m_outputSamples, &m_resampleBuffers->m_inputSamples, &m_inputSamples})
++  {
++    for (auto it = samples->begin(); it != samples->end();)
++    {
++      if ((*it)->pool == pool)
++      {
++        taken.push_back(*it);
++        it = samples->erase(it);
++      }
++      else
++        ++it;
++    }
++  }
++
++  return taken;
++}
++
+ bool CActiveAEStreamBuffers::HasWork()
+ {
+   if (!m_inputSamples.empty())
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+@@ -0,10 +0,12 @@
+   bool HasWork();
+   std::unique_ptr<CActiveAEBufferPool> GetResampleBuffers();
+   std::unique_ptr<CActiveAEBufferPool> GetAtempoBuffers();
++  std::deque<CSampleBuffer*> TakeInputBuffers(const CActiveAEBufferPool* pool);
+ 
+   bool IsAtempoActive() const;
+ 
+   AEAudioFormat m_inputFormat;
++  AEAudioFormat m_outputFormat;
+   std::deque<CSampleBuffer*> m_outputSamples;
+   std::deque<CSampleBuffer*> m_inputSamples;
+ 

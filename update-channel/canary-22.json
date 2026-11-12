@@ -23,6 +23,12 @@
               "name": "22-20261107/CoreELEC-Amlogic-no.aarch64-22.0-Piers_canary_20261107.tar",
               "size": 463923200
             }
+          },
+          "3": {
+            "file": {
+              "name": "22-20261111/CoreELEC-Amlogic-no.aarch64-22.0-Piers_canary_20261111.tar",
+              "size": 465664000
+            }
           }
         }
       }
