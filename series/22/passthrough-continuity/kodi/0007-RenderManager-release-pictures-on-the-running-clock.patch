@@ -1,0 +1,184 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 16 Nov 2026 10:30:11 -0600
+Subject: [PATCH] RenderManager: release pictures on the running clock
+
+Pictures are released on the value the clock readers see, and the clock
+does not know when queued pictures are due. A start target holds that
+value until the audio decides, so pictures must pace on the clock as it
+runs. None may go out while the target is pending, and a release read
+before an arm or a decision moved the clock must be decided again.
+---
+ xbmc/cores/VideoPlayer/DVDClock.cpp           |  6 ++--
+ xbmc/cores/VideoPlayer/DVDClock.h             |  5 ++--
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp   |  2 +-
+ .../VideoRenderers/RenderManager.cpp          | 30 +++++++++++++++++--
+ .../VideoRenderers/RenderManager.h            |  3 ++
+ 5 files changed, 38 insertions(+), 8 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.cpp b/xbmc/cores/VideoPlayer/DVDClock.cpp
+--- a/xbmc/cores/VideoPlayer/DVDClock.cpp
++++ b/xbmc/cores/VideoPlayer/DVDClock.cpp
+@@ -0,12 +0,14 @@
+   return clock + m_vSyncAdjust;
+ }
+ 
+-double CDVDClock::GetClock(int& epoch)
++double CDVDClock::GetRunningClock(int& epoch, bool& target)
+ {
+   std::unique_lock lock(m_critSection);
+ 
+-  const double clock = GetClock();
++  double absolute{0.0};
++  const double clock = GetRunningClock(absolute);
+   epoch = m_clockEpoch;
++  target = m_startPending;
+   return clock;
+ }
+ 
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.h b/xbmc/cores/VideoPlayer/DVDClock.h
+--- a/xbmc/cores/VideoPlayer/DVDClock.h
++++ b/xbmc/cores/VideoPlayer/DVDClock.h
+@@ -0,8 +0,9 @@
+   double GetRunningClock(double& absolute, bool interpolated = true);
+   //! The running clock plus the vsync adjust, read together
+   double GetClockWithVsyncAdjust();
+-  //! The clock and the epoch of its mapping, read together
+-  double GetClock(int& epoch);
++  //! The running clock and the epoch of its mapping, read together, with `target` whether a start
++  //! target is pending
++  double GetRunningClock(int& epoch, bool& target);
+ 
+   //! An `exact` error is moved by in full, as the audio engine already quantised it. A `start`
+   //! handover is never skipped as a minor update.
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+@@ -0,7 +0,7 @@
+   // calculate the time we need to delay this picture before displaying
+   double iPlayingClock, iCurrentClock;
+ 
+-  iPlayingClock = m_pClock->GetClock(iCurrentClock, false); // snapshot current clock
++  iPlayingClock = m_pClock->GetRunningClock(iCurrentClock, false); // snapshot current clock
+ 
+   if (m_speed < 0)
+   {
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,6 +0,7 @@
+     m_offTimelineSource = -1;
+     for (int i = 0; i < m_QueueSize; i++)
+       m_free.push_back(i);
++    PublishQueued();
+ 
+     m_bRenderGUI = true;
+     m_videostarted = std::chrono::system_clock::now();
+@@ -0,7 +0,8 @@
+   double latency = m_displayLatency;
+   if (!m_releaseClockTaken)
+   {
+-    clock = m_dvdClock.GetClock(epoch);
++    bool target{false};
++    clock = m_dvdClock.GetRunningClock(epoch, target);
+     clockTime = std::chrono::steady_clock::now();
+     latency = DVD_MSEC_TO_TIME(CalcReleaseLead() - m_appliedVideoDelay);
+   }
+@@ -0,6 +0,7 @@
+         m_presentstep = PRESENT_IDLE;
+         for (int i = 0; i < m_QueueSize; i++)
+           m_free.push_back(i);
++        PublishQueued();
+       }
+ 
+       m_flushEvent.Set();
+@@ -0,6 +0,7 @@
+   m.pts = picture.pts;
+   m_queued.push_back(m_free.front());
+   m_free.pop_front();
++  PublishQueued();
+   m_playerPort->UpdateRenderBuffers(m_queued.size(), m_discard.size(), m_free.size());
+ 
+   // signal to any waiters to check state
+@@ -0,7 +0,8 @@
+   if (commit)
+     m_dvdClock.GetVsyncPhase().CommitVsyncShift();
+ 
+-  const double frameOnScreen = m_dvdClock.GetClock(m_releaseClockEpoch);
++  bool target{false};
++  const double frameOnScreen = m_dvdClock.GetRunningClock(m_releaseClockEpoch, target);
+   m_releaseClockTime = std::chrono::steady_clock::now();
+   m_releaseClock = frameOnScreen;
+   m_releaseClockTaken = true;
+@@ -0,6 +0,12 @@
+               frameOnScreen / DVD_TIME_BASE, renderPts / DVD_TIME_BASE, nextFramePts / DVD_TIME_BASE,
+               (renderPts - nextFramePts) / DVD_TIME_BASE, renderPts >= nextFramePts, m_forceNext);
+ 
++  // a forced picture is no release on the timeline; none goes out while a start target is pending,
++  // and one decided on a clock that a start target moved since is decided again at the next vsync
++  if (!m_forceNext && renderPts >= nextFramePts &&
++      !m_dvdClock.CanRelease(m_releaseClockEpoch, target))
++    return;
++
+   bool combined = false;
+   if (m_presentsourcePast >= 0)
+   {
+@@ -0,10 +0,12 @@
+     m_queued.pop_front();
+     m_presentpts = m_Queue[m_presentsource].pts - m_displayLatency;
+     m_presentevent.notifyAll();
++    PublishQueued();
+ 
+     m_playerPort->UpdateRenderBuffers(m_queued.size(), m_discard.size(), m_free.size());
+   }
+-  else if (!combined && !m_presenting && renderPts > (nextFramePts - frametime))
++  else if (!combined && !m_presenting && renderPts > (nextFramePts - frametime) &&
++           m_dvdClock.CanRelease(m_releaseClockEpoch, target))
+   {
+     m_lateframes = 0;
+     m_presentstep = PRESENT_FLIP;
+@@ -0,6 +0,7 @@
+     m_queued.pop_front();
+     m_presentpts = m_Queue[m_presentsource].pts - m_displayLatency - frametime / 2;
+     m_presentevent.notifyAll();
++    PublishQueued();
+   }
+ }
+ 
+@@ -0,6 +0,7 @@
+     m_discard.push_back(m_queued.front());
+     m_queued.pop_front();
+   }
++  PublishQueued();
+   m_displayedPts = DVD_NOPTS_VALUE;
+   m_offTimelineSource = m_presentsource;
+ 
+@@ -0,6 +0,15 @@
+   m_presentevent.notifyAll();
+ }
+ 
++void CRenderManager::PublishQueued()
++{
++  if (m_queued.empty())
++    m_dvdClock.SetQueued(DVD_NOPTS_VALUE, DVD_NOPTS_VALUE);
++  else
++    m_dvdClock.SetQueued(m_Queue[m_queued.front()].pts - m_displayLatency,
++                         m_Queue[m_queued.back()].pts - m_displayLatency);
++}
++
+ bool CRenderManager::GetStats(int &lateframes, double &pts, int &queued, int &discard)
+ {
+   std::unique_lock lock(m_presentlock);
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -0,6 +0,9 @@
+   void StartPresentThread();
+   void StopPresentThread();
+   void PresentFromVsync();
++  //! Under m_presentlock: tells the clock when the queued pictures are due, as their release
++  //! test takes them, for a clock start target
++  void PublishQueued();
+   //! Vsync thread: reads the clock sync phase once the vsync step decided its release, with
+   //! `woke` the time the step's wake returned
+   void ReadVsyncPhase(bool released, std::chrono::steady_clock::time_point woke);

@@ -78,7 +78,7 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
 +        m_seekStart = true;
          if (start != DVD_NOPTS_VALUE)
          {
-           const int64_t targetTime{
+           if (m_pSubtitleDemuxer)
 @@ -0,6 +0,7 @@
  void CVideoPlayer::FlushBuffers(double pts, bool accurate, bool sync)
  {

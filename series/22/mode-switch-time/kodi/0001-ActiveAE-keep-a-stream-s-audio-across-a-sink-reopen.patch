@@ -29,7 +29,7 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
 -        m_discardBufferPools.push_back((*it)->m_processingBuffers->GetAtempoBuffers());
 -        (*it)->m_processingBuffers.reset();
 -        // a start cut was measured against the flushed buffers
--        if ((*it)->m_pClock)
+-        if ((*it)->m_pClock && !(*it)->m_freed)
 -          (*it)->m_pClock->TakeStartCut();
 +        CActiveAEStreamBuffers* buffers = (*it)->m_processingBuffers.get();
 +        float kept = buffers->GetDelay();
@@ -49,7 +49,7 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
 +          m_discardBufferPools.push_back(buffers->GetAtempoBuffers());
 +          (*it)->m_processingBuffers.reset();
 +          // a start cut was measured against the dropped buffers
-+          if (dropped > 0.0f && (*it)->m_pClock)
++          if (dropped > 0.0f && (*it)->m_pClock && !(*it)->m_freed)
 +            (*it)->m_pClock->TakeStartCut();
 +        }
          (*it)->m_syncState = CAESyncInfo::AESyncState::SYNC_START;

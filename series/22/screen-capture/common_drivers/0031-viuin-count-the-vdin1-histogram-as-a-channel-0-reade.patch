@@ -1,0 +1,208 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 15 Nov 2026 00:49:48 -0600
+Subject: [PATCH] viuin: count the vdin1 histogram as a channel 0 reader
+
+The vdin1 histogram resumed at every vdin stop and rewrote both
+channels' mux and tap selects. Stopping one capture while another ran
+re-routed or cut the one still running.
+---
+ drivers/media/vin/tvin/tvin_frontend.h |  2 +-
+ drivers/media/vin/tvin/vdin/vdin_drv.c | 40 ++++++++++++++++++------
+ drivers/media/vin/tvin/viu/viuin.c     | 42 +++++++++++++++++++++-----
+ 3 files changed, 67 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/media/vin/tvin/tvin_frontend.h b/drivers/media/vin/tvin/tvin_frontend.h
+--- a/drivers/media/vin/tvin/tvin_frontend.h
++++ b/drivers/media/vin/tvin/tvin_frontend.h
+@@ -0,6 +0,6 @@
+ 						 int index);
+ void tvin_notify_vdin_skip_frame(unsigned int drop_num,  enum tvin_port_type_e port_type);
+ void tvin_update_vdin_prop(void);
+-void viuin_select_loopback_path(void);
++int viuin_select_loopback_path(void);
+ void viuin_clear_loopback_path(void);
+ #endif
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.c b/drivers/media/vin/tvin/vdin/vdin_drv.c
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.c
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.c
+@@ -0,6 +0,26 @@
+ 	return fe ?: tvin_get_frontend(port, index);
+ }
+ 
++/* the vdin1 histogram runs while vdin1 does not capture and write-back
++ * channel 0 can carry the vpp; devp holds its fe_lock, and a vdin1 start
++ * owns vdin1 until it sets DEC_STARTED
++ */
++static void vdin_hist_resume(struct vdin_dev_s *devp)
++{
++	struct vdin_dev_s *vdin1_devp = vdin_devp[1];
++
++	if (IS_ERR_OR_NULL(vdin1_devp))
++		return;
++	if (devp != vdin1_devp)
++		mutex_lock_nested(&vdin1_devp->fe_lock, SINGLE_DEPTH_NESTING);
++	if ((vdin1_devp->flags & VDIN_FLAG_HIST_STARTED) &&
++	    !(vdin1_devp->flags & VDIN_FLAG_DEC_STARTED) &&
++	    !viuin_select_loopback_path())
++		vdin1_hw_hist_on_off(vdin1_devp, true);
++	if (devp != vdin1_devp)
++		mutex_unlock(&vdin1_devp->fe_lock);
++}
++
+ /*
+  * 1. find the corresponding frontend according to the port & save it.
+  * 2. set default register, including:
+@@ -0,6 +0,7 @@
+ 	if (devp->frontend && devp->frontend->dec_ops->close) {
+ 		devp->frontend->dec_ops->close(devp->frontend, devp->port_type);
+ 		devp->frontend = NULL;
++		vdin_hist_resume(devp);
+ 	}
+ 	devp->parm.port = TVIN_PORT_NULL;
+ 	devp->parm.info.fmt  = TVIN_SIG_FMT_NULL;
+@@ -0,7 +0,6 @@
+ 	int afbc_write_down_timeout = 500; /* 50ms to cover a 24Hz vsync */
+ 	int i = 0;
+ #endif
+-	struct vdin_dev_s *vdin1_devp = vdin_devp[1];
+ 	/* avoid null pointer oops */
+ 	if (!devp) {
+ 		pr_info("vdin err no frontend\n");
+@@ -0,12 +0,6 @@
+ #ifdef CONFIG_AMLOGIC_MEDIA_RDMA
+ 	rdma_clear(devp->rdma_handle);
+ #endif
+-	if (!IS_ERR_OR_NULL(vdin1_devp)) {
+-		if (vdin1_devp->flags & VDIN_FLAG_HIST_STARTED) {
+-			viuin_select_loopback_path();
+-			vdin1_hw_hist_on_off(vdin1_devp, true);
+-		}
+-	}
+ 
+ 	devp->flags &= (~VDIN_FLAG_RDMA_ENABLE);
+ 	devp->ignore_frames = max_ignore_frame_cnt;
+@@ -0,8 +0,12 @@
+ 		/* a debug open that failed still sets VDIN_FLAG_DEC_OPENED */
+ 		if (fe->dec_ops->open &&
+ 		    (!(devp->flags & VDIN_FLAG_DEC_OPENED) || devp->frontend != fe)) {
++			/* the histogram gives its channel back while vdin1 captures */
++			if (devp == vdin_devp[1] && (devp->flags & VDIN_FLAG_HIST_STARTED))
++				viuin_clear_loopback_path();
+ 			ret = fe->dec_ops->open(fe, fe->port, devp->port_type);
+ 			if (ret) {
++				vdin_hist_resume(devp);
+ 				devp->frontend = NULL;
+ 				mutex_unlock(&devp->fe_lock);
+ 				return ret;
+@@ -0,6 +0,7 @@
+ 		if (fe_opened && fe->dec_ops->close) {
+ 			fe->dec_ops->close(fe, devp->port_type);
+ 			devp->frontend = NULL;
++			vdin_hist_resume(devp);
+ 		}
+ 		mutex_unlock(&devp->fe_lock);
+ 		return ret;
+@@ -0,6 +0,9 @@
+ 		devp->flags &= (~VDIN_FLAG_V4L2_DEBUG);
+ 	devp->flags &= (~VDIN_FLAG_DEC_OPENED);
+ 	devp->flags &= (~VDIN_FLAG_DEC_STARTED);
++	/* a normal stop closed the frontend above */
++	if (devp->work_mode == VDIN_WORK_MD_NORMAL)
++		vdin_hist_resume(devp);
+ 	if (devp->parm.port != TVIN_PORT_VIU1 || viu_hw_irq != 0) {
+ 		free_irq(devp->irq, (void *)devp);
+ 
+@@ -0,8 +0,8 @@
+ 		}
+ 
+ 		mutex_lock(&devp->fe_lock);
+-		if (!(devp->flags & VDIN_FLAG_DEC_STARTED)) {
+-			viuin_select_loopback_path();
++		if (!(devp->flags & VDIN_FLAG_DEC_STARTED) &&
++		    !viuin_select_loopback_path()) {
+ 			vdin1_hw_hist_on_off(devp, TRUE);
+ 			//vdin_ioctl_get_hist(devp, &vdin1_hist_temp);
+ 		}
+diff --git a/drivers/media/vin/tvin/viu/viuin.c b/drivers/media/vin/tvin/viu/viuin.c
+--- a/drivers/media/vin/tvin/viu/viuin.c
++++ b/drivers/media/vin/tvin/viu/viuin.c
+@@ -0,12 +0,14 @@
+ 	unsigned int chans;
+ };
+ 
+-/* a channel carries one tap to every reader */
++/* a channel carries one tap to every reader; the vdin1 histogram is one */
+ static struct {
+ 	enum tvin_port_e tap;
+ 	unsigned int readers;
+ } viuin_chan[VIUIN_CHAN_MAX];
+ 
++static bool viuin_hist;
++
+ static inline u32 rd_viu(u32 reg)
+ {
+ 	return (u32)aml_read_vcbus(reg);
+@@ -0,30 +0,56 @@
+ 			__func__, vencv_line_cur, cnt);
+ }
+ 
+-void viuin_select_loopback_path(void)
++/* the vdin1 histogram reads the vpp output through write-back channel 0 */
++int viuin_select_loopback_path(void)
+ {
++	unsigned long flags;
++	int ret = 0;
++
++	spin_lock_irqsave(&viuin_lock, flags);
++	if (!viuin_hist && viuin_chan[0].readers &&
++	    viuin_chan[0].tap != TVIN_PORT_VIU1_WB0_VPP)
++		ret = -EBUSY;
++	if (viuin_hist || ret)
++		goto out;
++	viuin_hist = true;
++	if (viuin_chan[0].readers++)
++		goto out;
++	viuin_chan[0].tap = TVIN_PORT_VIU1_WB0_VPP;
+ 	/* set VPU_VIU_VDIN_IF_MUX_CTRL */
+-	wr_viu(VPU_VIU_VDIN_IF_MUX_CTRL_T3X, 0x8080808);
++	wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL_T3X, 0x808, 0, 16);
+ 	/* set VPP_WRBAK_CTRL */
+-	wr_viu(VPP_WR_BAK_CTRL, 0xff0006);
++	wr_bits_viu(VPP_WR_BAK_CTRL, 6, 0, 4);
++	wr_bits_viu(VPP_WR_BAK_CTRL, 0xff, 16, 8);
+ 	/* wrback hsync en */
+ 	//if (port >= TVIN_PORT_VIU1_VIDEO &&
+ 	//    port <= TVIN_PORT_VIU1_WB0_POST_BLEND) {
+ 	wr_bits_viu(WR_BACK_MISC_CTRL, 1, 0, 1);/*vd0 hsync*/
+-	wr_bits_viu(WR_BACK_MISC_CTRL, 0, 1, 1);/*vd1 hsync*/
+ 	//} else {
+ 	//	wr_bits_viu(WR_BACK_MISC_CTRL, 0xf, 0, 4);
+ 	//}
+ 	//if (cpu_after_eq(MESON_CPU_MAJOR_ID_T5M)) {
+ 	wr_viu(VIU_FRM_CTRL, 0x3000004);
+ 	//}
++out:
++	spin_unlock_irqrestore(&viuin_lock, flags);
++	return ret;
+ }
+ EXPORT_SYMBOL(viuin_select_loopback_path);
+ 
+ void viuin_clear_loopback_path(void)
+ {
+-	wr_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0);
+-	wr_viu(VPP_WR_BAK_CTRL, 0);
++	unsigned long flags;
++
++	spin_lock_irqsave(&viuin_lock, flags);
++	if (viuin_hist) {
++		viuin_hist = false;
++		if (!--viuin_chan[0].readers) {
++			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 0, 16);
++			wr_bits_viu(VPP_WR_BAK_CTRL, 0, 0, 4);
++		}
++	}
++	spin_unlock_irqrestore(&viuin_lock, flags);
+ }
+ EXPORT_SYMBOL(viuin_clear_loopback_path);
+ 

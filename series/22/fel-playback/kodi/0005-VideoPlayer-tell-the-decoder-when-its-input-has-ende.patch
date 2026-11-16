@@ -114,12 +114,12 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
        }
        m_inputEnded = true;
 @@ -0,6 +0,10 @@
-       break;
+       continue;
      }
  
 +    // the still state can leave and return while packets flow, only new input needs a new end
 +    if (pStream->type == StreamType::VIDEO)
-+      m_videoInputEnded = false;
++      m_videoInputEndSent = false;
 +
      if (STREAM_SOURCE_MASK(pStream->source) != STREAM_SOURCE_DEMUX_SUB)
      {
@@ -142,10 +142,10 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
 +// queues behind the last packet, once for each run of input
 +void CVideoPlayer::SendVideoInputEnd()
 +{
-+  if (m_CurrentVideo.id < 0 || m_CurrentVideo.packets == 0 || m_videoInputEnded)
++  if (m_CurrentVideo.id < 0 || m_CurrentVideo.packets == 0 || m_videoInputEndSent)
 +    return;
 +
-+  m_videoInputEnded = true;
++  m_videoInputEndSent = true;
 +  m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_INPUT_END));
 +}
 +
@@ -167,7 +167,7 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/Video
    double m_lastVideoTitleTime{DVD_NOPTS_VALUE};
    bool m_navStop{false};
    bool m_navStopped{false};
-+  bool m_videoInputEnded{false};
++  bool m_videoInputEndSent{false};
    // the demuxer has no more for now, the players play out what they hold
    bool m_inputEnded{false};
    bool m_discAudioPick{false};

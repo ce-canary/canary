@@ -1,0 +1,171 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 12 Nov 2026 21:56:12 -0600
+Subject: [PATCH] RenderManager: report the time of the picture on screen
+
+The Blu-ray presented time is the pts of the frame on the plane. A
+picture held for seconds while the next one waits in the queue for its
+pts reports the same time throughout, so the OSD time and disc programs
+that wait on it stop until the next picture shows. A drained last
+picture ran on the clock without the user's video delay.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 33 +++++++++++++------
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  2 ++
+ .../VideoRenderers/RenderManager.cpp          | 28 ++++++++++++++++
+ .../VideoRenderers/RenderManager.h            | 25 +++++++++++++-
+ 4 files changed, 77 insertions(+), 11 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,28 +0,41 @@
+ #endif
+ }
+ 
++// the clock is on title time once every open stream plays in sync
++bool CVideoPlayer::IsBlurayClockKnown() const
++{
++  const auto inSync = [](const CCurrentStream& current)
++  { return current.id < 0 || current.syncState == IDVDStreamPlayer::SYNC_INSYNC; };
++  return (m_CurrentAudio.id >= 0 || m_CurrentVideo.id >= 0) && inSync(m_CurrentAudio) &&
++         inSync(m_CurrentVideo);
++}
++
++// the picture on screen is the last of the video input and stays up until the item ends
++bool CVideoPlayer::IsBlurayLastPictureHeld()
++{
++  return m_videoDrained && !m_VideoPlayerVideo->HasData() && m_VideoPlayerVideo->IsEOS();
++}
++
+ double CVideoPlayer::GetBlurayPresentedTime()
+ {
++  const bool known = IsBlurayClockKnown();
+   // the frame on the plane holds its title time before the streams are in sync, and the
+   // renderer releases frames a display latency ahead of the clock
+-  double presented = m_CurrentVideo.id >= 0 ? m_renderManager.GetDisplayedPts() : DVD_NOPTS_VALUE;
++  double presented = DVD_NOPTS_VALUE;
++  if (m_CurrentVideo.id >= 0)
++    presented = known ? m_renderManager.GetPresentedPts() : m_renderManager.GetDisplayedPts();
+   if (presented == DVD_NOPTS_VALUE)
+   {
+-    // the clock is on title time once every open stream plays in sync
+-    const auto inSync = [](const CCurrentStream& current)
+-    { return current.id < 0 || current.syncState == IDVDStreamPlayer::SYNC_INSYNC; };
+-    const bool known = (m_CurrentAudio.id >= 0 || m_CurrentVideo.id >= 0) &&
+-                       inSync(m_CurrentAudio) && inSync(m_CurrentVideo);
+     if (!known)
+       return DVD_NOPTS_VALUE;
+     presented = m_clock.GetClock();
+   }
+-  // once video has played out, the last picture of a held play item is shown at the clock until
+-  // the item ends, one title tick before the next item starts
++  // the last picture of a held play item is shown at the clock until the item ends, one title
++  // tick before the next item starts
+   if (const auto itemEnd = GetBlurayItemEnd())
+   {
+-    if (m_videoDrained && !m_VideoPlayerVideo->HasData() && m_VideoPlayerVideo->IsEOS())
+-      presented = std::max(presented, m_clock.GetClock());
++    if (IsBlurayLastPictureHeld())
++      presented = std::max(presented, m_renderManager.GetOnScreenClock().clock);
+     const double tick = DVD_TIME_BASE * av_q2d(CDVDDemuxUtils::BLURAY_CLIP_TIME_BASE);
+     return std::min(presented + m_offset_pts, *itemEnd - tick);
+   }
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,8 @@
+   bool IsBlurayJumpPending() const;
+   bool PollBlurayEvents();
+   std::optional<double> GetBlurayItemEnd() const;
++  bool IsBlurayClockKnown() const;
++  bool IsBlurayLastPictureHeld();
+   double GetBlurayPresentedTime();
+   void ReportBlurayPresented();
+   void ReportBlurayReadPresented();
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,6 +0,34 @@
+   return m_displayedPts;
+ }
+ 
++CRenderManager::OnScreenClock CRenderManager::GetOnScreenClock()
++{
++  std::unique_lock lock(m_presentlock);
++
++  return {m_dvdClock.GetClock() - DVD_MSEC_TO_TIME(m_appliedVideoDelay),
++          GetNextPictureSource() >= 0};
++}
++
++double CRenderManager::GetPresentedPts()
++{
++  std::unique_lock lock(m_presentlock);
++
++  const int next = GetNextPictureSource();
++  if (m_displayedPts == DVD_NOPTS_VALUE || next < 0)
++    return m_displayedPts;
++
++  // the picture on screen stays until the next one, which waits for its pts
++  const double onScreen = m_dvdClock.GetClock() - DVD_MSEC_TO_TIME(m_appliedVideoDelay);
++  return std::max(m_displayedPts, std::min(onScreen, m_Queue[next].pts));
++}
++
++int CRenderManager::GetNextPictureSource() const
++{
++  if (m_presentsource >= 0 && m_presentsource != m_planeSource)
++    return m_presentsource;
++  return m_queued.empty() ? -1 : m_queued.front();
++}
++
+ void CRenderManager::CheckEnableClockSync()
+ {
+   // refresh rate can be a multiple of video fps
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -0,6 +0,25 @@
+    */
+   double GetDisplayedPts();
+ 
++  struct OnScreenClock
++  {
++    double clock{DVD_NOPTS_VALUE};
++    bool hasNextPicture{false};
++  };
++
++  /**
++   * The clock time of the picture on screen: the clock without the release lead, with the video
++   * delay; and whether a picture is released or queued to follow the one on the plane
++   */
++  OnScreenClock GetOnScreenClock();
++
++  /**
++   * The time on screen: the displayed pts while it is the last picture known, else the on-screen
++   * clock floored at the displayed pts and capped at the next picture; DVD_NOPTS_VALUE while the
++   * displayed pts is unknown
++   */
++  double GetPresentedPts();
++
+   /**
+    * Video player call this on flush in order to discard any queued frames
+    */
+@@ -0,6 +0,9 @@
+   void UpdateLatencyTweak();
+   //! Release lead in ms without the video delay; needs m_pRenderer
+   double CalcReleaseLead();
++  //! Under m_presentlock: the released frame not yet on the plane, else the first queued one, -1
++  //! for none
++  int GetNextPictureSource() const;
+   void CheckEnableClockSync();
+ 
+   //! The vsync thread picks and presents; the render loop draws the frame it last presented
+@@ -0,7 +0,8 @@
+   /// Display latency updated in PrepareNextRender in DVD clock units, includes m_latencyTweak
+   std::atomic<double> m_displayLatency = 0.0;
+   std::atomic_int m_videoDelay = {};
+-  // the video delay the release and the clock sync phase use, presenter or render thread only
++  // the video delay the release and the clock sync phase use, set by the presenter or render
++  // thread under m_presentlock
+   int m_appliedVideoDelay{0};
+   std::atomic_bool m_videoDelayCommit{false};
+ 

@@ -1,0 +1,164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 15 Nov 2026 00:50:04 -0600
+Subject: [PATCH] viuin: give each capture a channel that carries its tap
+
+A capture took the write-back channel its port names, so vdin0 and vdin1
+asking for different taps of channel 0 refused each other while channel
+1 sat unused, and a second vdin on the same tap had to name the other
+channel's port.
+---
+ drivers/media/vin/tvin/tvin_frontend.h |  1 +
+ drivers/media/vin/tvin/vdin/vdin_drv.c | 10 ++++++
+ drivers/media/vin/tvin/viu/viuin.c     | 49 +++++++++++++++++++++++---
+ 3 files changed, 55 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/media/vin/tvin/tvin_frontend.h b/drivers/media/vin/tvin/tvin_frontend.h
+--- a/drivers/media/vin/tvin/tvin_frontend.h
++++ b/drivers/media/vin/tvin/tvin_frontend.h
+@@ -0,4 +0,5 @@
+ void tvin_update_vdin_prop(void);
+ int viuin_select_loopback_path(void);
+ void viuin_clear_loopback_path(void);
++void viuin_set_wb_channels(unsigned int num);
+ #endif
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.c b/drivers/media/vin/tvin/vdin/vdin_drv.c
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.c
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.c
+@@ -0,6 +0,7 @@
+ 		devp->vdin_clk_flag = 1;
+ 	}
+ 
++	fe->port = port;
+ 	if (fe->dec_ops && fe->dec_ops->open)
+ 		ret = fe->dec_ops->open(fe, port, devp->port_type);
+ 	/* check open status */
+@@ -0,6 +0,8 @@
+ 		return ret;
+ 	}
+ 	devp->frontend = fe;
++	/* a frontend may give another port of the same input */
++	devp->parm.port = fe->port;
+ 
+ 	if (IS_HDMI_SRC(port) || IS_TVAFE_SRC(port)) {
+ 		/* init vdin state machine */
+@@ -0,6 +0,8 @@
+ 				return ret;
+ 			}
+ 			fe_opened = true;
++			/* a frontend may give another port of the same input */
++			devp->parm.port = fe->port;
+ 		}
+ 		devp->frontend   = fe;
+ 
+@@ -0,6 +0,7 @@
+ 	struct platform_device *pdev)
+ {
+ 	int ret = 0;
++	u32 wb_channels;
+ 
+ 	ret = of_property_read_u32(pdev->dev.of_node,
+ 				   "set_canvas_manual",
+@@ -0,6 +0,10 @@
+ 	devp->dbg_no_wr_check =
+ 		of_property_read_bool(pdev->dev.of_node, "dbg_no_wr_check");
+ 
++	/* write-back channels the vpp offers a loopback node */
++	if (!of_property_read_u32(pdev->dev.of_node, "wb_channels", &wb_channels))
++		viuin_set_wb_channels(wb_channels);
++
+ 	ret = of_property_read_u32(pdev->dev.of_node, "lossy_mode",
+ 				   &devp->cr_lossy_param.lossy_mode);
+ 	if (ret)
+diff --git a/drivers/media/vin/tvin/viu/viuin.c b/drivers/media/vin/tvin/viu/viuin.c
+--- a/drivers/media/vin/tvin/viu/viuin.c
++++ b/drivers/media/vin/tvin/viu/viuin.c
+@@ -0,6 +0,8 @@
+ 	unsigned int readers;
+ } viuin_chan[VIUIN_CHAN_MAX];
+ 
++/* the write-back channels the vpp offers, from the vdin dt */
++static unsigned int viuin_chans = 1;
+ static bool viuin_hist;
+ 
+ static inline u32 rd_viu(u32 reg)
+@@ -0,6 +0,25 @@
+ 	       port <= TVIN_PORT_VIU1_WB1_POST_BLEND;
+ }
+ 
++/* a write-back tap is named by its channel 0 port */
++static enum tvin_port_e viuin_tap(enum tvin_port_e port)
++{
++	if (port >= TVIN_PORT_VIU1_WB1_VIDEO && port <= TVIN_PORT_VIU1_WB1_POST_BLEND)
++		return port - TVIN_PORT_VIU1_WB1_VIDEO + TVIN_PORT_VIU1_VIDEO;
++	return port;
++}
++
++static bool viuin_is_tap(enum tvin_port_e tap)
++{
++	return tap >= TVIN_PORT_VIU1_VIDEO && tap <= TVIN_PORT_VIU1_WB0_POST_BLEND;
++}
++
++void viuin_set_wb_channels(unsigned int num)
++{
++	viuin_chans = clamp(num, 1U, (unsigned int)VIUIN_CHAN_MAX);
++}
++EXPORT_SYMBOL(viuin_set_wb_channels);
++
+ static int viuin_support(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ {
+ 	if ((port >= TVIN_PORT_VIU1 && port < TVIN_PORT_VIU1_MAX) ||
+@@ -0,9 +0,10 @@
+ 	enum tvin_port_type_e port_type)
+ {
+ 	struct viuin_s *devp = container_of(fe, struct viuin_s, frontend);
+-	unsigned int c = viuin_is_wb1(port);
++	enum tvin_port_e tap = viuin_tap(port);
+ 	unsigned int viu_mux = 0;
+ 	unsigned long flags;
++	unsigned int c, i;
+ 
+ 	if (!memcpy(&devp->parm, fe->private_data,
+ 		    sizeof(struct vdin_parm_s))) {
+@@ -0,12 +0,29 @@
+ 	/*no need check here, will timeout sometimes*/
+ 	/*viuin_check_venc_line(devp);*/
+ 	spin_lock_irqsave(&viuin_lock, flags);
+-	/* another port on the channel would re-route its readers */
+-	if (devp->chans ||
+-	    (viuin_chan[c].readers && viuin_chan[c].tap != port)) {
++	/* the channel that carries the tap, else a free one; a port that is
++	 * no write-back tap has its own channel
++	 */
++	c = VIUIN_CHAN_MAX;
++	for (i = 0; i < viuin_chans; i++) {
++		if (!viuin_is_tap(tap) && i != viuin_is_wb1(port))
++			continue;
++		if (viuin_chan[i].readers && viuin_chan[i].tap == tap) {
++			c = i;
++			break;
++		}
++		if (!viuin_chan[i].readers && c == VIUIN_CHAN_MAX)
++			c = i;
++	}
++	if (devp->chans || c == VIUIN_CHAN_MAX) {
+ 		spin_unlock_irqrestore(&viuin_lock, flags);
+ 		return -EBUSY;
+ 	}
++	/* the caller takes the port of the channel it was given */
++	if (viuin_is_tap(tap))
++		port = c ? tap - TVIN_PORT_VIU1_VIDEO + TVIN_PORT_VIU1_WB1_VIDEO : tap;
++	fe->port = port;
++	devp->parm.port = port;
+ 	devp->chans = BIT(c);
+ 	devp->flag = 0;
+ 	open_cnt++;
+@@ -0,7 +0,7 @@
+ 		spin_unlock_irqrestore(&viuin_lock, flags);
+ 		return 0;
+ 	}
+-	viuin_chan[c].tap = port;
++	viuin_chan[c].tap = tap;
+ 	if (port == TVIN_PORT_VIU1_VIDEO && !is_meson_s5_cpu() && !is_meson_t3x_cpu()) {/*old chip*/
+ 		/* enable hsync for vdin loop */
+ 		wr_bits_viu(VIU_MISC_CTRL1, 1, 28, 1);

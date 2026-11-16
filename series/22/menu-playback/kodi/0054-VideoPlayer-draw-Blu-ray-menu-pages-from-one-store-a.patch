@@ -204,8 +204,8 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp b/xbmc/co
 +  Release(m_menu);
 +  m_menuSequence = 0;
  
-   ReleaseCache();
    Reset();
+ }
 @@ -0,6 +0,14 @@
        if (found)
          break;

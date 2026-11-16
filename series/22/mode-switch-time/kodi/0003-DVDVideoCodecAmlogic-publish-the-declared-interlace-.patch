@@ -22,4 +22,4 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/x
 +      m_processInfo.SetVideoInterlaced(m_hints.interlaced);
  
        CLog::Log(LOGINFO, "CDVDVideoCodecAmlogic::{}: Open decoder: fps:{:d}/{:d}", __FUNCTION__, m_hints.fpsrate, m_hints.fpsscale);
-       if (m_Codec && !m_Codec->OpenDecoder(m_hints, doviIsFEL))
+       if (m_Codec && !m_Codec->OpenDecoder(m_hints, doviIsFEL, m_output))

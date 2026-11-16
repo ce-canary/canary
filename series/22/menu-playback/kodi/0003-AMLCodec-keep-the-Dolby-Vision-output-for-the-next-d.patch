@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: matthane <matthan.evans@icloud.com>
-Date: Thu, 29 Oct 2026 18:06:55 -0500
+Date: Mon, 16 Nov 2026 14:18:15 -0600
 Subject: [PATCH] AMLCodec: keep the Dolby Vision output for the next decoder
 
 A decoder close ends the Dolby Vision source, and the core follows it
@@ -36,14 +36,14 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +CAMLCodec::OutputModule heldModule{CAMLCodec::OutputModule::NONE};
 +int holdDecoderTimeout{0};
 +
- // whether OpenDecoder runs the Dolby Vision core for `hints`
- bool RunsDolbyVision(const CDVDStreamInfo& hints)
+ // whether OpenDecoder runs the Dolby Vision core for `hints` put out as `output`
+ bool RunsDolbyVision(const CDVDStreamInfo& hints, const AMLVideoOutput& output)
  {
 @@ -0,9 +0,12 @@
    m_buffer_level_ready = false;
    m_setUp = true;
  
-+  TakeHold(hints);
++  TakeHold(hints, m_output);
 +
    if (!OpenAmlVideo(hints))
    {
@@ -198,7 +198,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +
 +// a decoder that plays the format of the held output plays under it, and its close ends the hold
 +// or hands it on; any other ends the hold before it sets up its own output
-+void CAMLCodec::TakeHold(const CDVDStreamInfo& hints)
++void CAMLCodec::TakeHold(const CDVDStreamInfo& hints, const AMLVideoOutput& output)
 +{
 +  std::lock_guard<std::mutex> lock(holdMutex);
 +  m_outputModule = OutputModule::NONE;
@@ -207,7 +207,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +  if (!holdKept || holdOwner != m_holdGen)
 +    return;
 +
-+  const bool take = heldModule == OutputModule::DV && RunsDolbyVision(hints);
++  const bool take = heldModule == OutputModule::DV && RunsDolbyVision(hints, output);
 +  CLog::Log(LOGDEBUG, "CAMLCodec::{}: {} the held output", __FUNCTION__,
 +            take ? "takes" : "releases");
 +  if (take)
@@ -306,7 +306,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
    static void   CloseOutput(bool dvEnabled, int dvPolicy, int decoderTimeout);
    static void   CloseLayers();
 +  Hold          HoldOnClose(bool dvEnabled, int dvPolicy);
-+  void          TakeHold(const CDVDStreamInfo& hints);
++  void          TakeHold(const CDVDStreamInfo& hints, const AMLVideoOutput& output);
 +  void          EndHold(bool failed);
 +  static void   ReleaseKept();
 +  static void   RestoreOutput(int decoderTimeout);
@@ -321,7 +321,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
 +  OutputModule     m_outputModule{OutputModule::NONE};
    am_private_t    *am_private;
    CDVDStreamInfo   m_hints;
-   int              m_speed;
+   AMLVideoOutput   m_output;
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
@@ -365,8 +365,8 @@ diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
 --- a/xbmc/utils/AMLUtils.h
 +++ b/xbmc/utils/AMLUtils.h
 @@ -0,5 +0,7 @@
- bool aml_convert_to_hdr_by_vs_engine(StreamHdrType hdrType);
- bool aml_convert_to_dv_by_vs_engine(StreamHdrType hdrType);
+ };
+ AMLVideoOutput aml_video_output(const CDVDStreamInfo& source);
  bool aml_video_started();
 +void aml_continue_presentation();
 +void aml_end_presentation(bool stop);

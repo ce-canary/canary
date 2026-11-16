@@ -62,8 +62,8 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
        m_renderManager.Flush(false, false);
        m_pDemuxer.reset();
 @@ -0,6 +0,8 @@
-       else if (aml_convert_to_hdr(hint.hdrType))
-         hint.hdrType = StreamHdrType::HDR_TYPE_HDR10;
+       break;
+     case StreamType::VIDEO:
        res = OpenVideoStream(hint, reset);
 +      // a presentation kept for this stream ends when no AML decoder claimed it
 +      aml_end_presentation(false);

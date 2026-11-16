@@ -1,0 +1,161 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 15 Nov 2026 00:50:19 -0600
+Subject: [PATCH] DT: list vdin1's loopback inputs on vdin0
+
+vdin0 was disabled or listed hdmi inputs on every CE SoC that has it,
+so the loopback had one engine. A screen feed and a video scanner
+shared vdin1 and got a fraction of the frames each. No node told viuin
+that the vpp has a second write-back channel.
+---
+ .../boot/dts/amlogic/coreelec_g12a_common.dtsi      | 13 +++++++++++++
+ .../boot/dts/amlogic/coreelec_g12b_common.dtsi      | 10 +++++++++-
+ arch/arm64/boot/dts/amlogic/coreelec_s6_common.dtsi | 12 ++++++++++++
+ .../arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi | 10 +++++++++-
+ .../arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi | 12 ++++++++++++
+ arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi |  6 +++++-
+ 6 files changed, 60 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi
+@@ -0,10 +0,23 @@
+ 	wifi_static_buf = <1>;
+ };
+ 
++&vdin0 {
++	compatible = "amlogic, vdin-g12a";
++	status = "okay";
++	v4l_support_en;
++	/* vdin1's inputs: VD1, VD2, OSD1, OSD2, VPP, POST_BLEND */
++	fe_ports = <0x0000a002 0x0000a003 0x0000a005 0x0000a006
++		    0x0000a008 0x0000a009>;
++	/* VPP_WRBAK_CTRL has two channel selects */
++	wb_channels = <2>;
++};
++
+ &vdin1 {
+ 	compatible = "amlogic, vdin-g12a";
+ 	status = "okay";
+ 	v4l_support_en;
++	/* VPP_WRBAK_CTRL has two channel selects */
++	wb_channels = <2>;
+ };
+ 
+ &dwc2_a {
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi
+@@ -0,11 +0,19 @@
+ };
+ 
+ &vdin0 {
+-	status = "disabled";
++	status = "okay";
++	v4l_support_en;
++	/* vdin1's inputs: VD1, VD2, OSD1, OSD2, VPP, POST_BLEND */
++	fe_ports = <0x0000a002 0x0000a003 0x0000a005 0x0000a006
++		    0x0000a008 0x0000a009>;
++	/* VPP_WRBAK_CTRL has two channel selects */
++	wb_channels = <2>;
+ };
+ 
+ &vdin1 {
+ 	v4l_support_en;
++	/* VPP_WRBAK_CTRL has two channel selects */
++	wb_channels = <2>;
+ };
+ 
+ &pinctrl_periphs {
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_s6_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_s6_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_s6_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_s6_common.dtsi
+@@ -0,8 +0,20 @@
+ 	wifi_static_buf = <2>;  /* dhd wifi for android */
+ };
+ 
++&vdin0 {
++	status = "okay";
++	v4l_support_en;
++	/* vdin1's inputs: VD1, VD2, VD3, OSD1, OSD2, VPP, POST_BLEND */
++	fe_ports = <0x0000a002 0x0000a003 0x0000a004 0x0000a005
++		    0x0000a006 0x0000a008 0x0000a009>;
++	/* VPP_WRBAK_CTRL has two channel selects */
++	wb_channels = <2>;
++};
++
+ &vdin1 {
+ 	/* VD1, VD2, VD3, OSD1, OSD2, VPP, POST_BLEND; the driver holds 7 */
+ 	fe_ports = <0x0000a002 0x0000a003 0x0000a004 0x0000a005
+ 		    0x0000a006 0x0000a008 0x0000a009>;
++	/* VPP_WRBAK_CTRL has two channel selects */
++	wb_channels = <2>;
+ };
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi
+@@ -0,7 +0,13 @@
+ };
+ 
+ &vdin0 {
+-	status = "disabled";
++	status = "okay";
++	v4l_support_en;
++	/* vdin1's inputs: VD1, VD2, VD3, OSD1, OSD2, VPP, POST_BLEND */
++	fe_ports = <0x0000a002 0x0000a003 0x0000a004 0x0000a005
++		    0x0000a006 0x0000a008 0x0000a009>;
++	/* VPP_WRBAK_CTRL has two channel selects */
++	wb_channels = <2>;
+ };
+ 
+ &audiobus {
+@@ -0,4 +0,6 @@
+ 	/* VD1, VD2, VD3, OSD1, OSD2, VPP, POST_BLEND; the driver holds 7 */
+ 	fe_ports = <0x0000a002 0x0000a003 0x0000a004 0x0000a005
+ 		    0x0000a006 0x0000a008 0x0000a009>;
++	/* VPP_WRBAK_CTRL has two channel selects */
++	wb_channels = <2>;
+ };
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi
+@@ -0,11 +0,23 @@
+ 	wifi_static_buf = <1>;
+ };
+ 
++&vdin0 {
++	status = "okay";
++	v4l_support_en;
++	/* vdin1's inputs: VD1, VD2, VD3, OSD1, OSD2, VPP, POST_BLEND */
++	fe_ports = <0x0000a002 0x0000a003 0x0000a004 0x0000a005
++		    0x0000a006 0x0000a008 0x0000a009>;
++	/* VPP_WRBAK_CTRL has two channel selects */
++	wb_channels = <2>;
++};
++
+ &vdin1 {
+ 	v4l_support_en;
+ 	/* VD1, VD2, VD3, OSD1, OSD2, VPP, POST_BLEND; the driver holds 7 */
+ 	fe_ports = <0x0000a002 0x0000a003 0x0000a004 0x0000a005
+ 		    0x0000a006 0x0000a008 0x0000a009>;
++	/* VPP_WRBAK_CTRL has two channel selects */
++	wb_channels = <2>;
+ };
+ 
+ &i2c0 {
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi
+@@ -0,7 +0,11 @@
+ };
+ 
+ &vdin0 {
+-	status = "disabled";
++	status = "okay";
++	v4l_support_en;
++	/* vdin1's inputs: VD1, VD2, VD3, OSD1, OSD2, VPP, POST_BLEND */
++	fe_ports = <0x0000a002 0x0000a003 0x0000a004 0x0000a005
++		    0x0000a006 0x0000a008 0x0000a009>;
+ };
+ 
+ &i2c2 {

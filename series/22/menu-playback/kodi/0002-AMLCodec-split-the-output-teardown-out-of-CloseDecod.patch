@@ -1,15 +1,17 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: matthane <matthan.evans@icloud.com>
-Date: Thu, 29 Oct 2026 12:42:54 -0500
+Date: Mon, 16 Nov 2026 14:05:46 -0600
 Subject: [PATCH] AMLCodec: split the output teardown out of CloseDecoder
 
-This also moves the Dolby Vision decision of OpenDecoder into
-RunsDolbyVision and makes ShowMainVideo static. Neither changes
-behaviour.
+This also passes OpenDecoder the whole video output, moves its Dolby
+Vision decision into RunsDolbyVision and makes ShowMainVideo static.
+None of this changes behaviour.
 ---
- .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  | 59 +++++++++++++++----
- .../VideoPlayer/DVDCodecs/Video/AMLCodec.h    |  4 +-
- 2 files changed, 50 insertions(+), 13 deletions(-)
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  | 64 +++++++++++++++----
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.h    |  8 ++-
+ .../DVDCodecs/Video/DVDVideoCodecAmlogic.cpp  |  3 +-
+ .../DVDCodecs/Video/DVDVideoCodecAmlogic.h    |  2 +
+ 4 files changed, 60 insertions(+), 17 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
@@ -21,8 +23,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +namespace
 +{
 +
-+// whether OpenDecoder runs the Dolby Vision core for `hints`
-+bool RunsDolbyVision(const CDVDStreamInfo& hints)
++// whether OpenDecoder runs the Dolby Vision core for `hints` put out as `output`
++bool RunsDolbyVision(const CDVDStreamInfo& hints, const AMLVideoOutput& output)
 +{
 +  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
 +  const bool dv2sdr = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV2SDR);
@@ -32,10 +34,10 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +                                    ->aml_display_support_dv();
 +  return aml_support_dolby_vision() &&
 +         !settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_DISABLE) &&
-+         ((hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION &&
++         ((output.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION &&
 +           (displaySupportDv || hints.dovi.dv_profile == 5)) ||
-+          ((hints.hdrType != StreamHdrType::HDR_TYPE_NONE && dv2sdr) ||
-+           (hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && dv2hdr)));
++          ((output.hdrType != StreamHdrType::HDR_TYPE_NONE && dv2sdr) ||
++           (output.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && dv2hdr)));
 +}
 +
 +} // namespace
@@ -43,18 +45,44 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
  /*************************************************************************/
  CAMLCodec::CAMLCodec(CProcessInfo &processInfo)
    : m_opened(false)
+@@ -0,7 +0,7 @@
+     am_private->dovi_zero_level5 = value;
+ }
+ 
+-bool CAMLCodec::OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, StreamHdrType outputHdrType)
++bool CAMLCodec::OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, const AMLVideoOutput& output)
+ {
+   m_speed = DVD_PLAYSPEED_NORMAL;
+   m_drain = false;
+@@ -0,6 +0,7 @@
+   m_brightness = -1;
+   m_vadj1_enabled = false;
+   m_hints = hints;
++  m_output = output;
+   m_state = 0;
+   m_hints.pClock = hints.pClock;
+   m_tp_last_frame = std::chrono::system_clock::now();
 @@ -0,10 +0,7 @@
    bool dv2hdr(settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV2HDR));
    bool display_support_dv(static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay()->aml_display_support_dv());
    bool user_dv_disable(settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_DISABLE));
 -  bool dv_enable(device_support_dv && !user_dv_disable &&
--      ((hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && (display_support_dv || hints.dovi.dv_profile == 5)) ||
--      ((hints.hdrType != StreamHdrType::HDR_TYPE_NONE && dv2sdr) ||
--       (hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && dv2hdr))));
-+  bool dv_enable(RunsDolbyVision(hints));
+-      ((outputHdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && (display_support_dv || hints.dovi.dv_profile == 5)) ||
+-      ((outputHdrType != StreamHdrType::HDR_TYPE_NONE && dv2sdr) ||
+-       (outputHdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && dv2hdr))));
++  bool dv_enable(RunsDolbyVision(hints, m_output));
    CLog::Log(LOGINFO, "CAMLCodec::OpenDecoder Amlogic device {} support DV, DV is {} by user, display {} support DV, DV system is {}",
      device_support_dv ? "does" : "does not", user_dv_disable ? "disabled" : "enabled",
      display_support_dv ? "does" : "does not", dv_enable ? "enabled" : "disabled");
+@@ -0,7 +0,7 @@
+ 
+     AmlDisplay->aml_set_drmProperty("dv_enable", DRM_MODE_OBJECT_CRTC, 0);
+     if (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_SDR2HDR) &&
+-        outputHdrType == StreamHdrType::HDR_TYPE_HDR10 && !m_processInfo.GetIsHdr10Plus())
++        m_output.hdrType == StreamHdrType::HDR_TYPE_HDR10 && !m_processInfo.GetIsHdr10Plus())
+       forceOutput = FORCE_OUTPUT_BT2020_PQ;
+     else if (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_HDR2SDR))
+       forceOutput = FORCE_OUTPUT_BT709;
 @@ -0,20 +0,32 @@
  
    // return tsync to default so external apps work
@@ -117,6 +145,23 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+@@ -0,6 +0,7 @@
+ #include "cores/IPlayer.h"
+ #include "windowing/Resolution.h"
+ #include "rendering/RenderSystem.h"
++#include "utils/AMLUtils.h"
+ #include "utils/BitstreamConverter.h"
+ #include "utils/Geometry.h"
+ 
+@@ -0,7 +0,7 @@
+   CAMLCodec(CProcessInfo &processInfo);
+   virtual ~CAMLCodec();
+ 
+-  bool          OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, StreamHdrType outputHdrType);
++  bool          OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, const AMLVideoOutput& output);
+   bool          Enable_vadj1();
+   void          CloseDecoder();
+   void          Reset();
 @@ -0,13 +0,15 @@
    static bool   WaitPresentStep(uint64_t& seen, int fenceFd);
  
@@ -134,3 +179,50 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
    std::string   GetVfmMap(const std::string &name);
    void          SetVfmMap(const std::string &name, const std::string &map);
    int           DequeueBuffer();
+@@ -0,6 +0,7 @@
+   bool             m_setUp{false};
+   am_private_t    *am_private;
+   CDVDStreamInfo   m_hints;
++  AMLVideoOutput   m_output;
+   int              m_speed;
+   uint64_t         m_cur_pts;
+   uint64_t         m_last_pts;
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+@@ -0,6 +0,7 @@
+     m_videobuffer.color_transfer = output.colorTransfer;
+     m_sdrWhite = output.sdrWhite;
+     m_sdrGamma = output.sdrGamma;
++    m_output = output;
+   }
+ 
+   m_processInfo.SetVideoDecoderName(m_pFormatName, true);
+@@ -0,7 +0,7 @@
+       m_processInfo.SetIsHdr10Plus(IsHdr10Plus);
+ 
+       CLog::Log(LOGINFO, "CDVDVideoCodecAmlogic::{}: Open decoder: fps:{:d}/{:d}", __FUNCTION__, m_hints.fpsrate, m_hints.fpsscale);
+-      if (m_Codec && !m_Codec->OpenDecoder(m_hints, doviIsFEL, m_videobuffer.hdrType))
++      if (m_Codec && !m_Codec->OpenDecoder(m_hints, doviIsFEL, m_output))
+         CLog::Log(LOGERROR, "CDVDVideoCodecAmlogic::{}: Failed to open Amlogic Codec", __FUNCTION__);
+ 
+       m_videoBufferPool = std::shared_ptr<CAMLVideoBufferPool>(new CAMLVideoBufferPool());
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h
+@@ -0,6 +0,7 @@
+ #include "DVDStreamInfo.h"
+ #include "threads/CriticalSection.h"
+ #include "cores/VideoPlayer/Buffers/VideoBuffer.h"
++#include "utils/AMLUtils.h"
+ #include "utils/BitstreamConverter.h"
+ #include "utils/MVCFrameNumRewriter.h"
+ 
+@@ -0,6 +0,7 @@
+   bool            m_opened;
+   int             m_codecControlFlags;
+   CDVDStreamInfo  m_hints;
++  AMLVideoOutput  m_output;
+   float           m_sdrWhite{0.0f};
+   float           m_sdrGamma{0.0f};
+   double          m_framerate;

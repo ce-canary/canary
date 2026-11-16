@@ -1,0 +1,142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 14 Nov 2026 01:30:18 -0600
+Subject: [PATCH] AMLCapture: lease a stream only for the input a consumer
+ reads
+
+Every one-shot took a video lease when its tap ran, a 10-bit shot
+included. A shot held it until its read, other one-shots until their
+pixels went. The lease counted video as wanted before anything was
+read, and a shot never reads the NV12 stream it kept alive.
+---
+ xbmc/utils/AMLCapture.cpp                       | 13 ++++++-------
+ xbmc/utils/AMLCapture.h                         |  9 +++------
+ xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp | 10 ++--------
+ 3 files changed, 11 insertions(+), 21 deletions(-)
+
+diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
+--- a/xbmc/utils/AMLCapture.cpp
++++ b/xbmc/utils/AMLCapture.cpp
+@@ -0,7 +0,6 @@
+     if (m_spec.shot == CaptureScreenshot::NATIVE)
+     {
+       m_buffer = ReadNative(*session);
+-      m_lease.reset();
+       return m_buffer.get();
+     }
+ 
+@@ -0,9 +0,6 @@
+                              return convert.Convert(CAMLCapture::Crop(frame.image, m_spec.rect),
+                                                     frame.color, AMLCaptureCoding(), dst);
+                            });
+-    // a screenshot holds no stream while it is encoded
+-    if (m_spec.shot != CaptureScreenshot::NONE)
+-      m_lease.reset();
+ 
+     if (ok)
+       m_buffer = std::move(buffer);
+@@ -0,7 +0,9 @@
+     if (it != m_continuousSizes.end())
+       m_continuousSizes.erase(it);
+     m_leases[static_cast<size_t>(input)]--;
+-    if (!m_stream || m_leases[static_cast<size_t>(m_stream->GetInput())] > 0)
++    // a shot closes its own stream
++    if (!m_stream || m_stream->GetPixelFormat() == PIX_FMT_YUV422_10P ||
++        m_leases[static_cast<size_t>(m_stream->GetInput())] > 0)
+       return;
+   }
+ 
+@@ -0,7 +0,7 @@
+         std::shared_ptr<CStream> stream;
+         {
+           std::lock_guard lock(session->m_lock);
+-          if (!session->m_stream ||
++          if (!session->m_stream || session->m_stream->GetPixelFormat() == PIX_FMT_YUV422_10P ||
+               session->m_leases[static_cast<size_t>(session->m_stream->GetInput())] > 0)
+             return;
+           stream = session->TakeStream();
+@@ -0,6 +0,7 @@
+ 
+ bool CAMLCapture::Read(AMLCaptureInput input, int width, int height, const ReadFunc& use)
+ {
++  const auto lease = Lease(input, width, height);
+   std::lock_guard read(m_readLock);
+ 
+   return ReadStream(input, V4L2_PIX_FMT_NV12, CAPTURE_BUFFERS, width, height,
+@@ -0,7 +0,7 @@
+   int width = 0;
+   int height = 0;
+   GetStreamSize(spec.rect, spec.width, spec.height, width, height);
+-  auto lease = spec.continuous ? Lease(AMLCaptureInput::VIDEO, width, height) : Lease();
++  auto lease = spec.continuous ? Lease(AMLCaptureInput::VIDEO, width, height) : nullptr;
+   result.pixels =
+       std::make_shared<CAMLVideoPixels>(weak_from_this(), std::move(lease), spec, width, height);
+   DescribeSdr(spec.width, spec.height, spec.shot == CaptureScreenshot::STANDARD, result);
+diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
+--- a/xbmc/utils/AMLCapture.h
++++ b/xbmc/utils/AMLCapture.h
+@@ -0,12 +0,6 @@
+   //! Render thread: the video destination on screen, normalized to the output
+   CRect GetVisibleRect();
+ 
+-  //! Keeps the stream running until the last lease is released. A continuous consumer passes
+-  //! the stream size it reads at, which the stream keeps while the lease lasts.
+-  std::shared_ptr<void> Lease(AMLCaptureInput input = AMLCaptureInput::VIDEO,
+-                              int width = 0,
+-                              int height = 0);
+-
+   //! Consumer thread: take the newest frame of a stream of input at least width x height, or of
+   //! the input's continuous size when larger, else wait for the next one, and run `use` on it. An
+   //! input or size change restarts the stream. A wait ends after a bound of frame periods.
+@@ -0,6 +0,9 @@
+   using StreamFunc =
+       std::function<bool(CStream& stream, unsigned int index, const AMLCaptureFrame& frame)>;
+ 
++  //! Keeps a stream of input at least width x height running until the last lease is released.
++  //! A continuous consumer holds one from its tap on, every read for its own duration.
++  std::shared_ptr<void> Lease(AMLCaptureInput input, int width, int height);
+   void ReleaseLease(AMLCaptureInput input, int width, int height);
+   //! m_readLock must be held; `use` runs on buffer `index`, which is queued again after it.
+   //! With `logCause`, it logs why it gets no frame
+diff --git a/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
+--- a/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
++++ b/xbmc/windowing/amlogic/ScreenshotSurfaceAML.cpp
+@@ -0,11 +0,8 @@
+ class CAMLCompositePixels : public ICapturePixels
+ {
+ public:
+-  CAMLCompositePixels(std::weak_ptr<CAMLCapture> session,
+-                      std::shared_ptr<void> lease,
+-                      GuiReadback gui)
++  CAMLCompositePixels(std::weak_ptr<CAMLCapture> session, GuiReadback gui)
+     : m_session(std::move(session)),
+-      m_lease(std::move(lease)),
+       m_gui(std::move(gui))
+   {
+   }
+@@ -0,8 +0,6 @@
+       ok = session->ReadVideo(m_gui.shot, m_gui.streamWidth, m_gui.streamHeight,
+                               [this](const AMLCaptureFrame& frame, CAMLCaptureConvert& convert)
+                               { return Blend(frame, convert); });
+-    if (m_gui.shot != CaptureScreenshot::NONE)
+-      m_lease.reset();
+     // a native screenshot that is only the GUI would pass for a capture of the screen, and a GUI
+     // in an HDR coding for SDR
+     if (!ok && (native || m_gui.coding.transfer != AMLCaptureCoding::Transfer::SDR))
+@@ -0,7 +0,6 @@
+   }
+ 
+   std::weak_ptr<CAMLCapture> m_session;
+-  std::shared_ptr<void> m_lease;
+   GuiReadback m_gui;
+   std::mutex m_lock;
+   bool m_read{false};
+@@ -0,7 +0,7 @@
+   gui.shot = spec.screenshot;
+ 
+   const bool rgb = spec.screenshot == CaptureScreenshot::STANDARD;
+-  result.pixels = std::make_shared<CAMLCompositePixels>(session, session->Lease(), std::move(gui));
++  result.pixels = std::make_shared<CAMLCompositePixels>(session, std::move(gui));
+   result.width = static_cast<unsigned int>(m_width);
+   result.height = static_cast<unsigned int>(m_height);
+   result.stride = m_width * (rgb ? 3 : 4);

@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 15 Nov 2026 00:47:48 -0600
+Subject: [PATCH] AMLCapture: retry a busy node on every video read
+
+A video open that found another vdin1 user on the node kept video
+reads off until the next Configure, while screen reads retried on each
+read. A video capture that started beside that user got no frames for
+the rest of the title.
+---
+ xbmc/utils/AMLCapture.cpp | 6 ++----
+ xbmc/utils/AMLCapture.h   | 2 +-
+ 2 files changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
+--- a/xbmc/utils/AMLCapture.cpp
++++ b/xbmc/utils/AMLCapture.cpp
+@@ -0,16 +0,14 @@
+ {
+   if (m_displayLost)
+     return false;
+-  return input == AMLCaptureInput::SCREEN || (m_presented && !m_busy);
++  return input == AMLCaptureInput::SCREEN || m_presented;
+ }
+ 
+ bool CAMLCapture::Unreadable(bool log) const
+ {
+   if (log)
+     CLog::Log(LOGWARNING, "CAMLCapture::{}: no video frame: {}", __FUNCTION__,
+-              m_displayLost  ? "display lost"
+-              : !m_presented ? "no video presented"
+-                             : "another vdin1 user holds the node");
++              m_displayLost ? "display lost" : "no video presented");
+   return false;
+ }
+ 
+diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
+--- a/xbmc/utils/AMLCapture.h
++++ b/xbmc/utils/AMLCapture.h
+@@ -0,7 +0,7 @@
+   std::vector<std::tuple<AMLCaptureInput, int, int>> m_continuousSizes;
+   bool m_displayLost{false};
+   uint32_t m_displayEpoch{0};
+-  //! another vdin1 user holds the node: no reopen before the next Configure
++  //! the last video open found the node busy; every video read retries it
+   bool m_busy{false};
+   //! the last screen open found the node busy; every screen read retries it
+   bool m_screenBusy{false};

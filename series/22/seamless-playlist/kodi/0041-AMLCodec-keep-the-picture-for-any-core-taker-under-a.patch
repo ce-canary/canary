@@ -9,9 +9,6 @@ the output, so the video goes black for up to half a second. The
 output does not change there, and the core runs a kept picture for
 any decoder that runs the core. Only the HDR module and a disabled
 core change the output with the format.
-
-# Conflicts:
-#	xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 ---
  .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  | 125 +++++++-----------
  1 file changed, 50 insertions(+), 75 deletions(-)

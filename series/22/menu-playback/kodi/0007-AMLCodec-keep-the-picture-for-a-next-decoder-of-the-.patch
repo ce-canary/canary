@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: matthane <matthan.evans@icloud.com>
-Date: Thu, 29 Oct 2026 18:45:35 -0500
+Date: Mon, 16 Nov 2026 14:18:41 -0600
 Subject: [PATCH] AMLCodec: keep the picture for a next decoder of the same
  format
 
@@ -45,9 +45,9 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +  bool operator==(const HeldFormat&) const = default;
 +};
 +
-+HeldFormat GetHeldFormat(const CDVDStreamInfo& hints, bool hdr10Plus)
++HeldFormat GetHeldFormat(const CDVDStreamInfo& hints, const AMLVideoOutput& output, bool hdr10Plus)
 +{
-+  return {hints.codec, hints.hdrType, hdr10Plus, hints.interlaced,
++  return {hints.codec, output.hdrType, hdr10Plus, hints.interlaced,
 +          hints.codec_tag == CODEC_TAG_AMVC || hints.codec_tag == CODEC_TAG_MVC1};
 +}
 +
@@ -83,14 +83,14 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +         armNext->interlaced == format.interlaced;
 +}
  
- // whether OpenDecoder runs the Dolby Vision core for `hints`
- bool RunsDolbyVision(const CDVDStreamInfo& hints)
+ // whether OpenDecoder runs the Dolby Vision core for `hints` put out as `output`
+ bool RunsDolbyVision(const CDVDStreamInfo& hints, const AMLVideoOutput& output)
 @@ -0,7 +0,7 @@
    m_buffer_level_ready = false;
    m_setUp = true;
  
--  TakeHold(hints);
-+  const bool kept = TakeHold(hints);
+-  TakeHold(hints, m_output);
++  const bool kept = TakeHold(hints, m_output);
  
    if (!OpenAmlVideo(hints))
    {
@@ -259,14 +259,14 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
      return Hold::NONE;
  
    Hold hold = Hold::NONE;
-+  const HeldFormat format = GetHeldFormat(m_hints, m_processInfo.GetIsHdr10Plus());
++  const HeldFormat format = GetHeldFormat(m_hints, m_output, m_processInfo.GetIsHdr10Plus());
 +  // the keeper does not keep deinterlaced or MVC frames; a running core keeps its own close
 +  if (!dropped && !dvEnabled && !format.interlaced && !format.mvc && NextPlays(format))
 +  {
 +    heldFormat = format;
 +    heldModule = m_outputModule;
 +    heldPicture = true;
-+    pictureHdr10 = PlaysHdr10Output(m_hints, m_processInfo.GetIsHdr10Plus());
++    pictureHdr10 = PlaysHdr10Output(m_hints, m_output, m_processInfo.GetIsHdr10Plus());
 +    hold = Hold::PICTURE;
 +  }
 +
@@ -288,9 +288,9 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
  
    // forced PQ keeps HDR10 on the wire over the gap without video, where the HDR module sends
    // SDR otherwise; a user mapping keeps its own close
--  if (!dvEnabled && PlaysHdr10Output(m_hints, m_processInfo.GetIsHdr10Plus()) &&
+-  if (!dvEnabled && PlaysHdr10Output(m_hints, m_output, m_processInfo.GetIsHdr10Plus()) &&
 +  if (hold == Hold::NONE && !dvEnabled &&
-+      PlaysHdr10Output(m_hints, m_processInfo.GetIsHdr10Plus()) &&
++      PlaysHdr10Output(m_hints, m_output, m_processInfo.GetIsHdr10Plus()) &&
 +      (!armNext || armNext->hdrType == StreamHdrType::HDR_TYPE_HDR10) &&
        (m_outputModule == OutputModule::HDR ||
         (AmlDisplay->aml_get_drmProperty("hdr_policy", DRM_MODE_OBJECT_CRTC) == HDR_FOLLOW_SOURCE &&
@@ -324,11 +324,11 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
  
 -// a decoder that plays the format of the held output plays under it, and its close ends the hold
 -// or hands it on; any other ends the hold before it sets up its own output
--void CAMLCodec::TakeHold(const CDVDStreamInfo& hints)
+-void CAMLCodec::TakeHold(const CDVDStreamInfo& hints, const AMLVideoOutput& output)
 +// a decoder set up for the held format shows its first frame over the kept picture; a decoder
 +// that plays the format of a held output plays under it, and its close ends the hold or hands it
 +// on; any other ends the hold before it sets up its own output
-+bool CAMLCodec::TakeHold(const CDVDStreamInfo& hints)
++bool CAMLCodec::TakeHold(const CDVDStreamInfo& hints, const AMLVideoOutput& output)
  {
    std::lock_guard<std::mutex> lock(holdMutex);
    m_outputModule = OutputModule::NONE;
@@ -338,17 +338,17 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 -    return;
 +    return false;
  
--  const bool take = (heldModule == OutputModule::DV && RunsDolbyVision(hints)) ||
+-  const bool take = (heldModule == OutputModule::DV && RunsDolbyVision(hints, output)) ||
 -                    (heldModule == OutputModule::HDR &&
--                     PlaysHdr10Output(hints, m_processInfo.GetIsHdr10Plus()));
+-                     PlaysHdr10Output(hints, output, m_processInfo.GetIsHdr10Plus()));
 -  CLog::Log(LOGDEBUG, "CAMLCodec::{}: {} the held output", __FUNCTION__,
 -            take ? "takes" : "releases");
 -  if (take)
 +  const bool take =
-+      heldPicture ? GetHeldFormat(hints, m_processInfo.GetIsHdr10Plus()) == heldFormat
-+                  : (heldModule == OutputModule::DV && RunsDolbyVision(hints)) ||
++      heldPicture ? GetHeldFormat(hints, output, m_processInfo.GetIsHdr10Plus()) == heldFormat
++                  : (heldModule == OutputModule::DV && RunsDolbyVision(hints, output)) ||
 +                        (heldModule == OutputModule::HDR &&
-+                         PlaysHdr10Output(hints, m_processInfo.GetIsHdr10Plus()));
++                         PlaysHdr10Output(hints, output, m_processInfo.GetIsHdr10Plus()));
 +  CLog::Log(LOGDEBUG, "CAMLCodec::{}: {} the held {}", __FUNCTION__, take ? "takes" : "releases",
 +            heldPicture ? "picture" : "output");
 +  if (!take)
@@ -367,7 +367,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +  {
 +    m_keptPicture = true;
 +    pictureTaken = true;
-+    pictureHdr10 = PlaysHdr10Output(hints, m_processInfo.GetIsHdr10Plus());
++    pictureHdr10 = PlaysHdr10Output(hints, output, m_processInfo.GetIsHdr10Plus());
 +    return true;
 +  }
 +
@@ -476,8 +476,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
    static void   CloseOutput(bool dvEnabled, int dvPolicy, int decoderTimeout);
    static void   CloseLayers();
    Hold          HoldOnClose(bool dvEnabled, int dvPolicy);
--  void          TakeHold(const CDVDStreamInfo& hints);
-+  bool          TakeHold(const CDVDStreamInfo& hints);
+-  void          TakeHold(const CDVDStreamInfo& hints, const AMLVideoOutput& output);
++  bool          TakeHold(const CDVDStreamInfo& hints, const AMLVideoOutput& output);
    void          EndHold(bool failed);
    static void   ReleaseKept();
    static void   RestoreOutput(OutputModule module, int decoderTimeout);

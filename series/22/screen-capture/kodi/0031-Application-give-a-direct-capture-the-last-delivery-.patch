@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 14 Nov 2026 21:48:32 -0600
+Subject: [PATCH] Application: give a direct capture the last delivery of its
+ request
+
+A surface that served a capture directly got an empty result on every
+drawn frame. It could not keep the pixels it delivered before, so a
+continuous capture had nothing to carry from one frame to the next.
+---
+ xbmc/application/Application.cpp | 3 ++-
+ xbmc/utils/IScreenshotSurface.h  | 3 ++-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/application/Application.cpp b/xbmc/application/Application.cpp
+--- a/xbmc/application/Application.cpp
++++ b/xbmc/application/Application.cpp
+@@ -0,7 +0,8 @@
+       continue;
+     }
+ 
+-    if (CaptureResult result; surface->CaptureDirect(request->spec, result))
++    if (CaptureResult result = captureService->CopyResult(*request);
++        surface->CaptureDirect(request->spec, result))
+     {
+       if (result.pixels)
+         captureService->Complete(request, std::move(result));
+diff --git a/xbmc/utils/IScreenshotSurface.h b/xbmc/utils/IScreenshotSurface.h
+--- a/xbmc/utils/IScreenshotSurface.h
++++ b/xbmc/utils/IScreenshotSurface.h
+@@ -0,7 +0,8 @@
+   virtual bool Read(const ScreenshotContext& ctx) { return false; }
+ 
+   //! \brief Render thread: serve a capture without the framebuffer readback, e.g. from a
+-  //! display writeback. False leaves it to Read; true with no pixels fails the request.
++  //! display writeback. False leaves it to Read; true with no pixels fails the request. result
++  //! holds the request's last delivery, which a live capture keeps.
+   virtual bool CaptureDirect(const KODI::RENDERING::CAPTURE::CaptureSpec& spec,
+                              KODI::RENDERING::CAPTURE::CaptureResult& result)
+   {

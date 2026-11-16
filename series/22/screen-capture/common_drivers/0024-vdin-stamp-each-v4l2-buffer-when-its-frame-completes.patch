@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 14 Nov 2026 01:38:54 -0600
+Subject: [PATCH] vdin: stamp each v4l2 buffer when its frame completes
+
+The capture queue declared copied timestamps, which a capture driver has
+nobody to copy from, so every buffer reached the client with time 0. A
+client could not tell how old a frame was or whether frames were lost.
+---
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,6 +0,7 @@
+ 	list_del(&devp->cur_buff->list);
+ 	spin_unlock(&devp->list_head_lock);
+ 	devp->vdin_v4l2.stats.done_cnt++;
++	vb2buf->timestamp = ktime_get_ns();
+ 	vb2_buffer_done(vb2buf, VB2_BUF_STATE_DONE);
+ 
+ 	return 0;
+@@ -0,7 +0,7 @@
+ 	/*que->mem_ops = &vb2_vmalloc_memops;*/
+ 	/*que->mem_ops = &vb2_dma_sg_memops;*/
+ 
+-	que->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
++	que->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC | V4L2_BUF_FLAG_TSTAMP_SRC_EOF;
+ 	/*
+ 	 * Assume that this DMA engine needs to have at least two buffers
+ 	 * available before it can be started. The start_streaming() op

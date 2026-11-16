@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 15 Nov 2026 00:50:04 -0600
+Subject: [PATCH] vdin: treat a loopback port on any vdin as v4l2 capture
+
+The v4l2 layer took index 1 for the loopback node, so a vdin0 loopback
+capture did not match the same capture on vdin1. It was sized as hdmi
+input and offered only 8-bit formats, though vdin0 has the same 10-bit
+full pack write mode.
+---
+ drivers/media/vin/tvin/vdin/vdin_drv.c     |  2 +-
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 33 ++++++++++++++--------
+ 2 files changed, 22 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.c b/drivers/media/vin/tvin/vdin/vdin_drv.c
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.c
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.c
+@@ -0,7 +0,7 @@
+ /* a blank input reports no lines, whatever the cut, the scaling or the field */
+ static bool vdin_is_v4l2_input_blank(struct vdin_dev_s *devp)
+ {
+-	if (!devp->index || devp->work_mode != VDIN_WORK_MD_V4L)
++	if (!IS_LOOPBACK_SRC(devp->parm.port) || devp->work_mode != VDIN_WORK_MD_V4L)
+ 		return false;
+ 
+ 	return vdin_get_active_h(devp) <= devp->vdin_input_data_threshold ||
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,11 +0,17 @@
+ 	return devp->vb_queue.owner && devp->vb_queue.owner != file->private_data;
+ }
+ 
+-/* 10 bits only for the vdin1 loopback; the t3x bit depth path forces 8 bits */
++/* a node lists loopback ports only or none */
++static bool vdin_v4l2_is_loopback(struct vdin_dev_s *devp)
++{
++	return IS_LOOPBACK_SRC(devp->v4l2_port[0]);
++}
++
++/* 10 bits for a loopback; the t3x bit depth path forces 8 bits */
+ static bool vdin_v4l2_fmt_supported(struct vdin_dev_s *devp, u32 fourcc)
+ {
+ 	return fourcc != V4L2_PIX_FMT_AML_YUV422_10P ||
+-	       (devp->index == 1 && devp->dtdata->hw_ver != VDIN_HW_T3X);
++	       (vdin_v4l2_is_loopback(devp) && devp->dtdata->hw_ver != VDIN_HW_T3X);
+ }
+ 
+ /*
+@@ -0,8 +0,10 @@
+ 	unsigned int src_h = VDIN_4K_SIZE & 0xffff;
+ 	unsigned int min_w = 2;
+ 	unsigned int min_h = 2;
++	unsigned int line_buff = devp->index ? devp->dtdata->vdin1_line_buff_size :
++				 devp->dtdata->vdin0_line_buff_size;
+ 
+-	if (devp->index) {
++	if (vdin_v4l2_is_loopback(devp)) {
+ 		src_w = get_current_vinfo()->width;
+ 		src_h = vdin_v4l2_source_height(devp);
+ 		min_w = roundup(src_w / VDIN_V4L2_MAX_SHRINK + 1, 2);
+@@ -0,11 +0,10 @@
+ 	pix_mp->height = min(pix_mp->height, src_h);
+ 
+ 	/* a vertical scale runs through the line buffer: keep the shape */
+-	if (devp->index && pix_mp->height != src_h &&
+-	    pix_mp->width > devp->dtdata->vdin1_line_buff_size) {
+-		pix_mp->height = pix_mp->height * devp->dtdata->vdin1_line_buff_size /
+-				 pix_mp->width;
+-		pix_mp->width = devp->dtdata->vdin1_line_buff_size;
++	if (vdin_v4l2_is_loopback(devp) && pix_mp->height != src_h &&
++	    pix_mp->width > line_buff) {
++		pix_mp->height = pix_mp->height * line_buff / pix_mp->width;
++		pix_mp->width = line_buff;
+ 	}
+ 
+ 	pix_mp->width = max(rounddown(pix_mp->width, 2), min_w);
+@@ -0,6 +0,7 @@
+ 		rx_update_edid_callback(devp->v4l2_port_cur, RX_EDID_REMOVE_HDR);
+ #endif
+ 	if (devp->parm.port != TVIN_PORT_MIPI && devp->index == 0 &&
++	    !IS_LOOPBACK_SRC(devp->parm.port) &&
+ 		!(devp->flags & VDIN_FLAG_DEC_OPENED)) {
+ 		ret = vdin_open_fe(devp->parm.port, 0, devp);
+ 		if (ret) {
+@@ -0,13 +0,14 @@
+ 	}
+ 	if (!fmt)
+ 		return -EINVAL;
+-	if (devp->index) {
++	if (vdin_v4l2_is_loopback(devp)) {
+ 		if (fsize->index)
+ 			return -EINVAL;
+ 		/* widths of a scaled capture; S_FMT settles the exact size */
+ 		fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
+ 		fsize->stepwise.min_width = 2;
+-		fsize->stepwise.max_width = devp->dtdata->vdin1_line_buff_size;
++		fsize->stepwise.max_width = devp->index ? devp->dtdata->vdin1_line_buff_size :
++					    devp->dtdata->vdin0_line_buff_size;
+ 		fsize->stepwise.step_width = 2;
+ 		fsize->stepwise.min_height = 2;
+ 		fsize->stepwise.max_height = VDIN_4K_SIZE & 0xffff;
+@@ -0,7 +0,7 @@
+ 	struct tvin_format_s loopback_fmt = {};
+ 
+ 	/* a loopback input is the size of the output mode */
+-	if (devp->index) {
++	if (vdin_v4l2_is_loopback(devp)) {
+ 		devp->parm.info.fmt = TVIN_SIG_FMT_MAX;
+ 		loopback_fmt.h_active = get_current_vinfo()->width;
+ 		loopback_fmt.v_active = vdin_v4l2_source_height(devp);
+@@ -0,7 +0,7 @@
+ 	vdin_cap_param.dest_v_active = devp->v4l2_fmt.fmt.pix_mp.height;
+ 	//vdin_cap_param.reserved    |= PARAM_STATE_SCREEN_CAP;
+ 
+-	if (devp->index) {
++	if (vdin_v4l2_is_loopback(devp)) {
+ 		vdin_cap_param.cfmt = TVIN_YUV422;
+ 		vdin_cap_param.scan_mode  = TVIN_SCAN_MODE_PROGRESSIVE;
+ //		vdin_cap_param.fmt  = TVIN_SIG_FMT_HDMI_1920X1080P_60HZ;

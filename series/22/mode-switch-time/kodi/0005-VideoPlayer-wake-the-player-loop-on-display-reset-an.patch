@@ -42,7 +42,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDMessageQueue.h b/xbmc/cores/VideoPlayer/D
 --- a/xbmc/cores/VideoPlayer/DVDMessageQueue.h
 +++ b/xbmc/cores/VideoPlayer/DVDMessageQueue.h
 @@ -0,6 +0,7 @@
-   unsigned GetPacketCount(CDVDMsg::Message type);
+   bool IsEmpty() const;
    bool ReceivedAbortRequest() { return m_bAbortRequest; }
    void WaitUntilEmpty();
 +  void WaitForMessage(std::chrono::milliseconds timeout);

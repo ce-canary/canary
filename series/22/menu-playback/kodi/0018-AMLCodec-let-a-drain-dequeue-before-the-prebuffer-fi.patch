@@ -76,4 +76,4 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
 +  bool             m_drainPrebuffer{false};
    am_private_t    *am_private;
    CDVDStreamInfo   m_hints;
-   int              m_speed;
+   AMLVideoOutput   m_output;

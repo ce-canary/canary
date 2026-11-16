@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 16 Nov 2026 14:40:47 -0600
+Subject: [PATCH] ActiveAE: read no clock of a stream whose player freed it
+
+A stream free waits up to a second for the engine. While the engine
+defers data, as in a reconfigure or a display loss, the free times out
+and the player reuses or destroys its clock, but the stream stays until
+the engine reads the free. An engine pass in between read that clock.
+---
+ xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp     | 6 ++++--
+ xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h | 3 +++
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,7 +0,8 @@
+       if ((*it)->m_paused && (*it)->m_started && m_settings.lowLatencyMode)
+         m_targetBufferLevel = m_initialTargetBufferLevel;
+ 
+-      if ((*it)->m_paused || !(*it)->m_started || !(*it)->m_processingBuffers || !(*it)->m_pClock)
++      if ((*it)->m_paused || !(*it)->m_started || !(*it)->m_processingBuffers ||
++          !(*it)->m_pClock || (*it)->m_freed)
+         continue;
+ 
+       if ((*it)->m_processingBuffers->m_outputSamples.empty())
+@@ -0,7 +0,7 @@
+ {
+   CSampleBuffer *ret = NULL;
+ 
+-  if (!stream->m_pClock)
++  if (!stream->m_pClock || stream->m_freed)
+     return ret;
+ 
+   if (stream->m_syncState == CAESyncInfo::AESyncState::SYNC_START)
+@@ -0,6 +0,7 @@
+   MsgStreamFree msg;
+   msg.stream = static_cast<CActiveAEStream*>(stream);
+   msg.finish = finish;
++  msg.stream->m_freed = true;
+ 
+   Message *reply;
+   if (m_dataPort.SendOutMessageSync(CActiveAEDataProtocol::FREESTREAM, &reply, 1s, &msg,
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+@@ -0,6 +0,9 @@
+   enum AVAudioServiceType m_audioServiceType;
+   bool m_forceResampler;
+   IAEClockCallback *m_pClock;
++  // set by the player's free; a free that times out leaves the stream to the engine while the
++  // player's clock goes, so the engine reads no clock of a freed stream
++  std::atomic_bool m_freed{false};
+   CSyncError m_syncError;
+   double m_lastSyncError;
+   CAESyncInfo::AESyncState m_syncState;

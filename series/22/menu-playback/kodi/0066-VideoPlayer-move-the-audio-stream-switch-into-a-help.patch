@@ -62,4 +62,4 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/Video
 +  void SwitchAudioStream(int64_t demuxerId, int iStream, int source);
  
    bool CheckIsCurrent(const CCurrentStream& current, CDemuxStream* stream, DemuxPacket* pkg);
-   void ProcessPacket(CDemuxStream* pStream, DemuxPacket* pPacket);
+   bool IsReplayedPacket(CDemuxStream* stream, DemuxPacket* packet);

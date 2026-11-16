@@ -27,9 +27,9 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
        NextPlays(format))
    {
 @@ -0,12 +0,12 @@
-                   : (heldModule == OutputModule::DV && RunsDolbyVision(hints)) ||
+                   : (heldModule == OutputModule::DV && RunsDolbyVision(hints, output)) ||
                          (heldModule == OutputModule::HDR &&
-                          PlaysHdr10Output(hints, m_processInfo.GetIsHdr10Plus()));
+                          PlaysHdr10Output(hints, output, m_processInfo.GetIsHdr10Plus()));
 -  // the core runs a kept picture with the enhancement layer type of its open; a minimum layer goes
 -  // to a minimum one
 +  // the core runs a kept picture with the enhancement layer type of its open; a full layer goes
@@ -39,6 +39,6 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
    const bool fullLayer = dualLayer && doviIsFEL;
 -  const bool convert = take && heldPicture && pictureDv && (pictureFEL || !dualLayer || fullLayer);
 +  const bool convert = take && heldPicture && pictureDv && !(pictureFEL ? fullLayer : dualLayer);
-   const bool takes = take && (!convert || RunsDolbyVision(hints));
+   const bool takes = take && (!convert || RunsDolbyVision(hints, output));
    CLog::Log(LOGDEBUG, "CAMLCodec::{}: {} the held {}", __FUNCTION__, takes ? "takes" : "releases",
              heldPicture ? "picture" : "output");

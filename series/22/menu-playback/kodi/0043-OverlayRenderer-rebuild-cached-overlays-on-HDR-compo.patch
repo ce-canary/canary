@@ -67,6 +67,6 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h b/xbmc/core
      std::map<unsigned int, std::shared_ptr<COverlay>> m_textureCache;
      static unsigned int m_textureid;
 +    bool m_hdrComposite{false};
+     HdrCompositeVideo m_compositeVideo;
      CRect m_rv; // Frame size
      CRect m_rs; // Source size
-     CRect m_rd; // Video size, may be influenced by video settings (e.g. zoom)

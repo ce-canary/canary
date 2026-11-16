@@ -792,9 +792,9 @@ diff --git a/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.h b/xbmc/windowi
 --- a/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.h
 +++ b/xbmc/windowing/amlogic/WinSystemAmlogicGLESContext.h
 @@ -0,6 +0,10 @@
-   void EndGuiComposite() override;
    void CompositeGui() override;
    bool IsHdrComposite() const override { return m_guiCompositing; }
+   HdrCompositeVideo GetHdrCompositeVideo() override;
 +  // the transfer of the composited GUI for screenshots, 0 when the GUI is SDR
 +  int GetGuiCompositeTransfer() const { return m_guiCompositing ? m_guiCompositeTransfer : 0; }
 +  // the composited GUI's SDR white, PQ-normalized

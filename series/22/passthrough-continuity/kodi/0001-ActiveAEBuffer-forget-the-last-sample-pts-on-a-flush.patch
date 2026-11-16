@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 16 Nov 2026 08:38:30 -0600
+Subject: [PATCH] ActiveAEBuffer: forget the last sample pts on a flush
+
+A buffer without a timestamp takes the pts that follows the last
+buffer the pool saw. A flush kept that pts. After a seek to the title
+start, the first packet has pts 0, which counts as no timestamp, so it
+took the position from before the seek.
+---
+ xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.cpp | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.cpp
+@@ -0,6 +0,7 @@
+     m_outputSamples.front()->Return();
+     m_outputSamples.pop_front();
+   }
++  m_lastSamplePts = 0;
+   if (m_resampler)
+     ChangeResampler();
+ }
+@@ -0,6 +0,7 @@
+     m_outputSamples.front()->Return();
+     m_outputSamples.pop_front();
+   }
++  m_lastSamplePts = 0;
+   if (m_pTempoFilter)
+     ChangeFilter();
+ }

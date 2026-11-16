@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 14 Nov 2026 02:50:03 -0600
+Subject: [PATCH] vdin: configure the rdma table under the isr lock
+
+The rdma done callback configured the table from another cpu while the
+isr was still filling it. A v4l2 capture buffer could then hold a frame
+written with only part of its settings, such as the new write address
+with the previous frame's other register writes.
+---
+ drivers/media/vin/tvin/vdin/vdin_drv.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.c b/drivers/media/vin/tvin/vdin/vdin_drv.c
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.c
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.c
+@@ -0,8 +0,11 @@
+ __maybe_unused static void vdin_rdma_irq(void *arg)
+ {
+ 	struct vdin_dev_s *devp = arg;
++	unsigned long flags;
+ 	int ret;
+ 
++	/* vdin_v4l2_isr fills the table under this lock */
++	spin_lock_irqsave(&devp->isr_lock, flags);
+ 	ret = rdma_config(devp->rdma_handle,
+ 			  (devp->rdma_enable & 1) ?
+ 			  devp->rdma_irq : RDMA_TRIGGER_MANUAL);
+@@ -0,6 +0,7 @@
+ 		devp->flags_isr |= VDIN_FLAG_RDMA_DONE;
+ 	else
+ 		devp->flags_isr &= ~VDIN_FLAG_RDMA_DONE;
++	spin_unlock_irqrestore(&devp->isr_lock, flags);
+ 
+ 	devp->rdma_irq_cnt++;
+ 	return;

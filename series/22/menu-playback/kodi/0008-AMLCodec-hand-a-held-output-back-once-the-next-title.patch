@@ -105,7 +105,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +// that plays the format of a held output plays under it until the module runs on its video, or
 +// else to its close, which ends the hold or hands it on; any other ends the hold before it sets
 +// up its own output
- bool CAMLCodec::TakeHold(const CDVDStreamInfo& hints)
+ bool CAMLCodec::TakeHold(const CDVDStreamInfo& hints, const AMLVideoOutput& output)
  {
    std::lock_guard<std::mutex> lock(holdMutex);
 @@ -0,14 +0,20 @@
@@ -120,7 +120,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +    m_handbackOff = false;
      m_keptPicture = true;
      pictureTaken = true;
-     pictureHdr10 = PlaysHdr10Output(hints, m_processInfo.GetIsHdr10Plus());
+     pictureHdr10 = PlaysHdr10Output(hints, output, m_processInfo.GetIsHdr10Plus());
      return true;
    }
  
@@ -234,7 +234,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
    static void   CloseLayers();
 -  Hold          HoldOnClose(bool dvEnabled, int dvPolicy);
 +  Hold          HoldOnClose(bool dvEnabled, int& dvPolicy);
-   bool          TakeHold(const CDVDStreamInfo& hints);
+   bool          TakeHold(const CDVDStreamInfo& hints, const AMLVideoOutput& output);
    void          EndHold(bool failed);
 +  void          HandBack();
    static void   ReleaseKept();
@@ -249,4 +249,4 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
 +  bool             m_handbackOff{false};
    am_private_t    *am_private;
    CDVDStreamInfo   m_hints;
-   int              m_speed;
+   AMLVideoOutput   m_output;

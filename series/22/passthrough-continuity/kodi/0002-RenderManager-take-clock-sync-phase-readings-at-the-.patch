@@ -1,0 +1,235 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 16 Nov 2026 00:03:56 -0600
+Subject: [PATCH] RenderManager: take clock sync phase readings at the vsync
+ edge
+
+A clock sync phase reading is taken with the clock read after the
+vsync thread wakes. That wake runs after the vsync handler, typically
+0.3 to 1 ms after the vsync and 10 to 19 ms after it at a seek. Every
+reading carries that lateness, and the first one after a seek sets
+the phase alone.
+---
+ .../VideoRenderers/RenderManager.cpp          | 27 +++++++++++++++----
+ .../VideoRenderers/RenderManager.h            | 13 ++++++---
+ xbmc/utils/AMLUtils.cpp                       | 23 ++++++++++++++++
+ xbmc/utils/AMLUtils.h                         |  3 +++
+ xbmc/windowing/amlogic/AMLDisplay.cpp         |  4 +++
+ xbmc/windowing/amlogic/AMLDisplay.h           |  4 +++
+ 6 files changed, 65 insertions(+), 9 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,6 +0,7 @@
+ #include "windowing/WinSystem.h"
+ 
+ #include <algorithm>
++#include <cmath>
+ #include <memory>
+ #include <mutex>
+ 
+@@ -0,6 +0,7 @@
+ 
+ void CRenderManager::PresentFromVsync()
+ {
++  const auto woke = std::chrono::steady_clock::now();
+   std::unique_lock lock(m_statelock);
+   // no frame goes out on the old mode while the render loop switches it
+   if (m_renderState != STATE_CONFIGURED || m_switching)
+@@ -0,13 +0,13 @@
+       ++it;
+   }
+ 
+-  ReadVsyncPhase(released);
++  ReadVsyncPhase(released, woke);
+ 
+   m_playerPort->UpdateRenderBuffers(m_queued.size(), m_discard.size(), m_free.size());
+   m_presentevent.notifyAll();
+ }
+ 
+-void CRenderManager::ReadVsyncPhase(bool released)
++void CRenderManager::ReadVsyncPhase(bool released, std::chrono::steady_clock::time_point woke)
+ {
+   // a step is followed by a vsync or a timeout within the liveness bound
+   const CBaseRenderer::VsyncPresentWake wake = m_pRenderer->GetVsyncPresentWake();
+@@ -0,10 +0,12 @@
+ 
+   int epoch = m_releaseClockEpoch;
+   double clock = m_releaseClock;
++  auto clockTime = m_releaseClockTime;
+   double latency = m_displayLatency;
+   if (!m_releaseClockTaken)
+   {
+     clock = m_dvdClock.GetClock(epoch);
++    clockTime = std::chrono::steady_clock::now();
+     latency = DVD_MSEC_TO_TIME(CalcReleaseLead() - m_appliedVideoDelay);
+   }
+ 
+@@ -0,6 +0,18 @@
+       pts = m_Queue[m_planeSource].pts;
+   }
+ 
++  // the reading is taken at the edge of the vsync this step woke for, projected from the last
++  // vblank the display published, which can be the one before; one later than the wake or two
++  // periods before it is not on this lattice
++  std::chrono::steady_clock::time_point vblank;
++  if (pts != DVD_NOPTS_VALUE && aml_display_last_vblank(vblank))
++  {
++    const double late = std::chrono::duration<double>(woke - vblank).count() * DVD_TIME_BASE;
++    if (late >= 0 && late < 2 * m_vsyncPeriod)
++      clock -= std::chrono::duration<double>(clockTime - woke).count() * DVD_TIME_BASE + late -
++               m_vsyncPeriod * std::floor(late / m_vsyncPeriod);
++  }
++
+   m_clockSync.m_syncOffset = m_dvdClock.GetVsyncPhase().ApplyVsyncPhaseReading(
+       pts != DVD_NOPTS_VALUE ? clock + latency - pts : DVD_NOPTS_VALUE, epoch, restart);
+ }
+@@ -0,6 +0,7 @@
+     m_dvdClock.GetVsyncPhase().CommitVsyncShift();
+ 
+   const double frameOnScreen = m_dvdClock.GetClock(m_releaseClockEpoch);
++  m_releaseClockTime = std::chrono::steady_clock::now();
+   m_releaseClock = frameOnScreen;
+   m_releaseClockTaken = true;
+   const double frametime =
+@@ -0,9 +0,9 @@
+ 
+   if (diff < 0.0005)
+   {
+-    double phasePeriod =
+-        DVD_TIME_BASE /
+-        static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS());
++    m_vsyncPeriod = DVD_TIME_BASE /
++                    static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS());
++    double phasePeriod = m_vsyncPeriod;
+     if (m_presenting)
+       phasePeriod = std::min(phasePeriod, framePeriod);
+     // a phase read on another grid or before clock sync was on does not hold
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -0,8 +0,9 @@
+   void StartPresentThread();
+   void StopPresentThread();
+   void PresentFromVsync();
+-  //! Vsync thread: reads the clock sync phase once the vsync step decided its release
+-  void ReadVsyncPhase(bool released);
++  //! Vsync thread: reads the clock sync phase once the vsync step decided its release, with
++  //! `woke` the time the step's wake returned
++  void ReadVsyncPhase(bool released, std::chrono::steady_clock::time_point woke);
+   int GuiSource() const { return m_presenting ? m_guiPresentSource : m_presentsource; }
+ 
+   CBaseRenderer *m_pRenderer = nullptr;
+@@ -0,9 +0,13 @@
+   //! Vsync thread, under m_presentlock: the pts of m_planeSource once it is a new frame
+   double m_displayedPts{DVD_NOPTS_VALUE};
+   int m_offTimelineSource{-1};
+-  //! Under m_presentlock: the clock and its epoch of the last release decision, and whether
+-  //! the current vsync step made one
++  //! Under m_presentlock: the clock, when it was read and its epoch of the last release
++  //! decision, and whether the current vsync step made one
+   double m_releaseClock{0.0};
++  std::chrono::steady_clock::time_point m_releaseClockTime{};
+   int m_releaseClockEpoch{0};
+   bool m_releaseClockTaken{false};
++  //! Presenter thread, or the render thread when not presenting: the display vsync period while
++  //! the clock sync is on
++  double m_vsyncPeriod{0.0};
+ };
+diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
+--- a/xbmc/utils/AMLUtils.cpp
++++ b/xbmc/utils/AMLUtils.cpp
+@@ -0,6 +0,29 @@
+   return static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetDisplayResetEnd();
+ }
+ 
++bool aml_display_last_vblank(std::chrono::steady_clock::time_point& time)
++{
++  const CAMLDisplay* display =
++      static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
++  const int fd = display->aml_get_Device_handle();
++  const int crtc = display->aml_get_crtc_index();
++  // the query reads pipe 0 unless it names the CRTC Kodi bound
++  unsigned int type = DRM_VBLANK_RELATIVE;
++  if (crtc == 1)
++    type |= DRM_VBLANK_SECONDARY;
++  else if (crtc > 1)
++    type |= (crtc << DRM_VBLANK_HIGH_CRTC_SHIFT) & DRM_VBLANK_HIGH_CRTC_MASK;
++  drmVBlank vbl = {};
++  vbl.request.type = static_cast<drmVBlankSeqType>(type);
++  vbl.request.sequence = 0;
++  if (drmWaitVBlank(fd, &vbl) != 0)
++    return false;
++
++  time = std::chrono::steady_clock::time_point{std::chrono::seconds{vbl.reply.tval_sec} +
++                                               std::chrono::microseconds{vbl.reply.tval_usec}};
++  return true;
++}
++
+ #if defined(HAVE_LIBBLURAY)
+ namespace
+ {
+diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
+--- a/xbmc/utils/AMLUtils.h
++++ b/xbmc/utils/AMLUtils.h
+@@ -0,6 +0,9 @@
+ bool aml_display_reset_pending();
+ // when the last delayed display reset ended, the clock's epoch when none ran
+ std::chrono::steady_clock::time_point aml_display_reset_end();
++// the time of the last vblank of the display, on CLOCK_MONOTONIC as the steady clock; false while
++// the output is off
++bool aml_display_last_vblank(std::chrono::steady_clock::time_point& time);
+ // `next` is the clip of the next item, nullptr when unknown; `jump` when the disc program jumped
+ // to a next it has not named yet
+ void aml_continue_presentation(const BLURAY_CLIP_INFO* next, bool jump);
+diff --git a/xbmc/windowing/amlogic/AMLDisplay.cpp b/xbmc/windowing/amlogic/AMLDisplay.cpp
+--- a/xbmc/windowing/amlogic/AMLDisplay.cpp
++++ b/xbmc/windowing/amlogic/AMLDisplay.cpp
+@@ -0,6 +0,7 @@
+     if (m_encoder->possible_crtcs & (1 << i) && m_crtc->crtc_id == m_encoder->crtc_id)
+     {
+       CLog::Log(LOGDEBUG, "CAMLDRMUtils::{} - using crtc {}", __FUNCTION__, m_crtc->crtc_id);
++      m_crtcIndex = i;
+       break;
+     }
+     else
+@@ -0,7 +0,10 @@
+   if (!m_crtc && _force_mode_switch)
+   {
+     if (m_resources && m_resources->count_crtcs > 0)
++    {
+       m_crtc = drmModeGetCrtc(m_fd, m_resources->crtcs[0]);
++      m_crtcIndex = 0;
++    }
+ 
+     if (!m_crtc)
+     {
+diff --git a/xbmc/windowing/amlogic/AMLDisplay.h b/xbmc/windowing/amlogic/AMLDisplay.h
+--- a/xbmc/windowing/amlogic/AMLDisplay.h
++++ b/xbmc/windowing/amlogic/AMLDisplay.h
+@@ -0,6 +0,7 @@
+   virtual ~CAMLDRMUtils();
+ 
+   int aml_get_drmDevice_handle() const { return m_fd; }
++  int aml_get_drmDevice_crtc_index() const { return m_crtcIndex; }
+   void aml_init_drmDevice();
+   void aml_drmDevice_vsync();
+   std::string aml_get_drmDevice_mode();
+@@ -0,6 +0,8 @@
+   drmModeConnection m_connection{DRM_MODE_DISCONNECTED};
+   drmModeEncoderPtr m_encoder{nullptr};
+   drmModeCrtcPtr m_crtc{nullptr};
++  //! index of m_crtc in the device's CRTC list
++  int m_crtcIndex{0};
+   drmModeCrtcPtr m_orig_crtc{nullptr};
+   drmModePlanePtr m_plane{nullptr};
+ 
+@@ -0,6 +0,7 @@
+ 
+   void aml_refresh_display_caps();
+   int aml_get_Device_handle() const { return m_amlDRMUtils->aml_get_drmDevice_handle(); }
++  int aml_get_crtc_index() const { return m_amlDRMUtils->aml_get_drmDevice_crtc_index(); }
+   void aml_init_drmDevice() { m_amlDRMUtils->aml_init_drmDevice(); }
+   void aml_drmDevice_vsync() { m_amlDRMUtils->aml_drmDevice_vsync(); };
+   bool aml_get_display_connected() const { return m_amlDRMUtils->aml_get_drmDevice_connected(); }

@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 16 Nov 2026 10:31:31 -0600
+Subject: [PATCH] VideoPlayer: stop the Blu-ray presentation clock at a start
+ target
+
+A start target of stamped audio, armed as the clock starts from pause or
+by the engine on a running clock, holds the clock readers at one value
+until the audio decides and the running clock reaches the target. The
+presentation clock handed to libbluray still ran at playback speed from
+that value, so a disc program saw its time move while the picture stood.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,7 +0,7 @@
+ 
+   const auto itemEnd = GetBlurayItemEnd();
+   double time = m_clock.GetClock();
+-  double speed = m_clock.IsPaused() ? 0.0 : m_clock.GetClockSpeed();
++  double speed = m_clock.IsPaused() || m_clock.IsAtStartTarget() ? 0.0 : m_clock.GetClockSpeed();
+   if (m_CurrentVideo.id >= 0)
+   {
+     const auto onScreen = m_renderManager.GetOnScreenClock();

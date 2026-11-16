@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 14 Nov 2026 15:54:15 -0600
+Subject: [PATCH] AMLCapture: restart a stream that cannot queue its buffer
+ again
+
+A failed QBUF was ignored, so vdin lost that buffer for the rest of the
+stream. Once every buffer was lost the readers only timed out and the
+stream was never restarted. vdin refuses a buffer only when a running
+stream changes its size, so the released capture never met this.
+---
+ xbmc/utils/AMLCapture.cpp | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
+--- a/xbmc/utils/AMLCapture.cpp
++++ b/xbmc/utils/AMLCapture.cpp
+@@ -0,6 +0,7 @@
+ private:
+   //! the turns of `inputs` to vdin; 0, else the errno
+   int Schedule(uint32_t inputs);
++  //! a failure loses a running stream
+   bool Queue(unsigned int index);
+   //! `input` is the AMLCaptureInput of the frame, -1 for one the stream lacks; `entries` and
+   //! `generation` the length and the wrapping count of the turns vdin filled it under
+@@ -0,6 +0,7 @@
+   float m_framePeriodMs{0.0f};
+   bool m_streaming{false};
+   std::atomic<bool> m_stopped{false};
++  std::atomic<bool> m_lost{false};
+   std::vector<std::pair<void*, size_t>> m_maps;
+   std::function<void()> m_closed;
+ 
+@@ -0,7 +0,19 @@
+   buffer.memory = V4L2_MEMORY_MMAP;
+   buffer.m.planes = &plane;
+   buffer.length = 1;
+-  return ioctl(m_fd, VIDIOC_QBUF, &buffer) == 0;
++  if (ioctl(m_fd, VIDIOC_QBUF, &buffer) == 0)
++    return true;
++
++  // vdin would never finish another frame in it
++  if (m_streaming && !m_stopped && !m_lost.exchange(true))
++  {
++    CLog::Log(LOGWARNING, "CAMLCapture::{}: buffer {} not queued: {}", __FUNCTION__, index,
++              strerror(errno));
++    const uint64_t wake = 1;
++    if (write(m_eventFd, &wake, sizeof(wake)) < 0)
++      CLog::Log(LOGDEBUG, "CAMLCapture::{}: wake failed: {}", __FUNCTION__, strerror(errno));
++  }
++  return false;
+ }
+ 
+ bool CAMLCapture::CStream::Dequeue(unsigned int& index,
+@@ -0,6 +0,8 @@
+     ret = poll(fds, 3, timeoutMs);
+   while (ret < 0 && errno == EINTR);
+ 
++  if (m_lost)
++    return Wake::LOST;
+   if (m_stopped || (fds[1].revents & POLLIN) || (fds[2].revents & POLLIN))
+     return Wake::STOPPED;
+   if (fds[0].revents & POLLERR)

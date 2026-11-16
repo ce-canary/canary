@@ -10,11 +10,11 @@ subtitle file was lost at every such join and the disc's own subtitle
 took its place. An external file runs on the title time of its playlist,
 which the next item of the same playlist continues.
 ---
- .../DVDInputStreams/DVDInputStreamBluray.cpp  | 16 +++++++++
+ .../DVDInputStreams/DVDInputStreamBluray.cpp  | 16 ++++++++
  .../DVDInputStreams/DVDInputStreamBluray.h    | 11 ++++++
- xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 35 ++++++++++++++++++-
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 37 ++++++++++++++++++-
  xbmc/cores/VideoPlayer/VideoPlayer.h          |  1 +
- 4 files changed, 62 insertions(+), 1 deletion(-)
+ 4 files changed, 63 insertions(+), 2 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
 --- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.cpp
@@ -122,16 +122,17 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbm
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
-@@ -0,7 +0,7 @@
+@@ -0,8 +0,7 @@
          m_navStopped = false;
          m_CurrentAudio.Clear();
          m_CurrentVideo.Clear();
 -        m_CurrentSubtitle.Clear();
+-        m_pSubtitleDemuxer.reset();
 +        CloseSubtitleForNextStream();
          continue;
        }
  
-@@ -0,6 +0,39 @@
+@@ -0,6 +0,40 @@
  }
  #endif
  
@@ -166,6 +167,7 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
 +  }
 +#endif
 +  m_CurrentSubtitle.Clear();
++  m_pSubtitleDemuxer.reset();
 +}
 +
  bool CVideoPlayer::IsBlurayTitleEnded() const

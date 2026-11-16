@@ -5,12 +5,13 @@ Subject: [PATCH] VideoPlayerVideo: serve messages while a decoder drains
 
 A decoder can hold many seconds of pictures after its input ends.
 The drain loops took them all in one message, so a seek or resync
-behind it waited for the last one. Video read as unfinished after
-a reset.
+behind it waited for the last one. Video read as unfinished after a
+reset. It could read as finished while a drain was still queued or
+being handled.
 ---
- xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp | 94 ++++++++++-----------
- xbmc/cores/VideoPlayer/VideoPlayerVideo.h   |  2 +-
- 2 files changed, 44 insertions(+), 52 deletions(-)
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp | 101 ++++++++++----------
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.h   |   3 +-
+ 2 files changed, 52 insertions(+), 52 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
 --- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
@@ -30,12 +31,26 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlaye
  
 +bool CVideoPlayerVideo::IsEOS()
 +{
-+  return m_eos && m_messageQueue.GetPacketCount(CDVDMsg::VIDEO_DRAIN) == 0;
++  return m_eos && m_pendingDrains == 0;
 +}
 +
  bool CVideoPlayerVideo::IsInited() const
  {
    return m_messageQueue.IsInited();
+@@ -0,6 +0,13 @@
+   // a queued packet is data the last drain did not cover
+   if (pMsg->IsType(CDVDMsg::DEMUXER_PACKET))
+     m_eos = false;
++  // a drain is pending until its message is gone, after its handler set m_eos or in a flush
++  else if (pMsg->IsType(CDVDMsg::VIDEO_DRAIN))
++  {
++    ++m_pendingDrains;
++    pMsg =
++        std::shared_ptr<CDVDMsg>(pMsg.get(), [this, msg = pMsg](CDVDMsg*) { --m_pendingDrains; });
++  }
+   m_messageQueue.Put(pMsg, priority);
+   m_processInfo.SetLevelVQ(m_messageQueue.GetLevel());
+ }
 @@ -0,6 +0,30 @@
    bool onlyPrioMsgs = false;
    bool drainWait = false;
@@ -125,7 +140,7 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlaye
        m_renderManager.DiscardBuffer();
        FlushMessages();
 +      // the reset decoder has nothing left, whichever drain the flush dropped; a packet that
-+      // survives clears this when it is taken, a drain is seen in the queue
++      // survives clears this when it is taken, a drain sent later is pending
 +      m_eos = true;
      }
      else if (pMsg->IsType(CDVDMsg::PLAYER_SETSPEED))
@@ -192,3 +207,11 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.h b/xbmc/cores/VideoPlayer/
    double GetCurrentPts() override;
    double GetOutputDelay() override; /* returns the expected delay, from that a packet is put in queue */
    std::string GetPlayerInfo() override;
+@@ -0,6 +0,7 @@
+ 
+   BitstreamStats m_videoStats;
+ 
++  std::atomic<int> m_pendingDrains{0};
+   CDVDMessageQueue m_messageQueue;
+   CDVDMessageQueue& m_messageParent;
+   CDVDStreamInfo m_hints;

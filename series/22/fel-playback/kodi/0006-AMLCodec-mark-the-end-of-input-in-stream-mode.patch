@@ -8,11 +8,11 @@ the firmware stops fetching short of the write pointer. A drain ends
 on an empty output queue, so at a still the last pictures of a Dolby
 Vision FEL clip stay in the decoder.
 ---
- .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  | 85 ++++++++++++++++++-
- .../VideoPlayer/DVDCodecs/Video/AMLCodec.h    |  5 ++
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  | 78 ++++++++++++++++++-
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.h    |  4 +
  .../DVDCodecs/Video/DVDVideoCodecAmlogic.cpp  |  6 ++
  .../DVDCodecs/Video/DVDVideoCodecAmlogic.h    |  1 +
- 4 files changed, 96 insertions(+), 1 deletion(-)
+ 4 files changed, 88 insertions(+), 1 deletion(-)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
@@ -89,12 +89,15 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
    if (am_private->hdr_buf.size > 0)
    {
      CLog::Log(LOGDEBUG, "CAMLCodec::{}: feed extradata on first frame. extradata size: {:d}", __FUNCTION__,
-@@ -0,6 +0,9 @@
+@@ -0,6 +0,12 @@
    if (m_drain)
      queued_frames = m_amlVideoFile->IOControl(AMLVIDEO_IOC_GET_VFQ, &queued_frames) == 0 ? queued_frames : 0;
  
 +  // read before the dequeue, a flush that ends after it would leave its pictures behind
-+  const bool inputDrained = !m_drain || IsInputDrained();
++  struct vdec_status status = {};
++  const bool inputDrained = !m_drain || !m_inputEndSent ||
++                            (m_dll->codec_get_vdec_state(&am_private->vcodec, &status) == 0 &&
++                             (status.status & VDEC_STAT_EOS) != 0);
 +
    // queued_frames counts the pictures handed out and not yet returned, a drain dequeues
    // whatever the decoder has ready
@@ -108,7 +111,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
      return CDVDVideoCodec::VC_EOF;
    else if (m_drain && m_buffer_level_ready && m_speed != DVD_PLAYSPEED_PAUSE &&
             std::chrono::system_clock::now() - std::max(m_tp_drain, m_tp_last_frame) >
-@@ -0,6 +0,70 @@
+@@ -0,6 +0,60 @@
    return CDVDVideoCodec::VC_BUFFER;
  }
  
@@ -166,16 +169,6 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +  m_inputEndSent = false;
 +}
 +
-+bool CAMLCodec::IsInputDrained()
-+{
-+  if (!m_inputEndSent)
-+    return true;
-+
-+  struct vdec_status status = {};
-+  return m_dll->codec_get_vdec_state(&am_private->vcodec, &status) == 0 &&
-+         (status.status & VDEC_STAT_EOS) != 0;
-+}
-+
  void CAMLCodec::SetDrain(bool drain)
  {
    // a held picture is not decoder silence, but a drain that times out counts up to its timeout
@@ -190,12 +183,11 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
    void          SetDoviZeroLevel5(bool value);
    void          SetVideoRect(const CRect &SrcRect, const CRect &DestRect);
    void          SetVideoRate(int videoRate);
-@@ -0,6 +0,8 @@
+@@ -0,6 +0,7 @@
    std::string   GetVfmMap(const std::string &name);
    void          SetVfmMap(const std::string &name, const std::string &map);
    int           DequeueBuffer();
 +  void          ClearInputEnd();
-+  bool          IsInputDrained();
    unsigned int  GetDecoderVideoRate();
    std::string   GetHDRStaticMetadata(bool dv_enable);
  

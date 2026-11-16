@@ -115,7 +115,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/x
 -     m_Codec->GetOMXPts(), m_Codec->GetAmlDuration(), m_Codec->GetBufferIndex(), m_metadataToken,
 +     m_Codec->GetOMXPts(), m_Codec->GetAmlDuration(), m_Codec->GetBufferIndex(),
 +     m_Codec->GetResetEpoch(), m_metadataToken,
-      m_frameMeta, m_output.sdrWhite, m_output.sdrGamma);;
+      m_frameMeta, m_sdrWhite, m_sdrGamma);;
    }
  
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h

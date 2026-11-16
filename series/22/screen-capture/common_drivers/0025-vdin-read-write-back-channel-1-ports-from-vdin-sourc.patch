@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 14 Nov 2026 01:41:08 -0600
+Subject: [PATCH] vdin: read write-back channel 1 ports from vdin source 9
+
+Every viu1 port selected vdin source 7, which carries write-back channel
+0, so a capture of a channel 1 port got channel 0 data and vdin0 could
+not capture one tap while vdin1 captured another.
+---
+ drivers/media/vin/tvin/vdin/vdin_ctl.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_ctl.c b/drivers/media/vin/tvin/vdin/vdin_ctl.c
+--- a/drivers/media/vin/tvin/vdin/vdin_ctl.c
++++ b/drivers/media/vin/tvin/vdin/vdin_ctl.c
+@@ -0,13 +0,19 @@
+ 		break;
+ 	case 0xa0:/* viu1 */
+ 		if (port >= TVIN_PORT_VIU1_VIDEO &&
+-		    port <= TVIN_PORT_VIU1_WB1_POST_BLEND)
++		    port <= TVIN_PORT_VIU1_WB0_POST_BLEND)
+ 			vdin_mux = VDIN_MUX_VIU1_WB0;
++		else if (port >= TVIN_PORT_VIU1_WB1_VDIN_BIST &&
++			 port <= TVIN_PORT_VIU1_WB1_POST_BLEND)
++			vdin_mux = VDIN_MUX_VIU1_WB1;
+ 
+ 		if (port != TVIN_PORT_VIU1) {
+ 			if (vdin_mux == VDIN_MUX_VIU1_WB0)
+ 				wr_bits(offset, VDIN_ASFIFO_CTRL3, 0xe4,
+ 					VDI6_ASFIFO_CTRL_BIT, VDI_ASFIFO_CTRL_WID);
++			else if (vdin_mux == VDIN_MUX_VIU1_WB1)
++				wr_bits(offset, VDIN_ASFIFO_CTRL3, 0xe4,
++					VDI8_ASFIFO_CTRL_BIT, VDI_ASFIFO_CTRL_WID);
+ 		} else {
+ 			if (cpu_after_eq(MESON_CPU_MAJOR_ID_G12B))
+ 				wr_bits(offset, VDIN_ASFIFO_CTRL3, 0xd4,

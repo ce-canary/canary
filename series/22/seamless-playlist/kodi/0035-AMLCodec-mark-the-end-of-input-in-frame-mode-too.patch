@@ -15,8 +15,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 @@ -0,9 +0,10 @@
-   // read before the dequeue, a flush that ends after it would leave its pictures behind
-   const bool inputDrained = !m_drain || IsInputDrained();
+                             (m_dll->codec_get_vdec_state(&am_private->vcodec, &status) == 0 &&
+                              (status.status & VDEC_STAT_EOS) != 0);
  
 -  // queued_frames counts the pictures handed out and not yet returned, a drain dequeues
 -  // whatever the decoder has ready
