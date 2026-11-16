@@ -12,7 +12,7 @@ These builds are for testing and early feature previews. Despite extensive testi
 
 - CoreELEC 22: latest build `22.0-Piers_canary_20261116`, based on the nightly of `20261116`.
 
-- **Small fixes:** independent fixes on their way to CoreELEC.
+- **Small fixes:** independent fixes that don't belong to any feature.
 - **Blu-ray menu playback:** full disc menus with more seamless clip transitions.
 - **A/V sync:** vastly tighter audio and video sync with stability across playback events.
 - **Screen capture:** screenshots and Hyperion ambilight for all HDR formats and output modes.
