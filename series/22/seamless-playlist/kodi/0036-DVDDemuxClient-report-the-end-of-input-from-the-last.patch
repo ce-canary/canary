@@ -31,9 +31,9 @@ diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp b/xbmc/cores/
  
  bool CDVDDemuxClient::ParsePacket(DemuxPacket* pkt)
 @@ -0,6 +0,8 @@
-   ReleaseUnclaimedStreams();
- 
-   m_packet.reset(m_IDemux->ReadDemux());
+     CDVDDemuxUtils::FreeDemuxPacket(m_packet.release());
+     m_packet.reset(m_IDemux->ReadDemux());
+   }
 +  // a live input that returns nothing has paused, it has not ended
 +  m_atEnd = !m_packet && !m_pInput->IsRealtime();
    if (!m_packet)

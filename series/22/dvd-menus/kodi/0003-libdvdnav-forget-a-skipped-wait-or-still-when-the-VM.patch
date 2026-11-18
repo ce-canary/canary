@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 17 Nov 2026 15:22:35 -0600
+Subject: [PATCH] libdvdnav: forget a skipped wait or still when the VM hops
+
+A wait or still skipped at one cell end stayed set after a hop. The
+first cell end of the next title or menu then raised no wait, and a
+pending still skip skipped its still.
+---
+ cmake/modules/FindLibDvdNav.cmake             |  3 +-
+ ...rget-a-skipped-wait-when-the-vm-hops.patch | 38 +++++++++++++++++++
+ tools/depends/target/libdvdnav/Makefile       |  4 +-
+ 3 files changed, 43 insertions(+), 2 deletions(-)
+ create mode 100644 tools/depends/target/libdvdnav/05-all-forget-a-skipped-wait-when-the-vm-hops.patch
+
+diff --git a/cmake/modules/FindLibDvdNav.cmake b/cmake/modules/FindLibDvdNav.cmake
+--- a/cmake/modules/FindLibDvdNav.cmake
++++ b/cmake/modules/FindLibDvdNav.cmake
+@@ -0,7 +0,8 @@
+     find_package(LibDvdRead 7.0.0 REQUIRED ${SEARCH_QUIET})
+ 
+     set(patches "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/03-all-vm-free-only-what-a-failed-copy-owns.patch"
+-                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/04-all-vm-keep-the-random-state-in-the-vm.patch")
++                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/04-all-vm-keep-the-random-state-in-the-vm.patch"
++                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/05-all-forget-a-skipped-wait-when-the-vm-hops.patch")
+ 
+     if(WIN32 OR WINDOWS_STORE)
+       set(${${CMAKE_FIND_PACKAGE_NAME}_MODULE}_libType shared)
+diff --git a/tools/depends/target/libdvdnav/05-all-forget-a-skipped-wait-when-the-vm-hops.patch b/tools/depends/target/libdvdnav/05-all-forget-a-skipped-wait-when-the-vm-hops.patch
+new file mode 100644
+--- /dev/null
++++ b/tools/depends/target/libdvdnav/05-all-forget-a-skipped-wait-when-the-vm-hops.patch
+@@ -0,0 +0,38 @@
++Subject: [PATCH] dvdnav: forget a skipped wait or still when the VM hops
++
++dvdnav_wait_skip() and dvdnav_still_skip() let the current cell end
++pass. Only the step from that cell end cleared them. A hop (a jump,
++seek or menu call), or leaving a still menu without buttons, moved the
++VM on without that step. The next cell end, in another title or menu,
++then raised no wait, and with a still skip pending it skipped its still.
++---
++ src/dvdnav.c    | 2 ++
++ src/highlight.c | 2 ++
++ 2 files changed, 4 insertions(+)
++
++diff --git a/src/dvdnav.c b/src/dvdnav.c
++index b63174204d..58bfa5c70c 100644
++--- a/src/dvdnav.c
+++++ b/src/dvdnav.c
++@@ -611,6 +611,8 @@ dvdnav_status_t dvdnav_get_next_cache_block(dvdnav_t *this, uint8_t **buf,
++     this->vobu.vobu_length = 0;
++     this->vobu.blockN      = 0;
++     this->sync_wait        = 0;
+++    this->sync_wait_skip   = 0;
+++    this->skip_still       = 0;
++     pthread_mutex_unlock(&this->vm_lock);
++     return DVDNAV_STATUS_OK;
++   }
++diff --git a/src/highlight.c b/src/highlight.c
++index 9954347c47..c58dc09d67 100644
++--- a/src/highlight.c
+++++ b/src/highlight.c
++@@ -366,6 +366,8 @@ dvdnav_status_t dvdnav_button_activate(dvdnav_t *this, pci_t *pci) {
++       vm_get_next_cell(this->vm);
++       this->position_current.still = 0;
++       this->sync_wait = 0;
+++      this->sync_wait_skip = 0;
+++      this->skip_still = 0;
++       this->last_cmd_nav_lbn = pci->pci_gi.nv_pck_lbn;
++       pthread_mutex_unlock(&this->vm_lock);
++       /* clear error message */
+diff --git a/tools/depends/target/libdvdnav/Makefile b/tools/depends/target/libdvdnav/Makefile
+--- a/tools/depends/target/libdvdnav/Makefile
++++ b/tools/depends/target/libdvdnav/Makefile
+@@ -0,7 +0,8 @@
+                                   01-win-uwpcompat.patch \
+                                   02-win-remove-lib-version.patch \
+                                   03-all-vm-free-only-what-a-failed-copy-owns.patch \
+-                                  04-all-vm-keep-the-random-state-in-the-vm.patch
++                                  04-all-vm-keep-the-random-state-in-the-vm.patch \
++                                  05-all-forget-a-skipped-wait-when-the-vm-hops.patch
+ 
+ MESON_BUILD_TYPE=release
+ 
+@@ -0,6 +0,7 @@
+ 	cd $(PLATFORM); $(ARCHIVE_TOOL) $(ARCHIVE_TOOL_FLAGS) $(TARBALLS_LOCATION)/$(ARCHIVE)
+ 	cd $(PLATFORM); patch -p1 -i ../03-all-vm-free-only-what-a-failed-copy-owns.patch
+ 	cd $(PLATFORM); patch -p1 -i ../04-all-vm-keep-the-random-state-in-the-vm.patch
++	cd $(PLATFORM); patch -p1 -i ../05-all-forget-a-skipped-wait-when-the-vm-hops.patch
+ ifeq ($(TARGET_PLATFORM),windows)
+ 	cd $(PLATFORM); patch -p1 -i ../01-win-uwpcompat.patch
+ 	cd $(PLATFORM); patch -p1 -i ../02-win-remove-lib-version.patch

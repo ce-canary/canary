@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 17 Nov 2026 22:16:57 -0600
+Subject: [PATCH] libdvdnav: select the forced button when its highlight starts
+
+libdvdnav set the forced button at the SPU stream change of a cell
+change, from the PCI of the cell it left. A DVD menu page then started
+on the forced button of the page before, which it may not have, and its
+highlight and arrow keys found no button.
+---
+ cmake/modules/FindLibDvdNav.cmake             |  3 +-
+ ...ced-button-when-its-highlight-starts.patch | 44 +++++++++++++++++++
+ tools/depends/target/libdvdnav/Makefile       |  4 +-
+ 3 files changed, 49 insertions(+), 2 deletions(-)
+ create mode 100644 tools/depends/target/libdvdnav/09-all-select-the-forced-button-when-its-highlight-starts.patch
+
+diff --git a/cmake/modules/FindLibDvdNav.cmake b/cmake/modules/FindLibDvdNav.cmake
+--- a/cmake/modules/FindLibDvdNav.cmake
++++ b/cmake/modules/FindLibDvdNav.cmake
+@@ -0,7 +0,8 @@
+                 "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/04-all-vm-keep-the-random-state-in-the-vm.patch"
+                 "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/05-all-forget-a-skipped-wait-when-the-vm-hops.patch"
+                 "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/06-all-run-the-cell-step-after-a-sync-wait.patch"
+-                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/07-all-wait-before-a-cell-step-that-opens-another-vob.patch")
++                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/07-all-wait-before-a-cell-step-that-opens-another-vob.patch"
++                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/09-all-select-the-forced-button-when-its-highlight-starts.patch")
+ 
+     if(WIN32 OR WINDOWS_STORE)
+       set(${${CMAKE_FIND_PACKAGE_NAME}_MODULE}_libType shared)
+diff --git a/tools/depends/target/libdvdnav/09-all-select-the-forced-button-when-its-highlight-starts.patch b/tools/depends/target/libdvdnav/09-all-select-the-forced-button-when-its-highlight-starts.patch
+new file mode 100644
+--- /dev/null
++++ b/tools/depends/target/libdvdnav/09-all-select-the-forced-button-when-its-highlight-starts.patch
+@@ -0,0 +0,44 @@
++Subject: [PATCH] dvdnav: select the forced button when its highlight starts
++
++libdvdnav set the selected button to FOSL_BTNN at the SPU stream change
++it forces at a cell change. Its PCI was still the one of the cell it
++left, as the new cell's NAV packet is read later. A menu page then
++started on the forced button of the page before, which it may not have,
++so its highlight and the arrow keys found no button.
++---
++ src/dvdnav.c | 15 +++++++--------
++ 1 file changed, 7 insertions(+), 8 deletions(-)
++
++diff --git a/src/dvdnav.c b/src/dvdnav.c
++index 08f60d1385..c5fdacea1a 100644
++--- a/src/dvdnav.c
+++++ b/src/dvdnav.c
++@@ -809,14 +809,6 @@ dvdnav_status_t dvdnav_get_next_cache_block(dvdnav_t *this, uint8_t **buf,
++     Log3(this, "SPU_STREAM_CHANGE stream_id_pan_scan=%d",stream_change->physical_pan_scan);
++     Log3(this, "SPU_STREAM_CHANGE returning DVDNAV_STATUS_OK");
++ #endif
++-    /* This is not really the right place to do this. FOSL_BTNN should set the register
++-     * at HLI_S_PTM rather than when we enter the SPU. As well we should activate FOAC_BTNN
++-     * at HLI_E_PTM
++-     */
++-    if (this->pci.hli.hl_gi.fosl_btnn != 0) {
++-      set_HL_BTN(this->vm, this->pci.hli.hl_gi.fosl_btnn);
++-    }
++-
++     pthread_mutex_unlock(&this->vm_lock);
++     return DVDNAV_STATUS_OK;
++   }
++@@ -920,6 +912,13 @@ dvdnav_status_t dvdnav_get_next_cache_block(dvdnav_t *this, uint8_t **buf,
++     if (this->last_cmd_nav_lbn == this->pci.pci_gi.nv_pck_lbn)
++       this->last_cmd_nav_lbn = SRI_END_OF_CELL;
++ 
+++    /* FOSL_BTNN selects a button when its highlight starts, so set it as the NAV
+++     * packet that starts the highlight is read. FOAC_BTNN should be activated at
+++     * HLI_E_PTM.
+++     */
+++    if ((this->pci.hli.hl_gi.hli_ss & 0x03) == 1 && this->pci.hli.hl_gi.fosl_btnn != 0)
+++      set_HL_BTN(this->vm, this->pci.hli.hl_gi.fosl_btnn);
+++
++     /* Successfully got a NAV packet */
++     (*event) = DVDNAV_NAV_PACKET;
++ #ifdef LOG_DEBUG
+diff --git a/tools/depends/target/libdvdnav/Makefile b/tools/depends/target/libdvdnav/Makefile
+--- a/tools/depends/target/libdvdnav/Makefile
++++ b/tools/depends/target/libdvdnav/Makefile
+@@ -0,7 +0,8 @@
+                                   04-all-vm-keep-the-random-state-in-the-vm.patch \
+                                   05-all-forget-a-skipped-wait-when-the-vm-hops.patch \
+                                   06-all-run-the-cell-step-after-a-sync-wait.patch \
+-                                  07-all-wait-before-a-cell-step-that-opens-another-vob.patch
++                                  07-all-wait-before-a-cell-step-that-opens-another-vob.patch \
++                                  09-all-select-the-forced-button-when-its-highlight-starts.patch
+ 
+ MESON_BUILD_TYPE=release
+ 
+@@ -0,6 +0,7 @@
+ 	cd $(PLATFORM); patch -p1 -i ../05-all-forget-a-skipped-wait-when-the-vm-hops.patch
+ 	cd $(PLATFORM); patch -p1 -i ../06-all-run-the-cell-step-after-a-sync-wait.patch
+ 	cd $(PLATFORM); patch -p1 -i ../07-all-wait-before-a-cell-step-that-opens-another-vob.patch
++	cd $(PLATFORM); patch -p1 -i ../09-all-select-the-forced-button-when-its-highlight-starts.patch
+ ifeq ($(TARGET_PLATFORM),windows)
+ 	cd $(PLATFORM); patch -p1 -i ../01-win-uwpcompat.patch
+ 	cd $(PLATFORM); patch -p1 -i ../02-win-remove-lib-version.patch

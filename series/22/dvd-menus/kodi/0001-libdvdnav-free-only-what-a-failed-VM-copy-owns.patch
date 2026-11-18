@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 17 Nov 2026 14:51:12 -0600
+Subject: [PATCH] libdvdnav: free only what a failed VM copy owns
+
+A failed vm_new_copy() closed the VMG IFO and the dvd reader that the
+copy shares with the live VM, which then read freed memory.
+---
+ cmake/modules/FindLibDvdNav.cmake             |  2 ++
+ ...vm-free-only-what-a-failed-copy-owns.patch | 22 +++++++++++++++++++
+ tools/depends/target/libdvdnav/Makefile       |  4 +++-
+ 3 files changed, 27 insertions(+), 1 deletion(-)
+ create mode 100644 tools/depends/target/libdvdnav/03-all-vm-free-only-what-a-failed-copy-owns.patch
+
+diff --git a/cmake/modules/FindLibDvdNav.cmake b/cmake/modules/FindLibDvdNav.cmake
+--- a/cmake/modules/FindLibDvdNav.cmake
++++ b/cmake/modules/FindLibDvdNav.cmake
+@@ -0,6 +0,8 @@
+ 
+     find_package(LibDvdRead 7.0.0 REQUIRED ${SEARCH_QUIET})
+ 
++    set(patches "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/03-all-vm-free-only-what-a-failed-copy-owns.patch")
++
+     if(WIN32 OR WINDOWS_STORE)
+       set(${${CMAKE_FIND_PACKAGE_NAME}_MODULE}_libType shared)
+       list(APPEND patches "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/01-win-uwpcompat.patch"
+diff --git a/tools/depends/target/libdvdnav/03-all-vm-free-only-what-a-failed-copy-owns.patch b/tools/depends/target/libdvdnav/03-all-vm-free-only-what-a-failed-copy-owns.patch
+new file mode 100644
+--- /dev/null
++++ b/tools/depends/target/libdvdnav/03-all-vm-free-only-what-a-failed-copy-owns.patch
+@@ -0,0 +0,22 @@
++Subject: [PATCH] vm: free only what a failed copy owns
++
++A VM copy shares the VMG IFO and the dvd reader with the VM it copies.
++When vm_new_copy() failed after the copy, vm_free_vm() closed both, and
++the source VM went on with freed memory.
++---
++ src/vm/vm.c | 2 +-
++ 1 file changed, 1 insertion(+), 1 deletion(-)
++
++diff --git a/src/vm/vm.c b/src/vm/vm.c
++index 9276c912bc..1091e1c0f4 100644
++--- a/src/vm/vm.c
+++++ b/src/vm/vm.c
++@@ -526,7 +526,7 @@ vm_t *vm_new_copy(vm_t *source) {
++ 
++ fail:
++   if (target != NULL)
++-    vm_free_vm(target);
+++    vm_free_copy(target);
++ 
++   return NULL;
++ }
+diff --git a/tools/depends/target/libdvdnav/Makefile b/tools/depends/target/libdvdnav/Makefile
+--- a/tools/depends/target/libdvdnav/Makefile
++++ b/tools/depends/target/libdvdnav/Makefile
+@@ -0,7 +0,8 @@
+ include ../../Makefile.include LIBDVDNAV-VERSION ../../download-files.include
+ DEPS = ../../Makefile.include LIBDVDNAV-VERSION Makefile ../../download-files.include \
+                                   01-win-uwpcompat.patch \
+-                                  02-win-remove-lib-version.patch
++                                  02-win-remove-lib-version.patch \
++                                  03-all-vm-free-only-what-a-failed-copy-owns.patch
+ 
+ MESON_BUILD_TYPE=release
+ 
+@@ -0,6 +0,7 @@
+ .configured-$(PLATFORM): $(DEPS) | $(TARBALLS_LOCATION)/$(ARCHIVE).$(HASH_TYPE)
+ 	rm -rf $(PLATFORM); mkdir -p $(PLATFORM)
+ 	cd $(PLATFORM); $(ARCHIVE_TOOL) $(ARCHIVE_TOOL_FLAGS) $(TARBALLS_LOCATION)/$(ARCHIVE)
++	cd $(PLATFORM); patch -p1 -i ../03-all-vm-free-only-what-a-failed-copy-owns.patch
+ ifeq ($(TARGET_PLATFORM),windows)
+ 	cd $(PLATFORM); patch -p1 -i ../01-win-uwpcompat.patch
+ 	cd $(PLATFORM); patch -p1 -i ../02-win-remove-lib-version.patch

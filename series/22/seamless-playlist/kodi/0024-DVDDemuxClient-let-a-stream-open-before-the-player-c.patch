@@ -21,9 +21,9 @@ diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxClient.cpp b/xbmc/cores/
  
 +  ReleaseUnclaimedStreams();
 +
+   const auto readStart = std::chrono::steady_clock::now();
    m_packet.reset(m_IDemux->ReadDemux());
-   if (!m_packet)
-   {
+   // an add-on's empty packet may replace input it dropped; ask again while it answers at once
 @@ -0,6 +0,7 @@
      CLog::Log(LOGDEBUG, LOGVIDEO, "CDVDDemuxClient::SeekTime: {:.3f}", timems / 1000.0);
      m_displayTime = 0;

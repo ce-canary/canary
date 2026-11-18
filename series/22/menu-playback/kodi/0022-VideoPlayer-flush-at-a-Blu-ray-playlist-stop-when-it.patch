@@ -64,8 +64,8 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
        if (m_pInputStream->IsEOF())
          break;
 @@ -0,6 +0,20 @@
-     DemuxPacket* pPacket = NULL;
      CDemuxStream *pStream = NULL;
+     const auto readStart = std::chrono::steady_clock::now();
      ReadPacket(pPacket, pStream);
 +
 +    // after a playlist stop the demuxer still hands back the packets it had open at the end of
@@ -83,7 +83,7 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
 +
      if (pPacket && !pStream)
      {
-       /* probably a empty packet, just free it and move on */
+       const auto now = std::chrono::steady_clock::now();
 @@ -0,6 +0,8 @@
          CloseStream(m_CurrentVideo, true);
  

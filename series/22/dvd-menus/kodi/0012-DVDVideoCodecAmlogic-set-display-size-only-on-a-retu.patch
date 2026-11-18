@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 17 Nov 2026 22:17:21 -0600
+Subject: [PATCH] DVDVideoCodecAmlogic: set display size only on a returned
+ picture
+
+GetPicture reset the display size of the caller's last picture on every
+return, also when it returned no picture. VideoPlayerVideo applies a
+forced aspect only to a new picture, so the still frame it repeats in a
+DVD menu went out at the coded 3:2 size. The menu highlights were then
+drawn off their buttons on the 16:9 picture.
+---
+ .../cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+@@ -0,6 +0,9 @@
+      m_frameMeta, m_sdrWhite, m_sdrGamma);;
+   }
+ 
++  if (retVal != VC_PICTURE)
++    return retVal;
++
+   // check for mpeg2 aspect ratio changes
+   if (m_mpeg2_sequence && pVideoPicture->pts >= m_mpeg2_sequence_pts)
+     m_aspect_ratio = m_mpeg2_sequence->ratio;

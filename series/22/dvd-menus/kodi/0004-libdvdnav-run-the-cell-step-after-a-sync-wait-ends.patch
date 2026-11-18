@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 17 Nov 2026 15:22:45 -0600
+Subject: [PATCH] libdvdnav: run the cell step after a sync wait ends
+
+At the end of a cell with buttons libdvdnav took the next cell in the
+same pass that raised its wait. The player then synced to a VM that had
+already run the cell and PGC commands.
+---
+ cmake/modules/FindLibDvdNav.cmake             |  3 ++-
+ ...-run-the-cell-step-after-a-sync-wait.patch | 27 +++++++++++++++++++
+ tools/depends/target/libdvdnav/Makefile       |  4 ++-
+ 3 files changed, 32 insertions(+), 2 deletions(-)
+ create mode 100644 tools/depends/target/libdvdnav/06-all-run-the-cell-step-after-a-sync-wait.patch
+
+diff --git a/cmake/modules/FindLibDvdNav.cmake b/cmake/modules/FindLibDvdNav.cmake
+--- a/cmake/modules/FindLibDvdNav.cmake
++++ b/cmake/modules/FindLibDvdNav.cmake
+@@ -0,7 +0,8 @@
+ 
+     set(patches "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/03-all-vm-free-only-what-a-failed-copy-owns.patch"
+                 "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/04-all-vm-keep-the-random-state-in-the-vm.patch"
+-                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/05-all-forget-a-skipped-wait-when-the-vm-hops.patch")
++                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/05-all-forget-a-skipped-wait-when-the-vm-hops.patch"
++                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/06-all-run-the-cell-step-after-a-sync-wait.patch")
+ 
+     if(WIN32 OR WINDOWS_STORE)
+       set(${${CMAKE_FIND_PACKAGE_NAME}_MODULE}_libType shared)
+diff --git a/tools/depends/target/libdvdnav/06-all-run-the-cell-step-after-a-sync-wait.patch b/tools/depends/target/libdvdnav/06-all-run-the-cell-step-after-a-sync-wait.patch
+new file mode 100644
+--- /dev/null
++++ b/tools/depends/target/libdvdnav/06-all-run-the-cell-step-after-a-sync-wait.patch
+@@ -0,0 +0,27 @@
++Subject: [PATCH] dvdnav: run the cell step after a sync wait ends
++
++At the end of a cell with highlights, the next cell was taken in the
++same pass that raised the wait. The player then synced to a VM that had
++already run the cell and PGC commands, which the wait is there to hold
++back. A still cell already takes the step only after its wait.
++
++The wait skip was then cleared by that same step, so a cell with
++highlights that loops waited at every other pass only. It now waits at
++every pass.
++---
++ src/dvdnav.c | 2 +-
++ 1 file changed, 1 insertion(+), 1 deletion(-)
++
++diff --git a/src/dvdnav.c b/src/dvdnav.c
++index 58bfa5c70c..92857bb988 100644
++--- a/src/dvdnav.c
+++++ b/src/dvdnav.c
++@@ -871,7 +871,7 @@ dvdnav_status_t dvdnav_get_next_cache_block(dvdnav_t *this, uint8_t **buf,
++       if ((this->position_current.still || this->pci.hli.hl_gi.hli_ss) && !this->sync_wait_skip)
++         this->sync_wait = 1;
++ 
++-      if(!this->position_current.still || this->skip_still ) {
+++      if (!this->sync_wait && (!this->position_current.still || this->skip_still)) {
++         /* no active cell still -> get us to the next cell */
++         vm_get_next_cell(this->vm);
++         this->position_current.still = 0; /* still gets activated at end of cell */
+diff --git a/tools/depends/target/libdvdnav/Makefile b/tools/depends/target/libdvdnav/Makefile
+--- a/tools/depends/target/libdvdnav/Makefile
++++ b/tools/depends/target/libdvdnav/Makefile
+@@ -0,7 +0,8 @@
+                                   02-win-remove-lib-version.patch \
+                                   03-all-vm-free-only-what-a-failed-copy-owns.patch \
+                                   04-all-vm-keep-the-random-state-in-the-vm.patch \
+-                                  05-all-forget-a-skipped-wait-when-the-vm-hops.patch
++                                  05-all-forget-a-skipped-wait-when-the-vm-hops.patch \
++                                  06-all-run-the-cell-step-after-a-sync-wait.patch
+ 
+ MESON_BUILD_TYPE=release
+ 
+@@ -0,6 +0,7 @@
+ 	cd $(PLATFORM); patch -p1 -i ../03-all-vm-free-only-what-a-failed-copy-owns.patch
+ 	cd $(PLATFORM); patch -p1 -i ../04-all-vm-keep-the-random-state-in-the-vm.patch
+ 	cd $(PLATFORM); patch -p1 -i ../05-all-forget-a-skipped-wait-when-the-vm-hops.patch
++	cd $(PLATFORM); patch -p1 -i ../06-all-run-the-cell-step-after-a-sync-wait.patch
+ ifeq ($(TARGET_PLATFORM),windows)
+ 	cd $(PLATFORM); patch -p1 -i ../01-win-uwpcompat.patch
+ 	cd $(PLATFORM); patch -p1 -i ../02-win-remove-lib-version.patch

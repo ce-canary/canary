@@ -10,7 +10,7 @@ These builds are for testing and early feature previews. Despite extensive testi
 
 **Status: active.**
 
-- CoreELEC 22: latest build `22.0-Piers_canary_20261116`, based on the nightly of `20261116`.
+- CoreELEC 22: latest build `22.0-Piers_canary_20261118`, based on the nightly of `20261118`.
 
 - **Small fixes:** independent fixes that don't belong to any feature.
 - **Blu-ray menu playback:** full disc menus with more seamless clip transitions.
@@ -22,6 +22,7 @@ These builds are for testing and early feature previews. Despite extensive testi
 - **Seamless video playlists:** the next video in a playlist starts without a black screen, and streamed items join in a moment.
 - **BD-J menu timers:** BD-J disc timers follow the picture through pause and seek.
 - **Atmos passthrough continuity:** No more Atmos pop-up on pause, seek and chapter skips.
+- **DVD menus:** every DVD menu page shows, highlights follow the remote, and titles play out and resume where you left.
 
 When everything here has landed in CoreELEC, this section will say there is no active canary. Use the normal nightly until the next testflight starts.
 
@@ -40,6 +41,7 @@ Canary builds run on the same devices as the matching CoreELEC nightly. Make a b
 
 - Audio offset add-ons see an audio track change made by a Blu-ray disc's own menu right away.
 - Progressive VC-1 video decodes straight into its display buffers, which removes a cause of short horizontal lines on moving pictures.
+- VC-1 video plays smoothly instead of stuttering.
 
 Nothing to set up.
 
@@ -133,6 +135,10 @@ On Blu-ray discs with Java menus, the disc's own timer now follows the picture o
 
 Dolby Digital Plus Atmos and Dolby TrueHD Atmos passthrough now keep the audio signal running through pause, seek and chapter skips. TVs that show the Dolby Atmos notice whenever the signal restarts no longer do. For long pauses, set Keep audio device alive to Always to avoid any other unwanted notices.
 
+## DVD menus
+
+DVD menus now behave like a disc player. Every menu page shows its picture, button highlights follow the remote on looping menus, and a title plays to its end before the disc goes back to its menu. Stop is instant, and Resume from the menu or after a stop picks up at the picture you left. Nothing to set up.
+
 ## Going back to a nightly
 
 Copy a nightly `.tar` to `/storage/.update` and reboot. Your normal add-ons and settings stay as they were.
@@ -147,7 +153,7 @@ Follow CoreELEC's [guide to reporting an issue](https://discourse.coreelec.org/t
 
 | Feature | Kodi | common_drivers | media_modules-aml | CoreELEC | History |
 |---|---|---|---|---|---|
-| Small fixes | [2 commits](https://github.com/ce-canary/xbmc/compare/base/22...topic/22/fixes) | none | [1 commit](https://github.com/ce-canary/media_modules-aml/compare/base/22...topic/22/fixes) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/fixes) |
+| Small fixes | [1 commit](https://github.com/ce-canary/xbmc/compare/base/22...topic/22/fixes) | none | [2 commits](https://github.com/ce-canary/media_modules-aml/compare/base/22...topic/22/fixes) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/fixes) |
 | Blu-ray menu playback | [76 commits](https://github.com/ce-canary/xbmc/compare/topic/22/fixes...topic/22/menu-playback) | [5 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/av-sync...topic/22/menu-playback) | none | [20 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/screen-capture...topic/22/menu-playback) | [history](https://github.com/ce-canary/canary/commits/main/series/22/menu-playback) |
 | A/V sync | [45 commits](https://github.com/ce-canary/xbmc/compare/topic/22/menu-playback...topic/22/av-sync) | [3 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/dv-output...topic/22/av-sync) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/av-sync) |
 | Screen capture | [33 commits](https://github.com/ce-canary/xbmc/compare/topic/22/av-sync...topic/22/screen-capture) | [39 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/menu-playback...topic/22/screen-capture) | none | [6 commits](https://github.com/ce-canary/CoreELEC/compare/base/22...topic/22/screen-capture) | [history](https://github.com/ce-canary/canary/commits/main/series/22/screen-capture) |
@@ -157,6 +163,7 @@ Follow CoreELEC's [guide to reporting an issue](https://discourse.coreelec.org/t
 | Seamless video playlists | [48 commits](https://github.com/ce-canary/xbmc/compare/topic/22/mode-switch-time...topic/22/seamless-playlist) | none | [2 commits](https://github.com/ce-canary/media_modules-aml/compare/topic/22/mode-switch-time...topic/22/seamless-playlist) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/seamless-playlist) |
 | BD-J menu timers | [2 commits](https://github.com/ce-canary/xbmc/compare/topic/22/seamless-playlist...topic/22/bdj-media-time) | none | none | [1 commit](https://github.com/ce-canary/CoreELEC/compare/topic/22/mode-switch-time...topic/22/bdj-media-time) | [history](https://github.com/ce-canary/canary/commits/main/series/22/bdj-media-time) |
 | Atmos passthrough continuity | [11 commits](https://github.com/ce-canary/xbmc/compare/topic/22/bdj-media-time...topic/22/passthrough-continuity) | none | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/passthrough-continuity) |
+| DVD menus | [16 commits](https://github.com/ce-canary/xbmc/compare/topic/22/passthrough-continuity...topic/22/dvd-menus) | none | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/dvd-menus) |
 | Canary-only changes | none | none | none | [4 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/menu-playback...topic/22/canary-only) | [history](https://github.com/ce-canary/canary/commits/main/series/22/canary-only) |
 
 Each link shows that feature's commits and combined diff for the current build. History shows how a feature changed between builds.

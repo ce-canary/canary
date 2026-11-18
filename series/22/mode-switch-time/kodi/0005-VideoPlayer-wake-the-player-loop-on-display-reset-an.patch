@@ -53,9 +53,9 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 @@ -0,7 +0,7 @@
-     // check display lost
      if (m_displayLost)
      {
+       emptySince.reset();
 -      CThread::Sleep(50ms);
 +      m_displayReset.Wait(50ms);
        continue;

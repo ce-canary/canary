@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 17 Nov 2026 14:52:29 -0600
+Subject: [PATCH] VideoPlayer: start a DVD menu hop on its first picture
+
+In a menu a hop flushed without a start sync and started the clock at
+the first packet read. The new page's still reached the renderer late,
+its first field was dropped, the deinterlacer held the lone second field,
+and the old page stayed up.
+---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 9 +--------
+ xbmc/cores/VideoPlayer/VideoPlayer.h   | 2 --
+ 2 files changed, 1 insertion(+), 10 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,11 +0,6 @@
+         if (pPacket->pts != DVD_NOPTS_VALUE && pPacket->pts > correction)
+           pPacket->pts -= correction;
+       }
+-      if (m_dvd.syncClock)
+-      {
+-        m_clock.Discontinuity(pPacket->dts);
+-        m_dvd.syncClock = false;
+-      }
+     }
+ 
+     // process the packet
+@@ -0,9 +0,7 @@
+           m_dvd.state = DVDSTATE_NORMAL;
+         else
+         {
+-          bool sync = !IsInMenuInternal();
+-          FlushBuffers(DVD_NOPTS_VALUE, false, sync);
+-          m_dvd.syncClock = true;
++          FlushBuffers(DVD_NOPTS_VALUE, false, true);
+           m_dvd.state = DVDSTATE_NORMAL;
+           if (m_pDemuxer)
+             m_pDemuxer->Flush();
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,12 +0,10 @@
+       iSelectedVideoStream = -1;
+       iDVDStillTime = std::chrono::milliseconds::zero();
+       iDVDStillStartTime = {};
+-      syncClock = false;
+       wait = false;
+     }
+ 
+     int state;                // current dvdstate
+-    bool syncClock;
+     bool wait; // a libdvdnav wait came since the last disc input
+     std::chrono::milliseconds
+         iDVDStillTime; // total time in ticks we should display the still before continuing
