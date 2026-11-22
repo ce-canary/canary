@@ -9,12 +9,12 @@ The read runs ahead of the picture by the queues, so Resume skipped what
 they held, and at a title end it replayed the end and fell back to the
 menu.
 ---
- .../DVDInputStreamNavigator.cpp               | 45 ++++++++++++++++++-
- .../DVDInputStreams/DVDInputStreamNavigator.h | 19 ++++++++
- .../VideoPlayer/DVDInputStreams/DllDvdNav.h   |  6 +++
- xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 35 +++++++++++++--
- xbmc/cores/VideoPlayer/VideoPlayer.h          |  4 +-
- 5 files changed, 101 insertions(+), 8 deletions(-)
+ .../DVDInputStreamNavigator.cpp               | 69 +++++++++++++++++--
+ .../DVDInputStreams/DVDInputStreamNavigator.h | 19 +++++
+ .../VideoPlayer/DVDInputStreams/DllDvdNav.h   |  6 ++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 64 +++++++++++++----
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  8 ++-
+ 5 files changed, 143 insertions(+), 23 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp
 --- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp
@@ -27,14 +27,32 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp 
            iNavresult = m_pVideoPlayer->OnDiscNavResult(buf, DVDNAV_VTS_CHANGE);
          }
        }
-@@ -0,6 +0,12 @@
+@@ -0,6 +0,18 @@
+           m_bInMenu = menu;
+         }
+ 
++        dvdnav_nav_position_t position{};
++        const bool positioned =
++            m_dll.dvdnav_get_current_nav_position(m_dvdnav, &position) == DVDNAV_STATUS_OK;
++
++        // the held packets are of a PGC the read left: a non-seamless join waited until they
++        // played out, and a seamless one leaves the read ahead by the queues, as on a player
++        if (positioned && !m_navPackets.empty() &&
++            (position.domain != m_navPackets.front().position.domain ||
++             position.vts != m_navPackets.front().position.vts ||
++             position.pgcn != m_navPackets.front().position.pgcn))
++          m_navPackets.clear();
++
+         /* check for any gap in the stream, this is likely a discontinuity */
+         int64_t gap = (int64_t)pci->pci_gi.vobu_s_ptm - m_iVobUnitStop;
+         if(gap)
+@@ -0,6 +0,11 @@
  
          m_iTime = (int) ( m_dll.dvdnav_get_current_time(m_dvdnav)  / 90 );
  
-+        NavPacket nav{.time = m_iTime,
-+                      .totalTime = m_iTotalTime,
++        NavPacket nav{.position = position,
 +                      .start = static_cast<double>(m_iVobUnitStart * 1000) / 90};
-+        if (m_dll.dvdnav_get_current_nav_position(m_dvdnav, &nav.position) == DVDNAV_STATUS_OK)
++        if (positioned)
 +          m_navPackets.push_back(nav);
 +
          iNavresult = m_pVideoPlayer->OnDiscNavResult((void*)pci, DVDNAV_NAV_PACKET);
@@ -57,7 +75,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp 
  }
  
  bool CDVDInputStreamNavigator::OnTopMenu()
-@@ -0,7 +0,40 @@
+@@ -0,7 +0,41 @@
    if (!m_dvdnav)
      return false;
  
@@ -69,15 +87,19 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp 
 +// cannot take resumes at the read
 +bool CDVDInputStreamNavigator::CallMenu(DVDMenuID_t menu)
 +{
++  bool called = false;
 +  if (!m_navPackets.empty() && m_navPackets.front().position.domain == DVD_DOMAIN_VTSTitle)
 +  {
 +    const dvdnav_nav_position_t& position = m_navPackets.front().position;
 +    CLog::Log(LOGDEBUG, "{} - from title {} pgc {} cell {} block {}", __FUNCTION__, position.title,
 +              position.pgcn, position.cell, position.block);
-+    if (m_dll.dvdnav_menu_call_from(m_dvdnav, menu, &position) == DVDNAV_STATUS_OK)
-+      return true;
++    called = m_dll.dvdnav_menu_call_from(m_dvdnav, menu, &position) == DVDNAV_STATUS_OK;
 +  }
-+  return m_dll.dvdnav_menu_call(m_dvdnav, menu) == DVDNAV_STATUS_OK;
++  if (!called)
++    called = m_dll.dvdnav_menu_call(m_dvdnav, menu) == DVDNAV_STATUS_OK;
++  if (called)
++    m_navPackets.clear();
++  return called;
 +}
 +
 +void CDVDInputStreamNavigator::SetNavPacketOffset(double offset)
@@ -87,18 +109,62 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp 
 +    it->pts = it->start - offset;
 +}
 +
-+const CDVDInputStreamNavigator::NavPacket* CDVDInputStreamNavigator::ReleaseNavPackets(
-+    double presented)
++void CDVDInputStreamNavigator::ReleaseNavPackets(double presented)
 +{
 +  // a VOBU is passed once the picture reaches the start of the next one
-+  while (presented != DVD_NOPTS_VALUE && m_navPackets.size() > 1 &&
++  while (m_navPackets.size() > 1 && presented != DVD_NOPTS_VALUE &&
 +         m_navPackets[1].pts != DVD_NOPTS_VALUE && presented >= m_navPackets[1].pts)
 +    m_navPackets.pop_front();
-+
-+  return m_navPackets.empty() ? nullptr : &m_navPackets.front();
  }
  
  void CDVDInputStreamNavigator::OnBack()
+@@ -0,7 +0,8 @@
+ {
+   if (m_dvdnav && !(IsInMenu() && GetTotalButtons() > 0))
+   {
+-    m_dll.dvdnav_next_pg_search(m_dvdnav);
++    if (m_dll.dvdnav_next_pg_search(m_dvdnav) == DVDNAV_STATUS_OK)
++      m_navPackets.clear();
+   }
+ }
+ 
+@@ -0,7 +0,8 @@
+ {
+   if (m_dvdnav && !(IsInMenu() && GetTotalButtons() > 0))
+   {
+-    m_dll.dvdnav_prev_pg_search(m_dvdnav);
++    if (m_dll.dvdnav_prev_pg_search(m_dvdnav) == DVDNAV_STATUS_OK)
++      m_navPackets.clear();
+   }
+ }
+ 
+@@ -0,6 +0,7 @@
+               m_dll.dvdnav_err_to_string(m_dvdnav));
+     return false;
+   }
++  m_navPackets.clear();
+   m_iTime = iTimeInMsec;
+   return true;
+ }
+@@ -0,6 +0,7 @@
+               m_dll.dvdnav_err_to_string(m_dvdnav));
+     return false;
+   }
++  m_navPackets.clear();
+ 
+   SetActiveSubtitleStream(subtitle);
+   SetActiveAudioStream(audio);
+@@ -0,7 +0,9 @@
+     return false;
+   }
+ 
+-  m_dll.dvdnav_program_play(m_dvdnav, dvdState.title, dvdState.pgcn, dvdState.pgn);
++  if (m_dll.dvdnav_program_play(m_dvdnav, dvdState.title, dvdState.pgcn, dvdState.pgn) ==
++      DVDNAV_STATUS_OK)
++    m_navPackets.clear();
+   m_dll.dvdnav_angle_change(m_dvdnav, dvdState.current_angle);
+   SetActiveSubtitleStream(dvdState.subp_num);
+   SetActiveAudioStream(dvdState.audio_num);
 diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h
 --- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h
 +++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h
@@ -116,7 +182,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h b/
  #include <string>
  #include <vector>
  
-@@ -0,6 +0,16 @@
+@@ -0,6 +0,14 @@
    , public CDVDInputStream::IMenus
  {
  public:
@@ -124,10 +190,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h b/
 +  struct NavPacket
 +  {
 +    dvdnav_nav_position_t position{};
-+    int time{0}; // ms into the PGC at the start of the VOBU
-+    int totalTime{0};
 +    double start{0.0}; // the VOBU start on the pts the demuxer gives its packets
-+    double pts{DVD_NOPTS_VALUE}; // the start less the offset of the first video packet after it
++    double pts{DVD_NOPTS_VALUE}; // the start less the offset of the first A/V packet after it
 +  };
 +
    CDVDInputStreamNavigator(IVideoPlayer* player, const CFileItem& fileitem);
@@ -138,8 +202,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h b/
    VideoStreamInfo GetVideoStreamInfo();
  
 +  void SetNavPacketOffset(double offset);
-+  // drops the VOBUs the picture at `presented` has passed, returns the one on screen
-+  const NavPacket* ReleaseNavPackets(double presented);
++  // drops the VOBUs the picture at `presented` has passed, none while it is not known
++  void ReleaseNavPackets(double presented);
 +
    void SaveCurrentState(const CStreamDetails& details) override;
    UpdateState UpdateItemFromSavedStates(CFileItem& item, double time, bool& closed) override;
@@ -152,11 +216,13 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h b/
    int GetAngleCount();
    void GetVideoResolution(uint32_t * width, uint32_t * height);
  
-@@ -0,6 +0,8 @@
+@@ -0,6 +0,10 @@
    int64_t m_iVobUnitStop;
    int64_t m_iVobUnitCorrection;
  
-+  std::deque<NavPacket> m_navPackets; // oldest first
++  // oldest first; a jump empties it when called, ahead of its hop in the read, and a VTS change,
++  // a hop or a NAV packet of another PGC when read
++  std::deque<NavPacket> m_navPackets;
 +
    int m_iTitleCount;
    int m_iTitle;
@@ -219,7 +285,7 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
    }
  }
  
-@@ -0,7 +0,7 @@
+@@ -0,15 +0,15 @@
    return false;
  }
  
@@ -228,15 +294,35 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
  {
    // process packet if it belongs to selected stream.
    // for dvd's don't allow automatic opening of streams*/
-@@ -0,7 +0,7 @@
+ 
    if (CheckIsCurrent(m_CurrentAudio, pStream, pPacket))
-     ProcessAudioData(pStream, pPacket);
+-    ProcessAudioData(pStream, pPacket);
++    ProcessAudioData(pStream, pPacket, menuCorrection);
    else if (CheckIsCurrent(m_CurrentVideo, pStream, pPacket))
 -    ProcessVideoData(pStream, pPacket);
 +    ProcessVideoData(pStream, pPacket, menuCorrection);
    else if (CheckIsCurrent(m_CurrentSubtitle, pStream, pPacket))
      ProcessSubData(pStream, pPacket);
    else if (CheckIsCurrent(m_CurrentTeletext, pStream, pPacket))
+@@ -0,7 +0,9 @@
+   }
+ }
+ 
+-void CVideoPlayer::ProcessAudioData(CDemuxStream* pStream, DemuxPacket* pPacket)
++void CVideoPlayer::ProcessAudioData(CDemuxStream* pStream,
++                                    DemuxPacket* pPacket,
++                                    double menuCorrection)
+ {
+   CheckStreamChanges(m_CurrentAudio, pStream);
+ 
+@@ -0,6 +0,7 @@
+   CLog::Log(LOGDEBUG, LOGAUDIO, "CVideoPlayer::ProcessAudioData size:{:d} dts:{:.3f} pts:{:.3f} dur:{:.3f}ms, clock:{:.3f} drop:{:d} level:{:d}",
+     pPacket->iSize, pPacket->dts/DVD_TIME_BASE, pPacket->pts/DVD_TIME_BASE, pPacket->duration/1000.0, m_clock.GetClock() / DVD_TIME_BASE, drop, m_VideoPlayerAudio->GetLevel());
+ 
++  SetNavPacketOffset(pPacket, menuCorrection);
+   m_VideoPlayerAudio->SendMessage(std::make_shared<CDVDMsgDemuxerPacket>(pPacket, drop));
+   m_playersFlushed = false;
+ 
 @@ -0,7 +0,9 @@
      m_CurrentAudio.packets++;
  }
@@ -248,37 +334,78 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
  {
    CheckStreamChanges(m_CurrentVideo, pStream);
    bool checkcont = false;
-@@ -0,6 +0,11 @@
+@@ -0,6 +0,7 @@
    CLog::Log(LOGDEBUG, LOGVIDEO, "CVideoPlayer::ProcessVideoData size:{:d} dts:{:.3f} pts:{:.3f} dur:{:.3f}ms, clock:{:.3f} level:{:d}",
      pPacket->iSize, pPacket->dts/1000000, pPacket->pts/1000000, pPacket->duration/1000.0,
      m_clock.GetClock()/1000000.0,m_processInfo->GetLevelVQ());
-+  // a DVD VOBU is played with the offset of the first video packet after its NAV packet
++  SetNavPacketOffset(pPacket, menuCorrection);
+   m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsgDemuxerPacket>(pPacket, drop));
+   // the still state can leave and return while packets flow, only new input needs a new end
+   m_videoInputEndSent = false;
+@@ -0,6 +0,16 @@
+     m_lastVideoTitleTime = pPacket->pts + m_offset_pts;
+ }
+ 
++// a DVD VOBU is played with the offset of the first audio or video packet after its NAV packet,
++// once the continuity check of that packet has set it
++void CVideoPlayer::SetNavPacketOffset(const DemuxPacket* pPacket, double menuCorrection)
++{
 +  if (pPacket->pts != DVD_NOPTS_VALUE && m_pInputStream &&
 +      m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD))
 +    std::static_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream)
 +        ->SetNavPacketOffset(m_offset_pts + menuCorrection);
-   m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsgDemuxerPacket>(pPacket, drop));
-   m_playersFlushed = false;
++}
++
+ void CVideoPlayer::ProcessSubData(CDemuxStream* pStream, DemuxPacket* pPacket)
+ {
+   CheckStreamChanges(m_CurrentSubtitle, pStream);
+@@ -0,20 +0,28 @@
+   return m_CurrentVideo.id >= 0 ? m_renderManager.GetOnScreenClock().clock : m_clock.GetClock();
+ }
  
-@@ -0,6 +0,22 @@
++// the pts of the picture on screen, the clock while no picture is presented; none until the
++// clock is known
++double CVideoPlayer::GetPresentedPts()
++{
++  if (!IsDiscClockKnown())
++    return DVD_NOPTS_VALUE;
++
++  double presented = DVD_NOPTS_VALUE;
++  if (m_CurrentVideo.id >= 0)
++    presented = m_renderManager.GetPresentedPts();
++  return presented != DVD_NOPTS_VALUE ? presented : m_clock.GetClock();
++}
++
+ double CVideoPlayer::GetBlurayPresentedTime()
+ {
+-  const bool known = IsDiscClockKnown();
+   // the frame on the plane holds its title time before the streams are in sync, and the
+   // renderer releases frames a display latency ahead of the clock
+-  double presented = DVD_NOPTS_VALUE;
+-  if (m_CurrentVideo.id >= 0)
+-    presented = known ? m_renderManager.GetPresentedPts() : m_renderManager.GetDisplayedPts();
++  double presented = GetPresentedPts();
++  if (presented == DVD_NOPTS_VALUE && m_CurrentVideo.id >= 0)
++    presented = m_renderManager.GetDisplayedPts();
+   if (presented == DVD_NOPTS_VALUE)
+-  {
+-    if (!known)
+-      return DVD_NOPTS_VALUE;
+-    presented = m_clock.GetClock();
+-  }
++    return DVD_NOPTS_VALUE;
+   // the last picture of a held play item is shown at the clock until the item ends, one title
+   // tick before the next item starts
+   if (const auto itemEnd = GetBlurayItemEnd())
+@@ -0,6 +0,12 @@
        return DVD_TIME_TO_MSEC(presented);
      };
  
 +    // a DVD VOBU stops being the position once the picture on screen has passed it, which only
 +    // the clock of the new pictures tells
 +    if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD))
-+    {
-+      double presented = DVD_NOPTS_VALUE;
-+      if (IsBlurayClockKnown())
-+      {
-+        if (m_CurrentVideo.id >= 0)
-+          presented = m_renderManager.GetPresentedPts();
-+        if (presented == DVD_NOPTS_VALUE)
-+          presented = m_clock.GetClock();
-+      }
 +      std::static_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream)
-+          ->ReleaseNavPackets(presented);
-+    }
++          ->ReleaseNavPackets(GetPresentedPts());
 +
      // Raw (pre-EDL) upper bound of the stream, needed below to tell whether the last
      // chapter is fully contained within a trailing EDL cut.
@@ -286,15 +413,25 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.h
 +++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
-@@ -0,9 +0,9 @@
+@@ -0,6 +0,7 @@
+   bool IsDiscClockKnown() const;
+   bool IsBlurayLastPictureHeld() const;
+   double GetPictureClock();
++  double GetPresentedPts();
+   double GetBlurayPresentedTime();
+   void ReportBlurayPresented();
+   void ReportBlurayReadPresented();
+@@ -0,9 +0,10 @@
  
    bool CheckIsCurrent(const CCurrentStream& current, CDemuxStream* stream, DemuxPacket* pkg);
    bool IsReplayedPacket(CDemuxStream* stream, DemuxPacket* packet);
 -  void ProcessPacket(CDemuxStream* pStream, DemuxPacket* pPacket);
-+  void ProcessPacket(CDemuxStream* pStream, DemuxPacket* pPacket, double menuCorrection = 0.0);
-   void ProcessAudioData(CDemuxStream* pStream, DemuxPacket* pPacket);
+-  void ProcessAudioData(CDemuxStream* pStream, DemuxPacket* pPacket);
 -  void ProcessVideoData(CDemuxStream* pStream, DemuxPacket* pPacket);
++  void ProcessPacket(CDemuxStream* pStream, DemuxPacket* pPacket, double menuCorrection = 0.0);
++  void ProcessAudioData(CDemuxStream* pStream, DemuxPacket* pPacket, double menuCorrection);
 +  void ProcessVideoData(CDemuxStream* pStream, DemuxPacket* pPacket, double menuCorrection);
++  void SetNavPacketOffset(const DemuxPacket* pPacket, double menuCorrection);
    void ProcessSubData(CDemuxStream* pStream, DemuxPacket* pPacket);
    void ProcessTeletextData(CDemuxStream* pStream, DemuxPacket* pPacket);
    void ProcessRadioRDSData(CDemuxStream* pStream, DemuxPacket* pPacket);

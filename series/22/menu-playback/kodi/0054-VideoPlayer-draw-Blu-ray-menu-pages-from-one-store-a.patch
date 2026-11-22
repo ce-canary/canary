@@ -390,9 +390,9 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h b/xbmc/core
      // Build a COverlay (cached or freshly created) from the libass output
      // already produced by PrepareOverlays. Does not call ass_render_frame.
 @@ -0,5 +0,9 @@
-     // to detect arrival/disappearance transitions (image/SPU have no
-     // per-frame change signal of their own, unlike libass detect_change).
-     int m_prevImageSpuCount{0};
+     // change signal, and libass detect_change cannot report an overlay that
+     // is no longer added at all.
+     int m_prevShownCount{0};
 +    std::shared_ptr<CDVDMenuPlane> m_menuPlane;
 +    std::vector<SElement> m_menu;
 +    uint64_t m_menuSequence{0};

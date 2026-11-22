@@ -1,0 +1,433 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 14 Nov 2026 01:23:51 -0600
+Subject: [PATCH] CaptureService: serve every continuous request and the newest
+ shot
+
+The service served one request per frame, the newest. A second
+continuous capture got no frames while another ran, and a one-shot
+submitted under a continuous one waited until that ended.
+---
+ xbmc/application/Application.cpp              | 77 +++++++++----------
+ .../VideoRenderers/RenderManager.cpp          | 28 ++++---
+ .../VideoRenderers/RenderManager.h            |  9 ++-
+ xbmc/interfaces/legacy/RenderCapture.h        |  2 +
+ xbmc/rendering/capture/CaptureRequest.h       |  4 +-
+ xbmc/rendering/capture/CaptureService.cpp     | 37 +++++----
+ xbmc/rendering/capture/CaptureService.h       | 26 +++----
+ .../capture/test/TestCaptureService.cpp       | 49 ++++++++----
+ 8 files changed, 131 insertions(+), 101 deletions(-)
+
+diff --git a/xbmc/application/Application.cpp b/xbmc/application/Application.cpp
+--- a/xbmc/application/Application.cpp
++++ b/xbmc/application/Application.cpp
+@@ -0,53 +0,52 @@
+   if (!captureService)
+     return;
+ 
+-  const auto requests = captureService->TakeActive(CaptureContent::COMPOSITE);
+-  if (requests.empty())
+-    return;
+-  const auto& request = requests.front(); // at most one consumer per frame
+-
+   auto* winSystem = CServiceBroker::GetWinSystem();
+-  auto surface = CScreenShot::CreateSurface();
+-  if (!winSystem || !surface)
++  // TakeBuffer moves the readback out, so each request reads its own surface
++  for (const auto& request : captureService->TakeActive(CaptureContent::COMPOSITE))
+   {
+-    captureService->Fail(request);
+-    return;
+-  }
++    auto surface = CScreenShot::CreateSurface();
++    if (!winSystem || !surface)
++    {
++      captureService->Fail(request);
++      continue;
++    }
+ 
+-  if (CaptureResult result; surface->CaptureDirect(request->spec, result))
+-  {
+-    if (result.pixels)
+-      captureService->Complete(request, std::move(result));
+-    else
++    if (CaptureResult result; surface->CaptureDirect(request->spec, result))
++    {
++      if (result.pixels)
++        captureService->Complete(request, std::move(result));
++      else
++        captureService->Fail(request);
++      continue;
++    }
++
++    const ScreenshotContext ctx{*winSystem};
++    if (!surface->Read(ctx))
++    {
+       captureService->Fail(request);
+-    return;
+-  }
++      continue;
++    }
+ 
+-  const ScreenshotContext ctx{*winSystem};
+-  if (!surface->Read(ctx))
+-  {
+-    captureService->Fail(request);
+-    return;
+-  }
++    CaptureResult result;
++    result.pixels =
++        std::make_shared<CHeapCapturePixels>(std::unique_ptr<uint8_t[]>(surface->TakeBuffer()));
++    result.width = static_cast<unsigned int>(surface->GetWidth());
++    result.height = static_cast<unsigned int>(surface->GetHeight());
++    result.stride = surface->GetStride();
++    result.format = surface->GetFormat();
++    result.color = GetOutputColorMetadata(*winSystem);
++    result.content = CaptureContent::COMPOSITE; // this tap is the composite half
++    result.screenshot = request->spec.screenshot;
+ 
+-  CaptureResult result;
+-  result.pixels =
+-      std::make_shared<CHeapCapturePixels>(std::unique_ptr<uint8_t[]>(surface->TakeBuffer()));
+-  result.width = static_cast<unsigned int>(surface->GetWidth());
+-  result.height = static_cast<unsigned int>(surface->GetHeight());
+-  result.stride = surface->GetStride();
+-  result.format = surface->GetFormat();
+-  result.color = GetOutputColorMetadata(*winSystem);
+-  result.content = CaptureContent::COMPOSITE; // this tap is the composite half
+-  result.screenshot = request->spec.screenshot;
++    if (!player.CompositeVideoCapture(result))
++    {
++      captureService->Fail(request);
++      continue;
++    }
+ 
+-  if (!player.CompositeVideoCapture(result))
+-  {
+-    captureService->Fail(request);
+-    return;
++    captureService->Complete(request, result);
+   }
+-
+-  captureService->Complete(request, result);
+ }
+ 
+ } // namespace
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,7 +0,7 @@
+   m_overlays.UnInit();
+   m_debugRenderer.Dispose();
+ 
+-  m_captureBlit.reset();
++  m_captureBlits.clear();
+   DeleteRenderer();
+ 
+   m_renderState = STATE_UNCONFIGURED;
+@@ -0,19 +0,21 @@
+   visible.Intersect(
+       CRect(0.0f, 0.0f, static_cast<float>(gfx.GetWidth()), static_cast<float>(gfx.GetHeight())));
+ 
+-  if (!m_captureBlit)
+-    m_captureBlit = std::make_unique<CCaptureBlit>();
+-
++  const auto size = [&visible](const CaptureSpec& spec)
++  {
++    return std::pair{spec.width ? spec.width : static_cast<unsigned int>(visible.Width()),
++                     spec.height ? spec.height : static_cast<unsigned int>(visible.Height())};
++  };
++  // one blit per size, so a one-shot beside a continuous request leaves its framebuffer alone
+   for (const auto& request : requests)
+   {
+-    const unsigned int width =
+-        request->spec.width ? request->spec.width : static_cast<unsigned int>(visible.Width());
+-    const unsigned int height =
+-        request->spec.height ? request->spec.height : static_cast<unsigned int>(visible.Height());
++    const auto [width, height] = size(request->spec);
++    std::unique_ptr<CCaptureBlit>& blit = m_captureBlits[{width, height}];
++    if (!blit)
++      blit = std::make_unique<CCaptureBlit>();
+ 
+     CaptureResult result;
+-    if (m_captureBlit->Blit(visible, width, height, request->spec.format) &&
+-        m_captureBlit->Read(result))
++    if (blit->Blit(visible, width, height, request->spec.format) && blit->Read(result))
+     {
+       result.color = GetOutputColorMetadata(*CServiceBroker::GetWinSystem());
+       // the presented PQ is the content's during passthrough, so carry its
+@@ -0,6 +0,12 @@
+     else
+       captureService->Fail(request);
+   }
++  std::erase_if(m_captureBlits,
++                [&](const auto& blit)
++                {
++                  return std::none_of(requests.begin(), requests.end(), [&](const auto& request)
++                                      { return size(request->spec) == blit.first; });
++                });
+ }
+ 
+ void CRenderManager::SetViewMode(int iViewMode)
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -0,8 +0,10 @@
+ #include <atomic>
+ #include <deque>
+ #include <list>
++#include <map>
+ #include <memory>
+ #include <mutex>
++#include <utility>
+ 
+ #include "PlatformDefs.h"
+ 
+@@ -0,8 +0,11 @@
+   int GuiSource() const { return m_presenting ? m_guiPresentSource : m_presentsource; }
+ 
+   CBaseRenderer *m_pRenderer = nullptr;
+-  //! Owns the video tap's private FBO; render-thread only, reset in UnInit
+-  std::unique_ptr<KODI::RENDERING::CAPTURE::CCaptureBlit> m_captureBlit;
++  //! Owns the video tap's private FBOs by size, those of the last served frame; render-thread
++  //! only, cleared in UnInit
++  std::map<std::pair<unsigned int, unsigned int>,
++           std::unique_ptr<KODI::RENDERING::CAPTURE::CCaptureBlit>>
++      m_captureBlits;
+   OVERLAY::CRenderer m_overlays;
+   CDebugRenderer m_debugRenderer;
+   mutable CCriticalSection m_statelock;
+diff --git a/xbmc/interfaces/legacy/RenderCapture.h b/xbmc/interfaces/legacy/RenderCapture.h
+--- a/xbmc/interfaces/legacy/RenderCapture.h
++++ b/xbmc/interfaces/legacy/RenderCapture.h
+@@ -0,6 +0,8 @@
+       /// @param composite           [opt] bool - True captures the screen as shown, GUI
+       ///                            included; False (default) captures the video only
+       ///
++      /// @note Every running capture receives each rendered frame, whoever else captures.
++      ///
+       ///
+       ///-----------------------------------------------------------------------
+       /// @python_v17 Removed the option to pass **flags**
+diff --git a/xbmc/rendering/capture/CaptureRequest.h b/xbmc/rendering/capture/CaptureRequest.h
+--- a/xbmc/rendering/capture/CaptureRequest.h
++++ b/xbmc/rendering/capture/CaptureRequest.h
+@@ -0,8 +0,8 @@
+ 
+ enum class CaptureState
+ {
+-  PENDING, //!< submitted and not yet latched, or standing by below the stack top
+-  LATCHED, //!< the stack top, serviced by this frame's taps
++  PENDING, //!< submitted and not yet latched, or a one-shot waiting behind a newer one
++  LATCHED, //!< serviced by this frame's taps
+   DONE,
+   FAILED,
+   CANCELLED,
+diff --git a/xbmc/rendering/capture/CaptureService.cpp b/xbmc/rendering/capture/CaptureService.cpp
+--- a/xbmc/rendering/capture/CaptureService.cpp
++++ b/xbmc/rendering/capture/CaptureService.cpp
+@@ -0,29 +0,31 @@
+     }
+     m_pending.clear();
+ 
+-    // one consumer per render loop: the most recent request wins whatever its
+-    // cadence, so a one-shot submitted just before a continuous is buried
+-    // until the continuous is gone (a rare late or lost screenshot, accepted)
++    // every continuous request is served each frame, and the newest one-shot;
++    // older one-shots wait their turn, newest first
++    std::shared_ptr<CaptureRequest> oneShot;
+     for (auto& request : m_stack)
+     {
+       if (request->state == CaptureState::LATCHED)
+         request->state = CaptureState::PENDING;
+-    }
+-    std::shared_ptr<CaptureRequest> latchedRequest;
+-    if (!m_stack.empty())
+-      latchedRequest = m_stack.back();
+-
+-    if (latchedRequest)
+-    {
+-      latchedRequest->served = false; // FrameComplete judges this at the end of the frame
+-      latchedRequest->state = CaptureState::LATCHED;
++      if (request->spec.cadence == CaptureCadence::ONESHOT)
++      {
++        oneShot = request;
++        continue;
++      }
++      request->served = false;
++      request->state = CaptureState::LATCHED;
+     }
+ 
+     // the latched one-shot forces frames until it serves or FrameComplete fails
+-    // it; a buried one-shot waits quietly and a lone CONTINUOUS never forces,
+-    // so unchanged frames are still skipped during a steady continuous capture
+-    if (latchedRequest && latchedRequest->spec.cadence == CaptureCadence::ONESHOT)
++    // it; continuous requests never force, so unchanged frames are still
++    // skipped during a steady continuous capture
++    if (oneShot)
++    {
++      oneShot->served = false; // FrameComplete judges this at the end of the frame
++      oneShot->state = CaptureState::LATCHED;
+       needsFrame = true;
++    }
+   }
+ 
+   return needsFrame;
+@@ -0,15 +0,13 @@
+ {
+   std::vector<std::shared_ptr<CaptureRequest>> matches;
+   std::unique_lock lock(m_lock);
+-  // exactly one request is LATCHED per frame; return it wherever it sits. A
+-  // BOTH request is served by the video tap and the composite tap alike.
++  // a BOTH request is served by the video tap and the composite tap alike
+   for (const auto& request : m_stack)
+   {
+     if (request->state != CaptureState::LATCHED)
+       continue;
+     if (request->spec.content == content || request->spec.content == CaptureContent::BOTH)
+       matches.push_back(request);
+-    break;
+   }
+   return matches;
+ }
+@@ -0,7 +0,6 @@
+         continue;
+       if (!request->served && request->spec.cadence == CaptureCadence::ONESHOT)
+         unserved = request;
+-      break; // at most one request is latched per frame
+     }
+   }
+ 
+diff --git a/xbmc/rendering/capture/CaptureService.h b/xbmc/rendering/capture/CaptureService.h
+--- a/xbmc/rendering/capture/CaptureService.h
++++ b/xbmc/rendering/capture/CaptureService.h
+@@ -0,14 +0,11 @@
+ /*!
+  \brief Registry of pixel-capture requests serviced by render-thread taps.
+ 
+- Arbitration: registered requests form a stack (last submitted on top) and
+- exactly ONE consumer is serviced per render loop, the most recent one (pure
+- LIFO). A one-shot submitted just before a continuous can be buried under it
+- and waits until the continuous is gone (a rare late/lost screenshot,
+- accepted). FrameComplete() fails a one-shot left unserved, so an unservable
+- one cannot force frames or hold the stack top forever; a continuous one
+- stays until cancelled, served or not. Effectively one continuous capture at
+- a time.
++ Arbitration: registered requests form a stack (last submitted on top).
++ Every render loop services every CONTINUOUS request and the newest ONESHOT;
++ older one-shots wait, newest first. FrameComplete() fails a one-shot left
++ unserved, so an unservable one cannot force frames or hold its turn forever;
++ a continuous one stays until cancelled, served or not.
+ 
+  Threading contract:
+  - Submit()/Cancel(): any thread; they never touch the graphics context.
+@@ -0,16 +0,15 @@
+   std::unique_ptr<CCaptureHandle> Submit(const CaptureSpec& spec, CaptureCallback callback = {});
+ 
+   //! Render thread, frame boundary: push newly submitted requests onto the
+-  //! stack, prune cancelled ones, and latch the stack top as this frame's
+-  //! serviced consumer.
++  //! stack, prune cancelled ones, and latch this frame's serviced consumers:
++  //! every CONTINUOUS request and the newest ONESHOT.
+   //! \return true when a frame must be forced: once per arriving request, and
+-  //! while the latched consumer is a ONESHOT (until it serves or FrameComplete
+-  //! fails it); a lone CONTINUOUS request never forces one, so unchanged frames
+-  //! are still skipped. The caller owns the dirty marking.
++  //! while a ONESHOT is latched (until it serves or FrameComplete fails it);
++  //! CONTINUOUS requests never force one, so unchanged frames are still
++  //! skipped. The caller owns the dirty marking.
+   bool LatchFrame();
+ 
+-  //! Render thread: the latched request this content's tap must service, if
+-  //! any (at most one request is latched per frame).
++  //! Render thread: the latched requests this content's tap must service.
+   std::vector<std::shared_ptr<CaptureRequest>> TakeActive(CaptureContent content);
+ 
+   //! Render thread: deliver a serviced request. ONESHOT requests finish;
+diff --git a/xbmc/rendering/capture/test/TestCaptureService.cpp b/xbmc/rendering/capture/test/TestCaptureService.cpp
+--- a/xbmc/rendering/capture/test/TestCaptureService.cpp
++++ b/xbmc/rendering/capture/test/TestCaptureService.cpp
+@@ -0,19 +0,39 @@
+   EXPECT_TRUE(m_service.TakeActive(CaptureContent::VIDEO).empty());
+ }
+ 
+-TEST_F(TestCaptureService, MostRecentRequestWins)
++TEST_F(TestCaptureService, EveryContinuousServed)
++{
++  CaptureSpec spec;
++  spec.cadence = CaptureCadence::CONTINUOUS;
++  auto lower = m_service.Submit(spec);
++  auto upper = m_service.Submit(spec);
++
++  m_service.LatchFrame();
++  auto active = m_service.TakeActive(CaptureContent::COMPOSITE);
++  ASSERT_EQ(active.size(), 2u);
++  m_service.Complete(active[0], MakeResult());
++  m_service.Complete(active[1], MakeResult());
++  EXPECT_TRUE(lower->WaitNext(1000ms));
++  EXPECT_TRUE(upper->WaitNext(1000ms));
++
++  // both stay served on the next loop
++  m_service.LatchFrame();
++  EXPECT_EQ(m_service.TakeActive(CaptureContent::COMPOSITE).size(), 2u);
++}
++
++TEST_F(TestCaptureService, OneShotUnderContinuousServed)
+ {
+-  // pure LIFO: the newest request is the serviced consumer whatever its
+-  // cadence, so a continuous submitted after a one-shot buries it (accepted).
+   auto oneshot = m_service.Submit({});
+   CaptureSpec cont;
+   cont.cadence = CaptureCadence::CONTINUOUS;
+-  auto continuous = m_service.Submit(cont); // most recent, sits on top
++  auto continuous = m_service.Submit(cont);
+ 
+-  m_service.LatchFrame();
++  // a continuous submitted after a one-shot no longer buries it
++  EXPECT_TRUE(m_service.LatchFrame());
+   auto active = m_service.TakeActive(CaptureContent::COMPOSITE);
+-  ASSERT_EQ(active.size(), 1u);
+-  EXPECT_EQ(active[0]->spec.cadence, CaptureCadence::CONTINUOUS);
++  ASSERT_EQ(active.size(), 2u);
++  EXPECT_EQ(active[0]->spec.cadence, CaptureCadence::ONESHOT);
++  EXPECT_EQ(active[1]->spec.cadence, CaptureCadence::CONTINUOUS);
+ }
+ 
+ TEST_F(TestCaptureService, WaitNextFalseOnCancel)
+@@ -0,7 +0,7 @@
+   EXPECT_EQ(handle->GetState(), CaptureState::DONE);
+ }
+ 
+-TEST_F(TestCaptureService, OneShotPreemptsContinuous)
++TEST_F(TestCaptureService, OneShotServedBesideContinuous)
+ {
+   CaptureSpec spec;
+   spec.cadence = CaptureCadence::CONTINUOUS;
+@@ -0,20 +0,21 @@
+   auto oneshot = m_service.Submit({});
+   m_service.LatchFrame();
+ 
+-  // the one-shot pushed onto the stack top; only it is serviced this loop
++  // the continuous request keeps its delivery in the one-shot's frame
+   auto active = m_service.TakeActive(CaptureContent::COMPOSITE);
+-  ASSERT_EQ(active.size(), 1u);
+-  EXPECT_EQ(active[0]->spec.cadence, CaptureCadence::ONESHOT);
++  ASSERT_EQ(active.size(), 2u);
++  EXPECT_EQ(active[0]->spec.cadence, CaptureCadence::CONTINUOUS);
++  EXPECT_EQ(active[1]->spec.cadence, CaptureCadence::ONESHOT);
+   m_service.Complete(active[0], MakeResult());
++  m_service.Complete(active[1], MakeResult());
++  EXPECT_TRUE(continuous->WaitNext(1000ms));
+   EXPECT_TRUE(oneshot->Wait(1000ms));
+ 
+-  // the continuous request resumes as stack top on the next loop
++  // only the continuous request remains
+   m_service.LatchFrame();
+   active = m_service.TakeActive(CaptureContent::COMPOSITE);
+   ASSERT_EQ(active.size(), 1u);
+   EXPECT_EQ(active[0]->spec.cadence, CaptureCadence::CONTINUOUS);
+-  m_service.Complete(active[0], MakeResult());
+-  EXPECT_TRUE(continuous->WaitNext(1000ms));
+ }
+ 
+ TEST_F(TestCaptureService, StackedOneShotsServeNewestFirst)

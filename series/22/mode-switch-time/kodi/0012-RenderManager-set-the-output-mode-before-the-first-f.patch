@@ -10,11 +10,11 @@ An earlier set needs the meson_hdmi same-mode check and its amdv
 output query, which decide the DV link format before the first frame.
 ---
  xbmc/cores/VideoPlayer/VideoPlayer.cpp        |  5 ++
- .../VideoRenderers/RenderManager.cpp          | 49 ++++++++++++++-----
+ .../VideoRenderers/RenderManager.cpp          | 51 ++++++++++++++-----
  .../VideoRenderers/RenderManager.h            |  7 ++-
  xbmc/utils/AMLUtils.cpp                       | 12 -----
  xbmc/utils/AMLUtils.h                         |  1 -
- 5 files changed, 47 insertions(+), 27 deletions(-)
+ 5 files changed, 49 insertions(+), 27 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
@@ -105,6 +105,15 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/core
        StartPresentThread();
        // the release lead a waiter reads depends on whether the vsync presenter runs
        m_stateEvent.Set();
+@@ -0,6 +0,8 @@
+   DeleteRenderer();
+ 
+   m_renderState = STATE_UNCONFIGURED;
++  // ends a Configure that waits for this stream
++  m_stateEvent.Set();
+   m_dvdClock.GetVsyncPhase().SetPhasePeriod(0);
+   m_picture.Reset();
+   m_bRenderGUI = false;
 @@ -0,15 +0,14 @@
      {
        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - m_videostarted);

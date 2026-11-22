@@ -5,52 +5,14 @@ Subject: [PATCH] VideoPlayerVideo: serve messages while a decoder drains
 
 A decoder can hold many seconds of pictures after its input ends.
 The drain loops took them all in one message, so a seek or resync
-behind it waited for the last one. Video read as unfinished after a
-reset. It could read as finished while a drain was still queued or
-being handled.
+behind it waited for the last one.
 ---
- xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp | 101 ++++++++++----------
- xbmc/cores/VideoPlayer/VideoPlayerVideo.h   |   3 +-
- 2 files changed, 52 insertions(+), 52 deletions(-)
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp | 80 +++++++++------------
+ 1 file changed, 33 insertions(+), 47 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
 --- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
-@@ -0,7 +0,7 @@
-   m_hints = hint;
-   m_stalled = m_messageQueue.GetPacketCount(CDVDMsg::DEMUXER_PACKET) == 0;
-   m_rewindStalled = false;
--  m_eos = false;
-+  m_eos = true;
-   m_packets.clear();
-   m_syncState = IDVDStreamPlayer::SYNC_STARTING;
-   ResetSeekDrop();
-@@ -0,6 +0,11 @@
-   return m_messageQueue.GetDataSize() > 0;
- }
- 
-+bool CVideoPlayerVideo::IsEOS()
-+{
-+  return m_eos && m_pendingDrains == 0;
-+}
-+
- bool CVideoPlayerVideo::IsInited() const
- {
-   return m_messageQueue.IsInited();
-@@ -0,6 +0,13 @@
-   // a queued packet is data the last drain did not cover
-   if (pMsg->IsType(CDVDMsg::DEMUXER_PACKET))
-     m_eos = false;
-+  // a drain is pending until its message is gone, after its handler set m_eos or in a flush
-+  else if (pMsg->IsType(CDVDMsg::VIDEO_DRAIN))
-+  {
-+    ++m_pendingDrains;
-+    pMsg =
-+        std::shared_ptr<CDVDMsg>(pMsg.get(), [this, msg = pMsg](CDVDMsg*) { --m_pendingDrains; });
-+  }
-   m_messageQueue.Put(pMsg, priority);
-   m_processInfo.SetLevelVQ(m_messageQueue.GetLevel());
- }
 @@ -0,6 +0,30 @@
    bool onlyPrioMsgs = false;
    bool drainWait = false;
@@ -117,34 +79,6 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlaye
        {
          m_picture.pts = pts;
          m_outputSate = OutputPicture(&m_picture);
-@@ -0,7 +0,7 @@
-       m_syncState = IDVDStreamPlayer::SYNC_STARTING;
-       m_renderManager.ShowVideo(false);
-       m_rewindStalled = false;
--      m_eos = false;
-+      m_eos = true;
-     }
-     else if (pMsg->IsType(CDVDMsg::GENERAL_FLUSH)) // private message sent by (CVideoPlayerVideo::Flush())
-     {
-@@ -0,8 +0,6 @@
-       pts = 0;
-       m_rewindStalled = false;
-       ResetSeekDrop();
--      // the flush drops a queued drain with the packets it was for, the reset decoder is drained
--      m_eos = m_messageQueue.GetPacketCount(CDVDMsg::VIDEO_DRAIN) > 0;
- 
-       m_ptsTracker.Flush();
-       //we need to recalculate the framerate
-@@ -0,6 +0,9 @@
- 
-       m_renderManager.DiscardBuffer();
-       FlushMessages();
-+      // the reset decoder has nothing left, whichever drain the flush dropped; a packet that
-+      // survives clears this when it is taken, a drain sent later is pending
-+      m_eos = true;
-     }
-     else if (pMsg->IsType(CDVDMsg::PLAYER_SETSPEED))
-     {
 @@ -0,14 +0,8 @@
      {
        auto msg = std::static_pointer_cast<CDVDMsgVideoCodecChange>(pMsg);
@@ -195,23 +129,3 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlaye
      }
      else if (pMsg->IsType(CDVDMsg::GENERAL_PAUSE))
      {
-diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.h b/xbmc/cores/VideoPlayer/VideoPlayerVideo.h
---- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.h
-+++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.h
-@@ -0,7 +0,7 @@
-   void SetSubtitleDelay(double delay) override { m_iSubtitleDelay = delay; }
-   bool IsStalled() const override { return m_stalled; }
-   bool IsRewindStalled() const override { return m_rewindStalled; }
--  bool IsEOS() override { return m_eos; }
-+  bool IsEOS() override;
-   double GetCurrentPts() override;
-   double GetOutputDelay() override; /* returns the expected delay, from that a packet is put in queue */
-   std::string GetPlayerInfo() override;
-@@ -0,6 +0,7 @@
- 
-   BitstreamStats m_videoStats;
- 
-+  std::atomic<int> m_pendingDrains{0};
-   CDVDMessageQueue m_messageQueue;
-   CDVDMessageQueue& m_messageParent;
-   CDVDStreamInfo m_hints;

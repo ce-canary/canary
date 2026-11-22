@@ -3,10 +3,10 @@ From: matthane <matthan.evans@icloud.com>
 Date: Mon, 2 Nov 2026 00:28:19 -0600
 Subject: [PATCH] ActiveAE: keep sample buffer timestamps in fractional ms
 
-A sample buffer stores its pts in whole milliseconds, and the resampler
-steps it in whole milliseconds, cutting fractions toward zero. The sync
-error then reads off and the start pad falls short: audio plays almost
-1 ms early for TrueHD from the MAT packer, 0.5 ms for 90 kHz pts.
+A sample buffer stores its pts in whole milliseconds, and the resample
+and tempo pools step it in whole milliseconds, cutting fractions toward
+zero. The sync error then reads the audio late by the cut fractions,
+and the start is corrected that early, by up to 1 ms.
 ---
  .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp  |  3 ++-
  .../Engines/ActiveAE/ActiveAEBuffer.cpp        | 18 ++++++++----------

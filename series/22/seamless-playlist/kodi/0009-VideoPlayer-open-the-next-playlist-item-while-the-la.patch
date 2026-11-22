@@ -1,0 +1,719 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 17:00:09 -0600
+Subject: [PATCH] VideoPlayer: open the next playlist item while the last plays
+ out
+
+A parked player opens the next item's input and demuxer only when the
+application plays it, so the type lookup, connect, cache fill and probe
+all run while the old picture is held. The old item's input ended
+seconds earlier, and nothing reads during its play out.
+---
+ .../DVDDemuxers/DVDFactoryDemuxer.cpp         |  32 ++-
+ .../DVDDemuxers/DVDFactoryDemuxer.h           |   3 +
+ .../DVDInputStreams/DVDFactoryInputStream.cpp | 194 +++++++++-----
+ .../DVDInputStreams/DVDFactoryInputStream.h   |   5 +
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 247 +++++++++++++++++-
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  13 +
+ 6 files changed, 415 insertions(+), 79 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.cpp b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.cpp
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.cpp
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.cpp
+@@ -0,12 +0,38 @@
+ #include "utils/URIUtils.h"
+ #include "utils/log.h"
+ 
++namespace
++{
++CDVDDemux* OpenFFmpeg(const std::shared_ptr<CDVDInputStream>& pInputStream,
++                      bool streaminfo,
++                      bool fileinfo)
++{
++  std::unique_ptr<CDVDDemuxFFmpeg> demuxer(new CDVDDemuxFFmpeg());
++  if (demuxer->Open(pInputStream, streaminfo, fileinfo))
++    return demuxer.release();
++  else
++    return NULL;
++}
++} // namespace
++
++bool CDVDFactoryDemuxer::IsFFmpegFile(const std::shared_ptr<CDVDInputStream>& pInputStream)
++{
++  return pInputStream->IsStreamType(DVDSTREAM_TYPE_FILE) &&
++         pInputStream->GetContent() != "audio/x-xbmc-pcm" &&
++         !(pInputStream->GetContent() == "application/octet-stream" &&
++           pInputStream->GetFileName().starts_with("cdda://")) &&
++         !pInputStream->GetIDemux();
++}
++
+ CDVDDemux* CDVDFactoryDemuxer::CreateDemuxer(const std::shared_ptr<CDVDInputStream>& pInputStream,
+                                              bool fileinfo)
+ {
+   if (!pInputStream)
+     return NULL;
+ 
++  if (IsFFmpegFile(pInputStream))
++    return OpenFFmpeg(pInputStream, true, fileinfo);
++
+   // Try to open the AirTunes demuxer
+   if (pInputStream->IsStreamType(DVDSTREAM_TYPE_FILE) && pInputStream->GetContent().compare("audio/x-xbmc-pcm") == 0 )
+   {
+@@ -0,10 +0,6 @@
+       return NULL;
+   }
+ 
+-  std::unique_ptr<CDVDDemuxFFmpeg> demuxer(new CDVDDemuxFFmpeg());
+-  if (demuxer->Open(pInputStream, streaminfo, fileinfo))
+-    return demuxer.release();
+-  else
+-    return NULL;
++  return OpenFFmpeg(pInputStream, streaminfo, fileinfo);
+ }
+ 
+diff --git a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.h b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.h
+--- a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.h
++++ b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.h
+@@ -0,4 +0,7 @@
+ public:
+   static CDVDDemux* CreateDemuxer(const std::shared_ptr<CDVDInputStream>& pInputStream,
+                                   bool fileinfo = false);
++
++  // Whether CreateDemuxer opens the input as a file in a CDVDDemuxFFmpeg with stream info.
++  static bool IsFFmpegFile(const std::shared_ptr<CDVDInputStream>& pInputStream);
+ };
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDFactoryInputStream.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDFactoryInputStream.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDFactoryInputStream.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDFactoryInputStream.cpp
+@@ -0,84 +0,71 @@
+ 
+ using namespace KODI;
+ 
+-std::shared_ptr<CDVDInputStream> CDVDFactoryInputStream::CreateInputStream(IVideoPlayer* pPlayer, const CFileItem &fileitem, bool scanforextaudio)
++namespace
+ {
+-  using namespace ADDON;
++// an internet stream that FFmpeg opens itself
++bool IsFFmpegStream(const CFileItem& fileitem)
++{
++  return fileitem.IsType(".m3u8") || fileitem.GetMimeType() == "application/vnd.apple.mpegurl" ||
++         fileitem.GetMimeType() == "application/x-mpegURL" ||
++         URIUtils::IsProtocol(fileitem.GetPath(), "udp");
++}
+ 
+-  const std::string& file = fileitem.GetDynPath();
+-  if (scanforextaudio)
+-  {
+-    // find any available external audio tracks
+-    std::vector<std::string> filenames;
+-    filenames.push_back(file);
+-    CUtil::ScanForExternalAudio(file, filenames,
+-                                fileitem.HasVideoInfoTag() ? fileitem.GetVideoInfoTag() : nullptr);
+-    if (filenames.size() >= 2)
+-    {
+-      return CreateInputStream(pPlayer, fileitem, filenames);
+-    }
+-  }
++enum class InputType
++{
++  ADDON,
++  FFMPEG,
++  DISC_IMAGE,
++#ifdef HAS_OPTICAL_DRIVE
++  OPTICAL_DRIVE,
++#endif
++  DVD,
++  PVR_CHANNEL,
++  PVR_RECORDING,
++#ifdef HAVE_LIBBLURAY
++  BLURAY,
++#endif
++  FILE,
++};
+ 
+-  std::vector<AddonInfoPtr> addonInfos;
++// a FILE item that is an internet stream can still open in FFmpeg once its redirects resolve
++InputType GetInputType(const CFileItem& fileitem, ADDON::AddonInfoPtr& addonInfo)
++{
++  const std::string& file = fileitem.GetDynPath();
++  std::vector<ADDON::AddonInfoPtr> addonInfos;
+   CServiceBroker::GetAddonMgr().GetAddonInfos(addonInfos, true /*enabled only*/,
+-                                              AddonType::INPUTSTREAM);
+-  for (const auto& addonInfo : addonInfos)
++                                              ADDON::AddonType::INPUTSTREAM);
++  for (const auto& info : addonInfos)
+   {
+-    if (CInputStreamAddon::Supports(addonInfo, fileitem))
++    if (CInputStreamAddon::Supports(info, fileitem))
+     {
+-      // Used to inform input stream about special identifier;
+-      const std::string instanceId =
+-          fileitem.GetProperty(STREAM_PROPERTY_INPUTSTREAM_INSTANCE_ID).asString();
+-
+-      return std::make_shared<CInputStreamAddon>(addonInfo, pPlayer, fileitem, instanceId);
++      addonInfo = info;
++      return InputType::ADDON;
+     }
+   }
+ 
+   if (fileitem.GetProperty(STREAM_PROPERTY_INPUTSTREAM).asString() ==
+       STREAM_PROPERTY_VALUE_INPUTSTREAMFFMPEG)
+-    return std::make_shared<CDVDInputStreamFFmpeg>(fileitem);
++    return InputType::FFMPEG;
+ 
+   if (fileitem.IsDiscImage())
+-  {
+-#ifdef HAVE_LIBBLURAY
+-    CURL url("udf://");
+-    url.SetHostName(file);
+-    url.SetFileName("BDMV/index.bdmv");
+-    if (CFileUtils::Exists(url.Get()))
+-      return std::make_shared<CDVDInputStreamBluray>(pPlayer, fileitem);
+-    url.SetHostName(file);
+-    url.SetFileName("BDMV/INDEX.BDM");
+-    if (CFileUtils::Exists(url.Get()))
+-      return std::make_shared<CDVDInputStreamBluray>(pPlayer, fileitem);
+-#endif
+-
+-    return std::make_shared<CDVDInputStreamNavigator>(pPlayer, fileitem);
+-  }
++    return InputType::DISC_IMAGE;
+ 
+ #ifdef HAS_OPTICAL_DRIVE
+   if (file.compare(CServiceBroker::GetMediaManager().TranslateDevicePath("")) == 0)
+-  {
+-#ifdef HAVE_LIBBLURAY
+-    if (CFileUtils::Exists(URIUtils::AddFileToFolder(file, "BDMV", "index.bdmv")) ||
+-        CFileUtils::Exists(URIUtils::AddFileToFolder(file, "BDMV", "INDEX.BDM")))
+-      return std::make_shared<CDVDInputStreamBluray>(pPlayer, fileitem);
+-#endif
+-
+-    return std::make_shared<CDVDInputStreamNavigator>(pPlayer, fileitem);
+-  }
++    return InputType::OPTICAL_DRIVE;
+ #endif
+ 
+   if (VIDEO::IsDVDFile(fileitem, false, true))
+-    return std::make_shared<CDVDInputStreamNavigator>(pPlayer, fileitem);
++    return InputType::DVD;
+   else if (URIUtils::IsPVRChannel(file))
+-    return std::make_shared<CInputStreamPVRChannel>(fileitem);
++    return InputType::PVR_CHANNEL;
+   else if (URIUtils::IsPVRRecording(file))
+-    return std::make_shared<CInputStreamPVRRecording>(fileitem);
++    return InputType::PVR_RECORDING;
+ #ifdef HAVE_LIBBLURAY
+-  else if (fileitem.IsType(".bdmv") || fileitem.IsType(".mpls")
+-          || fileitem.IsType(".bdm") || fileitem.IsType(".mpl")
+-          || StringUtils::StartsWithNoCase(file, "bluray:"))
+-    return std::make_shared<CDVDInputStreamBluray>(pPlayer, fileitem);
++  else if (fileitem.IsType(".bdmv") || fileitem.IsType(".mpls") || fileitem.IsType(".bdm") ||
++           fileitem.IsType(".mpl") || StringUtils::StartsWithNoCase(file, "bluray:"))
++    return InputType::BLURAY;
+ #endif
+   else if (StringUtils::StartsWithNoCase(file, "rtp://") ||
+            StringUtils::StartsWithNoCase(file, "rtsp://") ||
+@@ -0,8 +0,83 @@
+            StringUtils::StartsWithNoCase(file, "rtmpe://") ||
+            StringUtils::StartsWithNoCase(file, "rtmpte://") ||
+            StringUtils::StartsWithNoCase(file, "rtmps://"))
++    return InputType::FFMPEG;
++
++  return InputType::FILE;
++}
++} // namespace
++
++std::shared_ptr<CDVDInputStream> CDVDFactoryInputStream::CreateInputStream(IVideoPlayer* pPlayer, const CFileItem &fileitem, bool scanforextaudio)
++{
++  using namespace ADDON;
++
++  const std::string& file = fileitem.GetDynPath();
++  if (scanforextaudio)
+   {
+-    return std::make_shared<CDVDInputStreamFFmpeg>(fileitem);
++    // find any available external audio tracks
++    std::vector<std::string> filenames;
++    filenames.push_back(file);
++    CUtil::ScanForExternalAudio(file, filenames,
++                                fileitem.HasVideoInfoTag() ? fileitem.GetVideoInfoTag() : nullptr);
++    if (filenames.size() >= 2)
++    {
++      return CreateInputStream(pPlayer, fileitem, filenames);
++    }
++  }
++
++  AddonInfoPtr addonInfo;
++  switch (GetInputType(fileitem, addonInfo))
++  {
++    case InputType::ADDON:
++    {
++      // Used to inform input stream about special identifier;
++      const std::string instanceId =
++          fileitem.GetProperty(STREAM_PROPERTY_INPUTSTREAM_INSTANCE_ID).asString();
++
++      return std::make_shared<CInputStreamAddon>(addonInfo, pPlayer, fileitem, instanceId);
++    }
++    case InputType::FFMPEG:
++      return std::make_shared<CDVDInputStreamFFmpeg>(fileitem);
++    case InputType::DISC_IMAGE:
++    {
++#ifdef HAVE_LIBBLURAY
++      CURL url("udf://");
++      url.SetHostName(file);
++      url.SetFileName("BDMV/index.bdmv");
++      if (CFileUtils::Exists(url.Get()))
++        return std::make_shared<CDVDInputStreamBluray>(pPlayer, fileitem);
++      url.SetHostName(file);
++      url.SetFileName("BDMV/INDEX.BDM");
++      if (CFileUtils::Exists(url.Get()))
++        return std::make_shared<CDVDInputStreamBluray>(pPlayer, fileitem);
++#endif
++
++      return std::make_shared<CDVDInputStreamNavigator>(pPlayer, fileitem);
++    }
++#ifdef HAS_OPTICAL_DRIVE
++    case InputType::OPTICAL_DRIVE:
++    {
++#ifdef HAVE_LIBBLURAY
++      if (CFileUtils::Exists(URIUtils::AddFileToFolder(file, "BDMV", "index.bdmv")) ||
++          CFileUtils::Exists(URIUtils::AddFileToFolder(file, "BDMV", "INDEX.BDM")))
++        return std::make_shared<CDVDInputStreamBluray>(pPlayer, fileitem);
++#endif
++
++      return std::make_shared<CDVDInputStreamNavigator>(pPlayer, fileitem);
++    }
++#endif
++    case InputType::DVD:
++      return std::make_shared<CDVDInputStreamNavigator>(pPlayer, fileitem);
++    case InputType::PVR_CHANNEL:
++      return std::make_shared<CInputStreamPVRChannel>(fileitem);
++    case InputType::PVR_RECORDING:
++      return std::make_shared<CInputStreamPVRRecording>(fileitem);
++#ifdef HAVE_LIBBLURAY
++    case InputType::BLURAY:
++      return std::make_shared<CDVDInputStreamBluray>(pPlayer, fileitem);
++#endif
++    case InputType::FILE:
++      break;
+   }
+ 
+   CFileItem finalFileitem(fileitem);
+@@ -0,15 +0,7 @@
+       }
+     }
+ 
+-    if (finalFileitem.IsType(".m3u8"))
+-      return std::make_shared<CDVDInputStreamFFmpeg>(finalFileitem);
+-
+-    // mime type for m3u8/hls streams
+-    if (finalFileitem.GetMimeType() == "application/vnd.apple.mpegurl" ||
+-        finalFileitem.GetMimeType() == "application/x-mpegURL")
+-      return std::make_shared<CDVDInputStreamFFmpeg>(finalFileitem);
+-
+-    if (URIUtils::IsProtocol(finalFileitem.GetPath(), "udp"))
++    if (IsFFmpegStream(finalFileitem))
+       return std::make_shared<CDVDInputStreamFFmpeg>(finalFileitem);
+   }
+ 
+@@ -0,6 +0,14 @@
+                                                XFILE::READ_TRUNCATED | XFILE::READ_BITRATE);
+ }
+ 
++bool CDVDFactoryInputStream::IsPlainFile(const CFileItem& fileitem)
++{
++  ADDON::AddonInfoPtr addonInfo;
++  return GetInputType(fileitem, addonInfo) == InputType::FILE &&
++         !URIUtils::IsStack(fileitem.GetDynPath()) &&
++         !(NETWORK::IsInternetStream(fileitem) && IsFFmpegStream(fileitem));
++}
++
+ std::shared_ptr<CDVDInputStream> CDVDFactoryInputStream::CreateInputStream(IVideoPlayer* pPlayer, const CFileItem &fileitem, const std::vector<std::string>& filenames)
+ {
+   return std::make_shared<CInputStreamMultiSource>(pPlayer, fileitem, filenames);
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDFactoryInputStream.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDFactoryInputStream.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDFactoryInputStream.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDFactoryInputStream.h
+@@ -0,4 +0,9 @@
+ public:
+   static std::shared_ptr<CDVDInputStream> CreateInputStream(IVideoPlayer* pPlayer, const CFileItem &fileitem, bool scanforextaudio = false);
+   static std::shared_ptr<CDVDInputStream> CreateInputStream(IVideoPlayer* pPlayer, const CFileItem &fileitem, const std::vector<std::string>& filenames);
++
++  // Whether the item opens as one plain file input, decided without constructing anything.
++  // External audio files and a redirect to a stream still change the input, so a caller checks
++  // the one it creates.
++  static bool IsPlainFile(const CFileItem& fileitem);
+ };
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,7 @@
+ #include "input/actions/Action.h"
+ #include "input/actions/ActionIDs.h"
+ #include "interfaces/AnnouncementManager.h"
++#include "jobs/JobManager.h"
+ #include "jobs/JobQueue.h"
+ #include "messaging/ApplicationMessenger.h"
+ #include "resources/LocalizeStrings.h"
+@@ -0,7 +0,11 @@
+ 
+   CLog::Log(LOGINFO, "Creating InputStream");
+ 
+-  m_pInputStream = CDVDFactoryInputStream::CreateInputStream(this, m_item, true);
++  const bool prepared{m_preparedInput != nullptr};
++  if (prepared)
++    m_pInputStream = std::move(m_preparedInput);
++  else
++    m_pInputStream = CDVDFactoryInputStream::CreateInputStream(this, m_item, true);
+   if (m_pInputStream == nullptr)
+   {
+     CLog::Log(LOGERROR, "CVideoPlayer::OpenInputStream - unable to create input stream for [{}]",
+@@ -0,7 +0,7 @@
+     return false;
+   }
+ 
+-  if (!m_pInputStream->Open())
++  if (!prepared && !m_pInputStream->Open())
+   {
+     CLog::Log(LOGERROR, "CVideoPlayer::OpenInputStream - error opening [{}]",
+               CURL::GetRedacted(m_item.GetPath()));
+@@ -0,7 +0,10 @@
+   int attempts = 10;
+   while (!m_bStop && attempts-- > 0)
+   {
+-    m_pDemuxer.reset(CDVDFactoryDemuxer::CreateDemuxer(m_pInputStream));
++    if (m_preparedDemuxer)
++      m_pDemuxer = std::move(m_preparedDemuxer);
++    else
++      m_pDemuxer.reset(CDVDFactoryDemuxer::CreateDemuxer(m_pInputStream));
+     if(!m_pDemuxer && m_pInputStream->IsStreamType(DVDSTREAM_TYPE_PVRMANAGER))
+     {
+       continue;
+@@ -0,6 +0,145 @@
+   SetCaching(CACHESTATE_FLUSH);
+ }
+ 
++bool CVideoPlayer::CanPark() const
++{
++  // menu and live inputs, and a video decoder of the input itself, end as they did
++  return !m_error && !std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream) &&
++         !m_item.IsPVR() && !m_item.IsLiveTV() && !m_item.IsEPG() &&
++         !m_CurrentVideo.hint.externalInterfaces;
++}
++
++struct CVideoPlayer::PrefetchSlot
++{
++  // with section held
++  void Cancel()
++  {
++    cancelled = true;
++    if (opening)
++      opening->Abort();
++  }
++
++  CCriticalSection section;
++  CEvent done{true};
++  CFileItem item;
++  bool started{false};
++  bool cancelled{false};
++  //! the demuxer the job probes with, set only while its open runs
++  CDVDDemux* opening{nullptr};
++  std::string mimeType;
++  std::shared_ptr<CDVDInputStream> input;
++  std::unique_ptr<CDVDDemux> demuxer;
++};
++
++void CVideoPlayer::PrefetchNextFile(const CFileItem& file)
++{
++  std::unique_lock lock(m_prefetchSection);
++  if (!m_prefetchAsked || m_prefetch)
++    return;
++
++  m_prefetch = std::make_shared<PrefetchSlot>();
++  m_prefetch->item = file;
++  CServiceBroker::GetJobManager()->Submit([slot = m_prefetch]() { Prefetch(slot); },
++                                          CJob::PRIORITY_NORMAL);
++}
++
++// Opens the input and demuxer of the slot's item as the open of a plain file does, on a job
++// thread. A slot dropped before the job ends gets nothing, and the job releases what it opened.
++void CVideoPlayer::Prefetch(const std::shared_ptr<PrefetchSlot>& slot)
++{
++  const auto cancelled = [&slot]()
++  {
++    std::unique_lock lock(slot->section);
++    return slot->cancelled;
++  };
++
++  CFileItem item;
++  {
++    std::unique_lock lock(slot->section);
++    if (slot->cancelled)
++    {
++      slot->done.Set();
++      return;
++    }
++    slot->started = true;
++    item = slot->item;
++  }
++
++  CFFmpegLog::SetLogLevel(1);
++  std::shared_ptr<CDVDInputStream> input;
++  std::unique_ptr<CDVDDemuxFFmpeg> demuxer;
++  const std::string_view failure = [&]() -> std::string_view
++  {
++    // typed as the application and the player type it
++    item.SetMimeTypeForInternetFile();
++    if (item.GetMimeType().empty())
++      item.FillInMimeType();
++
++    if (CDVDFactoryInputStream::IsPlainFile(item))
++      input = CDVDFactoryInputStream::CreateInputStream(nullptr, item);
++    if (!input || !input->IsStreamType(DVDSTREAM_TYPE_FILE))
++      return "it is not a plain file";
++    if (cancelled())
++      return "it was dropped";
++    // the open at the join tries again, as a source that is waking up may answer by then
++    if (!input->Open())
++      return "its input did not open";
++    // a live stream would play from where it was opened
++    if (input->GetLength() <= 0)
++      return "its length is unknown";
++    if (!CDVDFactoryDemuxer::IsFFmpegFile(input))
++      return "it has its own demuxer";
++
++    demuxer = std::make_unique<CDVDDemuxFFmpeg>();
++    {
++      std::unique_lock lock(slot->section);
++      if (slot->cancelled)
++        return "it was dropped";
++      slot->opening = demuxer.get();
++    }
++    const bool opened{demuxer->Open(input, true, false)};
++    {
++      std::unique_lock lock(slot->section);
++      slot->opening = nullptr;
++    }
++    if (!opened)
++      return "its demuxer did not open";
++    const int64_t time = demuxer->GetStreamLength();
++    if (time > 0)
++      input->SetReadRate(static_cast<uint32_t>(input->GetLength() * 1000 / time));
++    return {};
++  }();
++  CFFmpegLog::ClearLogLevel();
++
++  if (!failure.empty())
++    CLog::Log(LOGDEBUG, "VideoPlayer: the next item was not prepared, {}", failure);
++
++  std::unique_lock lock(slot->section);
++  if (!slot->cancelled && failure.empty())
++  {
++    slot->mimeType = item.GetMimeType();
++    slot->input = std::move(input);
++    slot->demuxer = std::move(demuxer);
++  }
++  slot->done.Set();
++}
++
++void CVideoPlayer::CancelPrefetch(std::string_view reason)
++{
++  std::shared_ptr<PrefetchSlot> slot;
++  {
++    std::unique_lock lock(m_prefetchSection);
++    slot = std::move(m_prefetch);
++    m_prefetchAsked = false;
++  }
++  if (!slot)
++    return;
++
++  std::unique_lock lock(slot->section);
++  slot->Cancel();
++  CLog::Log(LOGDEBUG, "VideoPlayer: dropping the next item's prepared input, {}", reason);
++}
++
+ void CVideoPlayer::Process()
+ {
+   // Try to resolve the correct mime type. This can take some time, for example if a requested
+@@ -0,6 +0,18 @@
+         continue;
+       }
+ 
++      // the next item's input opens while this one plays out, which a pause stops
++      if (CanPark() && m_playSpeed != DVD_PLAYSPEED_PAUSE)
++      {
++        std::unique_lock lock(m_prefetchSection);
++        if (!m_prefetchAsked)
++        {
++          m_prefetchAsked = true;
++          IPlayerCallback* cb = &m_callback;
++          m_outboundEvents->Submit([cb]() { cb->OnPrefetchNextItem(); });
++        }
++      }
++
+       // while players are still playing, keep going to allow seekbacks; pictures left in the
+       // decoder are not in its queue, and only the decoder knows when it has shown them
+       if (m_VideoPlayerAudio->HasData() ||
+@@ -0,10 +0,7 @@
+       // at the end of a played out item, report its close and end as OnExit does and wait for
+       // the next item to open in this player; the video stream stays open, so its decoder keeps
+       // the last picture
+-      // menu and live inputs, and a video decoder of the input itself, end as they did
+-      if (m_error || std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream) ||
+-          m_item.IsPVR() || m_item.IsLiveTV() || m_item.IsEPG() ||
+-          m_CurrentVideo.hint.externalInterfaces)
++      if (!CanPark())
+         break;
+ 
+       // the audio plays out before it closes, as at the end of a file
+@@ -0,8 +0,11 @@
+     m_outboundEvents->Submit([=]() { cb->OnPlayerCloseFile(fileItem, bookmark); });
+ 
+   // destroy objects
++  CancelPrefetch("the player stops");
+   m_renderManager.Flush(false, false);
+   m_pDemuxer.reset();
++  m_preparedDemuxer.reset();
++  m_preparedInput.reset();
+   m_pSubtitleDemuxer.reset();
+   m_subtitleDemuxerMap.clear();
+   m_pCCDemuxer.reset();
+@@ -0,8 +0,74 @@
+         m_outboundEvents->Submit([=]() { cb->OnPlayerCloseFile(fileItem, bookmark); });
+ 
+       m_item = msg.GetItem();
++      // a joined open takes the input and demuxer prepared for the item, typed as the prefetch
++      // typed it, once a prefetch that started is done
++      std::shared_ptr<PrefetchSlot> slot;
++      if (joined)
++      {
++        std::unique_lock lock(m_prefetchSection);
++        slot = std::move(m_prefetch);
++        m_prefetchAsked = false;
++      }
++      bool prepared{false};
++      if (slot)
++      {
++        std::string_view reason;
++        {
++          std::unique_lock lock(slot->section);
++          // a job that waits for a worker could take longer than the open itself
++          if (!slot->started)
++            reason = "it did not start";
++          // the input and demuxer open from these item fields; the mime type is compared apart
++          else if (!(slot->item.GetDynPath() == m_item.GetDynPath() &&
++                     slot->item.ContentLookup() == m_item.ContentLookup() &&
++                     slot->item.GetProperties() == m_item.GetProperties()))
++            reason = "another item opens";
++        }
++
++        if (reason.empty())
++        {
++          // the played item can carry a library tag the hinted one lacked, and it picks audio files
++          std::vector<std::string> filenames{m_item.GetDynPath()};
++          CUtil::ScanForExternalAudio(m_item.GetDynPath(), filenames,
++                                      m_item.HasVideoInfoTag() ? m_item.GetVideoInfoTag()
++                                                               : nullptr);
++          if (filenames.size() >= 2)
++            reason = "it has external audio";
++        }
++
++        if (reason.empty() && AbortableWait(slot->done) != WAIT_SIGNALED)
++          reason = "the player stops";
++
++        if (reason.empty())
++        {
++          std::unique_lock lock(slot->section);
++          if (!slot->input)
++            reason = "it was not prepared";
++          // the open types an internet item by a lookup, which the prefetch made too
++          else if (slot->mimeType != m_item.GetMimeType() &&
++                   !(m_item.ContentLookup() && NETWORK::IsInternetStream(m_item)))
++            reason = "its type differs";
++        }
++
++        std::unique_lock lock(slot->section);
++        if (!reason.empty())
++        {
++          slot->Cancel();
++          CLog::Log(LOGDEBUG, "VideoPlayer: dropping the next item's prepared input, {}", reason);
++        }
++        else
++        {
++          CLog::Log(LOGINFO, "VideoPlayer: opening the next item from its prepared input");
++          m_item.SetMimeType(slot->mimeType);
++          m_preparedInput = std::move(slot->input);
++          m_preparedDemuxer = std::move(slot->demuxer);
++          prepared = true;
++        }
++      }
+       // resolved here, as for a fresh start, so the caller does not wait for a lookup
+-      m_item.SetMimeTypeForInternetFile();
++      if (!prepared)
++        m_item.SetMimeTypeForInternetFile();
+       m_playerOptions = msg.GetOptions();
+ 
+       m_processInfo->SetPlayTimes(0,0,0,0);
+@@ -0,6 +0,10 @@
+         m_stateClock = GetCaughtUpClock();
+       }
+ 
++      // a paused play out does not end, and the next item's cache would fill for the whole pause
++      if (speed == DVD_PLAYSPEED_PAUSE)
++        CancelPrefetch("the player pauses");
++
+       if (speed != DVD_PLAYSPEED_PAUSE && m_playSpeed != DVD_PLAYSPEED_PAUSE && speed != m_playSpeed)
+       {
+         m_callback.OnPlayBackSpeedChanged(speed / DVD_PLAYSPEED_NORMAL);
+@@ -0,6 +0,8 @@
+ {
+   // a nav stop finds the players empty when nothing was sent to them since the last sync flush
+   const bool flushPlayers = !nav || !m_playersFlushed;
++  // the old input reads again, or another item opens
++  CancelPrefetch("the player flushes");
+   m_syncStartPtsWait.reset();
+   m_seekStart = false;
+   m_navTail = false;
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+ #include <functional>
+ #include <memory>
+ #include <optional>
++#include <string_view>
+ #include <unordered_map>
+ #include <utility>
+ #include <vector>
+@@ -0,6 +0,7 @@
+   ~CVideoPlayer() override;
+   bool OpenFile(const CFileItem& file, const CPlayerOptions &options) override;
+   bool CloseFile(bool reopen = false) override;
++  void PrefetchNextFile(const CFileItem& file) override;
+   bool IsPlaying() const override;
+   void Pause() override;
+   bool HasVideo() const override;
+@@ -0,6 +0,10 @@
+   void DestroyPlayers();
+ 
+   void Prepare();
++  bool CanPark() const;
++  struct PrefetchSlot;
++  static void Prefetch(const std::shared_ptr<PrefetchSlot>& slot);
++  void CancelPrefetch(std::string_view reason);
+   bool ShouldDeferSync(bool ready, std::chrono::steady_clock::time_point now);
+   bool ShouldWaitForSync(std::chrono::steady_clock::time_point now);
+   std::shared_ptr<CDVDInputStreamBluray> GetBlurayInputStream() const;
+@@ -0,6 +0,13 @@
+   bool m_endReported{false};
+   // the next item opens in place of a parked one
+   bool m_joinPending{false};
++  // the next item's input, opened on a job once the application answers the ask
++  std::shared_ptr<PrefetchSlot> m_prefetch;
++  bool m_prefetchAsked{false};
++  // guards m_prefetch and m_prefetchAsked, which the hint reads on the application thread
++  CCriticalSection m_prefetchSection;
++  std::shared_ptr<CDVDInputStream> m_preparedInput;
++  std::unique_ptr<CDVDDemux> m_preparedDemuxer;
+ 
+   CEdl m_Edl;
+   bool m_SkipCommercials;

@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 2 Nov 2026 07:51:58 -0600
+Subject: [PATCH] DVDClock: take the clock lock when reading the absolute clock
+
+GetClock(absolute) updates the speed adjust state and reads the clock
+mapping under the system lock only, while Discontinuity and the other
+writers hold the clock lock. The video thread calls it for every frame,
+so it could write an old adjust back over a Discontinuity, or convert
+with a mapping that was half updated.
+---
+ xbmc/cores/VideoPlayer/DVDClock.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.cpp b/xbmc/cores/VideoPlayer/DVDClock.cpp
+--- a/xbmc/cores/VideoPlayer/DVDClock.cpp
++++ b/xbmc/cores/VideoPlayer/DVDClock.cpp
+@@ -0,6 +0,7 @@
+ 
+ double CDVDClock::GetClock(double& absolute, bool interpolated /*= true*/)
+ {
++  std::unique_lock critLock(m_critSection);
+   int64_t current = m_videoRefClock->GetTime(interpolated);
+ 
+   std::unique_lock lock(m_systemsection);

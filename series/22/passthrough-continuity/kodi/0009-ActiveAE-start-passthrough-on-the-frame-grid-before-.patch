@@ -7,8 +7,6 @@ Subject: [PATCH] ActiveAE: start passthrough on the frame grid before video
 A passthrough start sync pads its error with a pause shorter than a
 frame, which stops the stream on the wire. Silent frames pad only whole
 frames, so the clock must take the rest before the picture moves.
-Audio-only resyncs of a stamped stream (offset change, track switch
-without a seek, steady-play error over 100 ms) start the same way.
 ---
  .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 143 +++++++++++++++++-
  .../AudioEngine/Engines/ActiveAE/ActiveAE.h   |   6 +
@@ -37,8 +35,8 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
  //! \brief Retry interval for a sink that will not open, doubling to a ceiling.
  //! A device that returns announces itself, so only a fault that clears by itself needs the
 @@ -0,6 +0,7 @@
-       info.errortime = str.m_errorTime;
        info.state = str.m_syncState;
+       info.lateStartHandedOver = str.m_lateStartHandedOver;
        info.exactStart = str.m_exactStart;
 +      info.stamped = m_outputStamped;
        info.rr = str.m_resampleRatio;
@@ -94,7 +92,7 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
    m_inMsgEvent.Reset();
  }
 @@ -0,6 +0,14 @@
-           !(*it)->m_pClock || (*it)->m_freed)
+           (*it)->m_freed)
          continue;
  
 +      // a stream with nothing queued has no start to decide
@@ -248,7 +246,7 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
 +          }
 +        }
 +      }
-+      CLog::Log(LOGDEBUG,
++      CLog::Log(LOGDEBUG, LOGAUDIO,
 +                "ActiveAE::SyncStream - start error {:f}, clock moved {:f}, {:d} frames pad",
 +                startError, move, frames);
 +      if (!stream->m_pClock->SetStartTarget(move, targetEpoch))
@@ -268,7 +266,7 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
 @@ -0,7 +0,8 @@
                                            ? 100ms
                                            : stream->GetErrorInterval();
-   // a start error handed to the player stays reported until the player read it
+   // a start error handed to the player stays reported until the player reads it
 -  bool newerror = (!stream->m_lateStartHandedOver || m_stats.IsSyncErrorTaken(stream)) &&
 +  bool newerror = !stampedStart &&
 +                  (!stream->m_lateStartHandedOver || m_stats.IsSyncErrorTaken(stream)) &&
@@ -398,7 +396,7 @@ diff --git a/xbmc/cores/AudioEngine/Interfaces/AEStream.h b/xbmc/cores/AudioEngi
  
  class CAESyncInfo
 @@ -0,6 +0,8 @@
-   AESyncState state;
+   bool lateStartHandedOver{false};
    //! The start error is in whole phase periods, for the clock to move by in full
    bool exactStart{false};
 +  //! The engine keeps the silent frame of its raw output on the wire between frames

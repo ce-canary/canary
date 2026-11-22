@@ -8,9 +8,9 @@ same pass that raised its wait. The player then synced to a VM that had
 already run the cell and PGC commands.
 ---
  cmake/modules/FindLibDvdNav.cmake             |  3 ++-
- ...-run-the-cell-step-after-a-sync-wait.patch | 27 +++++++++++++++++++
+ ...-run-the-cell-step-after-a-sync-wait.patch | 26 +++++++++++++++++++
  tools/depends/target/libdvdnav/Makefile       |  4 ++-
- 3 files changed, 32 insertions(+), 2 deletions(-)
+ 3 files changed, 31 insertions(+), 2 deletions(-)
  create mode 100644 tools/depends/target/libdvdnav/06-all-run-the-cell-step-after-a-sync-wait.patch
 
 diff --git a/cmake/modules/FindLibDvdNav.cmake b/cmake/modules/FindLibDvdNav.cmake
@@ -30,7 +30,7 @@ diff --git a/tools/depends/target/libdvdnav/06-all-run-the-cell-step-after-a-syn
 new file mode 100644
 --- /dev/null
 +++ b/tools/depends/target/libdvdnav/06-all-run-the-cell-step-after-a-sync-wait.patch
-@@ -0,0 +0,27 @@
+@@ -0,0 +0,26 @@
 +Subject: [PATCH] dvdnav: run the cell step after a sync wait ends
 +
 +At the end of a cell with highlights, the next cell was taken in the
@@ -39,8 +39,7 @@ new file mode 100644
 +back. A still cell already takes the step only after its wait.
 +
 +The wait skip was then cleared by that same step, so a cell with
-+highlights that loops waited at every other pass only. It now waits at
-+every pass.
++highlights that loops waited at every other pass only.
 +---
 + src/dvdnav.c | 2 +-
 + 1 file changed, 1 insertion(+), 1 deletion(-)

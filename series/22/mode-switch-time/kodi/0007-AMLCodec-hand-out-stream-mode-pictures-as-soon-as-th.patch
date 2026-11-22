@@ -106,16 +106,16 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 @@ -0,6 +0,7 @@
+   static void   CloseLayers();
    Hold          HoldOnClose(bool dvEnabled, int& dvPolicy);
-   bool          TakeHold(const CDVDStreamInfo& hints, const AMLVideoOutput& output, bool doviIsFEL);
    void          EndHold(bool failed);
 +  void          SetStreamStartLevel(uint32_t level);
    void          HandBack();
    static void   ReleaseKept();
    static void   RestoreOutput(OutputModule module, int decoderTimeout);
 @@ -0,6 +0,7 @@
-   bool             m_handbackFrame{false};
    bool             m_handbackOff{false};
+   std::atomic<bool> m_lowerLayers{false};
    bool             m_drainPrebuffer{false};
 +  bool             m_streamStartGate{false};
    bool             m_inputWritten{false};

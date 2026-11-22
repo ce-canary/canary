@@ -7,9 +7,9 @@ libbluray runs the disc program only inside a read. Nothing reads while
 the queues are full or in the nav-tail and sync waits, nor while paused
 with nothing read, so a disc event waits until the old item has drained.
 ---
- xbmc/cores/VideoPlayer/VideoPlayer.cpp | 24 +++++++++++++++++++++---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 22 ++++++++++++++++++++--
  xbmc/cores/VideoPlayer/VideoPlayer.h   |  1 +
- 2 files changed, 22 insertions(+), 3 deletions(-)
+ 2 files changed, 21 insertions(+), 2 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
@@ -26,19 +26,17 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
      {
        if (m_playSpeed == DVD_PLAYSPEED_PAUSE &&
            m_demuxerSpeed != DVD_PLAYSPEED_PAUSE)
-@@ -0,7 +0,8 @@
+@@ -0,6 +0,7 @@
        // when paused, demuxer could be be returning empty
        if (m_playSpeed == DVD_PLAYSPEED_PAUSE)
        {
--        if (m_navTail || IsBlurayTitleEndWait())
-+        const bool held = PollBlurayEvents();
-+        if (m_navTail || held)
-           CThread::Sleep(10ms);
++        PollBlurayEvents();
+         CThread::Sleep(10ms);
          continue;
        }
 @@ -0,6 +0,7 @@
-           m_State.menuType == MenuType::NATIVE &&
-           (ShouldWaitForSync(std::chrono::steady_clock::now()) || PlayNavTail()))
+       }
+       if (navWait)
        {
 +        PollBlurayEvents();
          CThread::Sleep(10ms);
@@ -63,9 +61,9 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
 +#endif
 +}
 +
- // plays out the old item without blocking, as at the end of file; waits for the players that
- // CloseStream would wait for, video until its decoder has drained
- bool CVideoPlayer::PlayNavTail()
+ void CVideoPlayer::HandlePlaySpeed()
+ {
+   const bool isInMenu = IsInMenuInternal();
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.h
 +++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
@@ -76,4 +74,4 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/Video
 +  bool PollBlurayEvents();
    double GetBlurayPresentedTime();
    void ReportBlurayPresented();
-   bool PlayNavTail();
+   bool OpenStream(CCurrentStream& current, int64_t demuxerId, int iStream, int source, bool reset = true);

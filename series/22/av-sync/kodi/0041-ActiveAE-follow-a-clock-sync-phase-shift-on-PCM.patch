@@ -1,0 +1,153 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 09:15:02 -0600
+Subject: [PATCH] ActiveAE: follow a clock sync phase shift on PCM
+
+A change of the video delay leaves a rest of up to half a phase period
+on the clock the audio follows. The engine acts on such an error only
+above its sync threshold, so the rest is not applied while PCM plays.
+---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 51 ++++++++++++++++++-
+ .../Engines/ActiveAE/ActiveAEStream.h         |  5 +-
+ xbmc/cores/VideoPlayer/VsyncPhase.cpp         |  3 +-
+ xbmc/cores/VideoPlayer/VsyncPhase.h           |  4 +-
+ 4 files changed, 57 insertions(+), 6 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,9 +0,8 @@
+     stream->m_startCut = stream->m_pClock->TakeStartCut();
+     stream->m_startPad = 0.0;
+     stream->m_exactStart = false;
+-    double shift{0.0};
+     double period{0.0};
+-    stream->m_syncPhaseId = stream->m_pClock->GetSyncPhaseId(shift, period);
++    stream->m_syncPhaseId = stream->m_pClock->GetSyncPhaseId(stream->m_syncShift, period);
+     stream->m_syncSinkReports = m_stats.GetSinkReports();
+     CLog::Log(LOGDEBUG,"ActiveAE - start sync of audio stream");
+   }
+@@ -0,11 +0,39 @@
+     if (syncPhaseId == -1 || syncPhaseId != stream->m_syncPhaseId)
+     {
+       stream->m_syncPhaseId = syncPhaseId;
++      stream->m_syncShift = shift;
+       stream->m_syncError.Flush(100ms);
+       CLog::Log(LOGDEBUG, LOGAUDIO, "ActiveAE::SyncStream - start sync held, phase id {:d}",
+                 syncPhaseId);
+     }
+   }
++  else if (stream->m_syncState == CAESyncInfo::AESyncState::SYNC_INSYNC && m_mode == MODE_PCM)
++  {
++    // the clock moved by a known shift, so samples follow it exactly and no average spans it
++    double shift{0.0};
++    double period{0.0};
++    stream->m_pClock->GetSyncPhaseId(shift, period);
++    if (shift != stream->m_syncShift)
++    {
++      stream->m_startPad += stream->m_syncShift - shift;
++      stream->m_syncShift = shift;
++      if (!stream->m_lateStartHandedOver)
++        stream->m_syncError.SetErrorInterval(stream->GetErrorInterval());
++    }
++  }
++  else if (stream->m_syncState == CAESyncInfo::AESyncState::SYNC_ADJUST &&
++           !stream->m_syncErrorBooked && m_mode == MODE_PCM)
++  {
++    // the error not yet booked is measured anew against the moved clock
++    double shift{0.0};
++    double period{0.0};
++    stream->m_pClock->GetSyncPhaseId(shift, period);
++    if (shift != stream->m_syncShift)
++    {
++      stream->m_syncShift = shift;
++      stream->m_syncError.SetErrorInterval(100ms);
++    }
++  }
+ 
+   double error;
+   double threshold = 100;
+@@ -0,7 +0,12 @@
+       CLog::Log(LOGDEBUG, LOGAUDIO, "ActiveAE::SyncStream - start pad {:.3f}ms of {:.3f}ms",
+                 delayed, stream->m_startPad);
+       if (delayed > 0)
++      {
+         stream->m_startPad -= delayed;
++        // a shift padded over several passes leaves no average of the samples before its end
++        if (!stream->m_lateStartHandedOver)
++          stream->m_syncError.SetErrorInterval(stream->GetErrorInterval());
++      }
+       else
+       {
+         stream->m_startPad = 0.0;
+@@ -0,6 +0,21 @@
+     else
+       stream->m_silentSinceSyncStart = false;
+   }
++  else if (stream->m_syncState == CAESyncInfo::AESyncState::SYNC_INSYNC && stream->m_startPad < 0)
++  {
++    CSampleBuffer* buf = stream->m_processingBuffers->m_outputSamples.front();
++    const double skipped = SkipSyncSamples(stream, buf, -stream->m_startPad);
++    CLog::Log(LOGDEBUG, LOGAUDIO, "ActiveAE::SyncStream - shift skip {:.3f}ms of {:.3f}ms", skipped,
++              -stream->m_startPad);
++    if (skipped > 0)
++    {
++      stream->m_startPad += skipped;
++      if (!stream->m_lateStartHandedOver)
++        stream->m_syncError.SetErrorInterval(stream->GetErrorInterval());
++    }
++    else
++      stream->m_startPad = 0.0;
++  }
+ 
+   if (!newerror || stream->m_syncState != CAESyncInfo::AESyncState::SYNC_INSYNC)
+     return ret;
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+@@ -0,7 +0,8 @@
+   bool m_syncErrorBooked{false};
+   // ms of audio the clock start left out on purpose, skipped before the start sync measures
+   double m_startCut{0.0};
+-  // ms of silence a late start handed over in whole phase periods still owes
++  // ms of silence a late start handed over in whole phase periods or a phase shift still owes,
++  // negative for audio a phase shift still has to skip
+   double m_startPad{0.0};
+   // whether the start error handed over is in whole phase periods
+   bool m_exactStart{false};
+@@ -0,6 +0,8 @@
+   int m_syncPhaseId{0};
+   // the sink reports counted when the start sync began
+   unsigned int m_syncSinkReports{0};
++  // the sum in ms of the clock sync phase shifts the audio follows
++  double m_syncShift{0.0};
+ };
+ }
+ 
+diff --git a/xbmc/cores/VideoPlayer/VsyncPhase.cpp b/xbmc/cores/VideoPlayer/VsyncPhase.cpp
+--- a/xbmc/cores/VideoPlayer/VsyncPhase.cpp
++++ b/xbmc/cores/VideoPlayer/VsyncPhase.cpp
+@@ -0,7 +0,8 @@
+ {
+   std::unique_lock lock(m_clock.m_critSection);
+ 
+-  shift = 0.0;
++  m_shiftFollowed = m_shift;
++  shift = m_shift;
+   period = m_state == State::NONE || m_clock.m_speedAdjust != 0 ? 0.0 : m_phasePeriod;
+   return GetVsyncPhaseId();
+ }
+diff --git a/xbmc/cores/VideoPlayer/VsyncPhase.h b/xbmc/cores/VideoPlayer/VsyncPhase.h
+--- a/xbmc/cores/VideoPlayer/VsyncPhase.h
++++ b/xbmc/cores/VideoPlayer/VsyncPhase.h
+@@ -0,8 +0,8 @@
+   //! 0 without a phase, -1 while pending or published at an older epoch, else an id that
+   //! changes at a new epoch, after pending or none, and at a phase shift
+   int GetVsyncPhaseId();
+-  //! As GetVsyncPhaseId(), with `shift` 0 and the phase period, 0 without a phase or while the
+-  //! speed is adjusted
++  //! As GetVsyncPhaseId(), with `shift` the sum of all phase shifts, which the audio follows now,
++  //! and the phase period, 0 without a phase or while the speed is adjusted
+   int FollowVsyncPhase(double& shift, double& period);
+ 
+ private:

@@ -10,7 +10,7 @@ These builds are for testing and early feature previews. Despite extensive testi
 
 **Status: active.**
 
-- CoreELEC 22: latest build `22.0-Piers_canary_20261118`, based on the nightly of `20261118`.
+- CoreELEC 22: latest build `22.0-Piers_canary_20261119`, based on the nightly of `20261119`.
 
 - **Small fixes:** independent fixes that don't belong to any feature.
 - **Blu-ray menu playback:** full disc menus with more seamless clip transitions.
@@ -20,7 +20,6 @@ These builds are for testing and early feature previews. Despite extensive testi
 - **Dolby Vision output:** Dolby Vision no longer turns purple when playback starts from a refresh rate the TV can't show in Dolby Vision.
 - **Faster mode switches:** playback starts sooner, the TV blanks for less time at a mode change, and Blu-ray menus keep one output mode for the whole disc.
 - **Seamless video playlists:** the next video in a playlist starts without a black screen, and streamed items join in a moment.
-- **BD-J menu timers:** BD-J disc timers follow the picture through pause and seek.
 - **Atmos passthrough continuity:** No more Atmos pop-up on pause, seek and chapter skips.
 - **DVD menus:** every DVD menu page shows, highlights follow the remote, and titles play out and resume where you left.
 
@@ -40,7 +39,7 @@ Canary builds run on the same devices as the matching CoreELEC nightly. Make a b
 ## Small fixes
 
 - Audio offset add-ons see an audio track change made by a Blu-ray disc's own menu right away.
-- Progressive VC-1 video decodes straight into its display buffers, which removes a cause of short horizontal lines on moving pictures.
+- Progressive VC-1 video decodes straight into its display buffers, which removes a cause of short horizontal lines on moving pictures. Thanks to alexscotti, whose Symphony build found the cause.
 - VC-1 video plays smoothly instead of stuttering.
 
 Nothing to set up.
@@ -48,6 +47,8 @@ Nothing to set up.
 ## Blu-ray menu playback
 
 Play a disc with its full menus, HDMV and Java (BD-J) alike, with more seamless clip transitions. Java menus need CoreELEC's normal "JRE for BD-J menus" add-on, as on any CE build.
+
+On Blu-ray discs with Java menus, the disc's own timer now follows the picture on screen. It stops during a pause, stays in step after a seek and ends with the episode.
 
 ### Top menu button
 
@@ -72,7 +73,7 @@ To use another button, save this as `/storage/.kodi/userdata/keymaps/topmenu.xml
 
 ## A/V sync
 
-Sync is now zeroed and doesn't shift around during playback. Nothing to set up. Your TV, AVR and speakers still add their own delay, so you may want to calibrate for your home theater with [Audio Offset Manager: Evolved](https://github.com/matthane/script.audiooffsetmanager.evolved), available in the official Kodi repo or from GitHub.
+Sync is now zeroed and doesn't shift around during playback. Nothing to set up. Your TV, AVR and speakers still add their own delay, so you may want to calibrate for your home theater with [Audio Offset Manager: Evolved](https://github.com/matthane/script.audiooffsetmanager.evolved), available in the official Kodi repo or from GitHub. The audio offset now moves in 5 ms steps instead of 25 ms, so calibration lands closer.
 
 ## Screen capture
 
@@ -127,10 +128,6 @@ The next item opens while the current one finishes, for local and network files 
 
 Adaptive streams no longer freeze a few seconds into an item. They start at a quality the connection can carry, and the TV mode is set for the stream's best quality from the start. Nothing to set up.
 
-## BD-J menu timers
-
-On Blu-ray discs with Java menus, the disc's own timer now follows the picture on screen. It stops during a pause, stays in step after a seek and ends with the episode. Nothing to set up.
-
 ## Atmos passthrough continuity
 
 Dolby Digital Plus Atmos and Dolby TrueHD Atmos passthrough now keep the audio signal running through pause, seek and chapter skips. TVs that show the Dolby Atmos notice whenever the signal restarts no longer do. For long pauses, set Keep audio device alive to Always to avoid any other unwanted notices.
@@ -153,17 +150,16 @@ Follow CoreELEC's [guide to reporting an issue](https://discourse.coreelec.org/t
 
 | Feature | Kodi | common_drivers | media_modules-aml | CoreELEC | History |
 |---|---|---|---|---|---|
-| Small fixes | [1 commit](https://github.com/ce-canary/xbmc/compare/base/22...topic/22/fixes) | none | [2 commits](https://github.com/ce-canary/media_modules-aml/compare/base/22...topic/22/fixes) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/fixes) |
-| Blu-ray menu playback | [76 commits](https://github.com/ce-canary/xbmc/compare/topic/22/fixes...topic/22/menu-playback) | [5 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/av-sync...topic/22/menu-playback) | none | [20 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/screen-capture...topic/22/menu-playback) | [history](https://github.com/ce-canary/canary/commits/main/series/22/menu-playback) |
-| A/V sync | [45 commits](https://github.com/ce-canary/xbmc/compare/topic/22/menu-playback...topic/22/av-sync) | [3 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/dv-output...topic/22/av-sync) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/av-sync) |
-| Screen capture | [33 commits](https://github.com/ce-canary/xbmc/compare/topic/22/av-sync...topic/22/screen-capture) | [39 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/menu-playback...topic/22/screen-capture) | none | [6 commits](https://github.com/ce-canary/CoreELEC/compare/base/22...topic/22/screen-capture) | [history](https://github.com/ce-canary/canary/commits/main/series/22/screen-capture) |
-| Dolby Vision FEL playback | [7 commits](https://github.com/ce-canary/xbmc/compare/topic/22/screen-capture...topic/22/fel-playback) | none | [8 commits](https://github.com/ce-canary/media_modules-aml/compare/topic/22/fixes...topic/22/fel-playback) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/fel-playback) |
-| Dolby Vision output | none | [2 commits](https://github.com/ce-canary/common_drivers/compare/base/22...topic/22/dv-output) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/dv-output) |
-| Faster mode switches | [27 commits](https://github.com/ce-canary/xbmc/compare/topic/22/fel-playback...topic/22/mode-switch-time) | [3 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/screen-capture...topic/22/mode-switch-time) | [1 commit](https://github.com/ce-canary/media_modules-aml/compare/topic/22/fel-playback...topic/22/mode-switch-time) | [1 commit](https://github.com/ce-canary/CoreELEC/compare/topic/22/canary-only...topic/22/mode-switch-time) | [history](https://github.com/ce-canary/canary/commits/main/series/22/mode-switch-time) |
-| Seamless video playlists | [48 commits](https://github.com/ce-canary/xbmc/compare/topic/22/mode-switch-time...topic/22/seamless-playlist) | none | [2 commits](https://github.com/ce-canary/media_modules-aml/compare/topic/22/mode-switch-time...topic/22/seamless-playlist) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/seamless-playlist) |
-| BD-J menu timers | [2 commits](https://github.com/ce-canary/xbmc/compare/topic/22/seamless-playlist...topic/22/bdj-media-time) | none | none | [1 commit](https://github.com/ce-canary/CoreELEC/compare/topic/22/mode-switch-time...topic/22/bdj-media-time) | [history](https://github.com/ce-canary/canary/commits/main/series/22/bdj-media-time) |
-| Atmos passthrough continuity | [11 commits](https://github.com/ce-canary/xbmc/compare/topic/22/bdj-media-time...topic/22/passthrough-continuity) | none | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/passthrough-continuity) |
-| DVD menus | [16 commits](https://github.com/ce-canary/xbmc/compare/topic/22/passthrough-continuity...topic/22/dvd-menus) | none | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/dvd-menus) |
+| Small fixes | [2 commits](https://github.com/ce-canary/xbmc/compare/base/22...topic/22/fixes) | [1 commit](https://github.com/ce-canary/common_drivers/compare/base/22...topic/22/fixes) | [2 commits](https://github.com/ce-canary/media_modules-aml/compare/base/22...topic/22/fixes) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/fixes) |
+| Blu-ray menu playback | [70 commits](https://github.com/ce-canary/xbmc/compare/topic/22/fixes...topic/22/menu-playback) + [2 commits](https://github.com/ce-canary/xbmc/compare/topic/22/seamless-playlist...topic/22/bdj-media-time) | [6 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/av-sync...topic/22/menu-playback) | none | [20 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/screen-capture...topic/22/menu-playback) | [history](https://github.com/ce-canary/canary/commits/main/series/22/menu-playback) |
+| A/V sync | [43 commits](https://github.com/ce-canary/xbmc/compare/topic/22/menu-playback...topic/22/av-sync) | [2 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/dv-output...topic/22/av-sync) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/av-sync) |
+| Screen capture | [32 commits](https://github.com/ce-canary/xbmc/compare/topic/22/av-sync...topic/22/screen-capture) | [39 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/menu-playback...topic/22/screen-capture) | none | [5 commits](https://github.com/ce-canary/CoreELEC/compare/base/22...topic/22/screen-capture) | [history](https://github.com/ce-canary/canary/commits/main/series/22/screen-capture) |
+| Dolby Vision FEL playback | [6 commits](https://github.com/ce-canary/xbmc/compare/topic/22/screen-capture...topic/22/fel-playback) | none | [8 commits](https://github.com/ce-canary/media_modules-aml/compare/topic/22/fixes...topic/22/fel-playback) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/fel-playback) |
+| Dolby Vision output | none | [2 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/fixes...topic/22/dv-output) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/dv-output) |
+| Faster mode switches | [23 commits](https://github.com/ce-canary/xbmc/compare/topic/22/fel-playback...topic/22/mode-switch-time) | [1 commit](https://github.com/ce-canary/common_drivers/compare/topic/22/screen-capture...topic/22/mode-switch-time) | [1 commit](https://github.com/ce-canary/media_modules-aml/compare/topic/22/fel-playback...topic/22/mode-switch-time) | [1 commit](https://github.com/ce-canary/CoreELEC/compare/topic/22/canary-only...topic/22/mode-switch-time) | [history](https://github.com/ce-canary/canary/commits/main/series/22/mode-switch-time) |
+| Seamless video playlists | [40 commits](https://github.com/ce-canary/xbmc/compare/topic/22/mode-switch-time...topic/22/seamless-playlist) | none | [2 commits](https://github.com/ce-canary/media_modules-aml/compare/topic/22/mode-switch-time...topic/22/seamless-playlist) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/seamless-playlist) |
+| Atmos passthrough continuity | [12 commits](https://github.com/ce-canary/xbmc/compare/topic/22/bdj-media-time...topic/22/passthrough-continuity) | none | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/passthrough-continuity) |
+| DVD menus | [17 commits](https://github.com/ce-canary/xbmc/compare/topic/22/passthrough-continuity...topic/22/dvd-menus) | none | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/dvd-menus) |
 | Canary-only changes | none | none | none | [4 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/menu-playback...topic/22/canary-only) | [history](https://github.com/ce-canary/canary/commits/main/series/22/canary-only) |
 
 Each link shows that feature's commits and combined diff for the current build. History shows how a feature changed between builds.

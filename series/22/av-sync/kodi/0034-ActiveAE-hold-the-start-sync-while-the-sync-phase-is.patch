@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 00:02:26 -0500
+Subject: [PATCH] ActiveAE: hold the start sync while the sync phase is pending
+
+After a display reset or a clock move the start sync measures against
+a clock sync phase from the old vsync grid, and hands that error over
+to the player.
+---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 24 ++++++++++++++-----
+ .../Engines/ActiveAE/ActiveAEStream.h         |  2 ++
+ 2 files changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,6 +0,9 @@
+     stream->m_startCut = stream->m_pClock->TakeStartCut();
+     stream->m_startPad = 0.0;
+     stream->m_exactStart = false;
++    double shift{0.0};
++    double period{0.0};
++    stream->m_syncPhaseId = stream->m_pClock->GetSyncPhaseId(shift, period);
+     stream->m_syncSinkReports = m_stats.GetSinkReports();
+     CLog::Log(LOGDEBUG,"ActiveAE - start sync of audio stream");
+   }
+@@ -0,6 +0,21 @@
+       return ret;
+   }
+ 
++  double phasePeriod{0.0};
++  if (stream->m_syncState == CAESyncInfo::AESyncState::SYNC_MUTE)
++  {
++    // the start sync measures against one published clock sync phase
++    double shift{0.0};
++    const int syncPhaseId = stream->m_pClock->GetSyncPhaseId(shift, phasePeriod);
++    if (syncPhaseId == -1 || syncPhaseId != stream->m_syncPhaseId)
++    {
++      stream->m_syncPhaseId = syncPhaseId;
++      stream->m_syncError.Flush(100ms);
++      CLog::Log(LOGDEBUG, LOGAUDIO, "ActiveAE::SyncStream - start sync held, phase id {:d}",
++                syncPhaseId);
++    }
++  }
++
+   double error;
+   double threshold = 100;
+   if (stream->m_resampleMode)
+@@ -0,12 +0,6 @@
+   // limit. Audio starting late is therefore left to the player once it was heard, as skipping it
+   // would cut audio already playing.
+   const bool clockFollowsAudio{!stream->m_resampleMode};
+-  double phasePeriod{0.0};
+-  if (clockFollowsAudio && stream->m_syncState == CAESyncInfo::AESyncState::SYNC_MUTE)
+-  {
+-    double shift{0.0};
+-    stream->m_pClock->GetSyncPhaseId(shift, phasePeriod);
+-  }
+   const auto keepAudible = [&](double syncError)
+   {
+     const bool lateStart{clockFollowsAudio && syncError < 0 && -syncError <= MAX_LATE_START_MS};
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h
+@@ -0,6 +0,8 @@
+   double m_startPad{0.0};
+   // whether the start error handed over is in whole phase periods
+   bool m_exactStart{false};
++  // the clock sync phase the start sync measures against
++  int m_syncPhaseId{0};
+   // the sink reports counted when the start sync began
+   unsigned int m_syncSinkReports{0};
+ };

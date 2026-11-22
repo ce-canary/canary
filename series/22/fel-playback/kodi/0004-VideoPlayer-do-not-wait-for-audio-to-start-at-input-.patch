@@ -6,12 +6,45 @@ Subject: [PATCH] VideoPlayer: do not wait for audio to start at input end
 Audio still starting at input end kept the clock from starting. No
 more packets follow, so it never got ready and video waited for it.
 ---
- xbmc/cores/VideoPlayer/VideoPlayer.cpp | 4 +++-
- 1 file changed, 3 insertions(+), 1 deletion(-)
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 9 ++++++++-
+ xbmc/cores/VideoPlayer/VideoPlayer.h   | 2 ++
+ 2 files changed, 10 insertions(+), 1 deletion(-)
 
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,7 @@
+   m_SpeedState.Reset(DVD_NOPTS_VALUE);
+   m_seekStart = false;
+   m_navTail = false;
++  m_inputEnded = false;
+   m_videoDrained = false;
+   m_navStop = false;
+   m_navStopped = false;
+@@ -0,6 +0,7 @@
+             m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
+             m_videoDrained = true;
+           }
++          m_inputEnded = true;
+ 
+           m_CurrentAudio.inited = false;
+           m_CurrentVideo.inited = false;
+@@ -0,6 +0,7 @@
+         m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
+         m_videoDrained = true;
+       }
++      m_inputEnded = true;
+ 
+       m_CurrentAudio.inited = false;
+       m_CurrentVideo.inited = false;
+@@ -0,6 +0,7 @@
+     {
+       m_syncWait.reset();
+       m_navTail = false;
++      m_inputEnded = false;
+     }
+ 
+     // see if we can find something better to play
 @@ -0,7 +0,9 @@
                   (!m_VideoPlayerAudio->AcceptsData() && m_processInfo->GetLevelVQ() < 10);
      bool audio = m_CurrentAudio.id < 0 || (m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_WAITSYNC) ||
@@ -23,3 +56,23 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
  
      const bool syncAudio = m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_WAITSYNC &&
                             (m_CurrentAudio.avsync == CCurrentStream::AV_SYNC_CONT ||
+@@ -0,6 +0,7 @@
+   m_syncStartPtsWait.reset();
+   m_seekStart = false;
+   m_navTail = false;
++  m_inputEnded = false;
+   m_videoDrained = false;
+   m_lastVideoTitleTime = DVD_NOPTS_VALUE;
+ #if defined(HAVE_LIBBLURAY)
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.h
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,8 @@
+   double m_lastVideoTitleTime{DVD_NOPTS_VALUE};
+   bool m_navStop{false};
+   bool m_navStopped{false};
++  // the demuxer has no more for now, the players play out what they hold
++  bool m_inputEnded{false};
+   // the video player has a drain for the video input so far
+   bool m_videoDrained{false};
+   bool m_discAudioPick{false};

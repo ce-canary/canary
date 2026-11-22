@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 18 Nov 2026 15:08:43 -0600
+Subject: [PATCH] AMLCodec: flag VC-1 decode times only where pictures can
+ reorder
+
+Without pts, VC-1 packets carry their decode time, and Kodi set
+KEYFRAME_PTS_ONLY for every such stream. The VC-1 decoder reads it to
+restamp anchors in display order. A WMV3 stream whose sequence header
+allows no B frames cannot reorder, so its decode times are its display
+times.
+---
+ xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,8 +0,11 @@
+       }
+       break;
+     case VFORMAT_VC1:
+-      // vc1 in an avi file
+-      if (m_hints.ptsinvalid)
++      // vc1 without pts carries decode times; flag them only where pictures can reorder, as in
++      // ffmpeg (advanced profile, or wmv3 MAXBFRAMES > 0)
++      if (m_hints.ptsinvalid &&
++          (am_private->video_codec_type == VIDEO_DEC_FORMAT_WVC1 ||
++           (am_private->extradata.GetSize() >= 4 && (am_private->extradata.GetData()[3] >> 4) & 7)))
+         am_private->gcodec.param = (void*)KEYFRAME_PTS_ONLY;
+       am_private->gcodec.dec_mode = STREAM_TYPE_SINGLE;
+       break;
+@@ -0,7 +0,8 @@
+     am_private->am_pkt.avdts = dts;
+ 
+     // For VC1 AML decoder uses PTS only on I-Frames
+-    if (am_private->am_pkt.avpts == UINT64_0 && (((size_t)am_private->gcodec.param) & KEYFRAME_PTS_ONLY))
++    if (am_private->am_pkt.avpts == UINT64_0 && m_hints.ptsinvalid &&
++        (am_private->video_format == VFORMAT_VC1 || am_private->video_format == VFORMAT_MPEG4))
+       am_private->am_pkt.avpts = am_private->am_pkt.avdts;
+   }
+ 

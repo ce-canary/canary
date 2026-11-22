@@ -3,17 +3,6 @@ From: matthane <matthan.evans@icloud.com>
 Date: Tue, 3 Nov 2026 10:33:03 -0600
 Subject: [PATCH] libbluray: fix INSN_BC instruction
 
-The condition was backwards, checking if any bits outside of the desired
-are set, rather then the desired bits.
-
-This still differs from the specification which just indicates a simple
-AND check, however the spec does also not indicate if the result should
-be checked to be non-zero, or matching the input.
-
-This version is likely what was originally intended, however all discs
-that were found to use the BC instruction only test a single bit, making
-the difference between a full or partial match not testable.
-
 https://code.videolan.org/videolan/libbluray/-/merge_requests/76
 ---
  ...uray-07-hdmv-fix-INSN_BC-instruction.patch | 34 +++++++++++++++++++

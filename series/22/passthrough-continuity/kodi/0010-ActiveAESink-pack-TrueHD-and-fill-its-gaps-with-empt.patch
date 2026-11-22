@@ -10,13 +10,13 @@ receiver shows its notice and mutes at every pause, seek and resume.
 Only the sink runs in a pause, and a unit straddles most MAT frames,
 so the codec's packer could not end the stream on a unit boundary.
 ---
- .../Engines/ActiveAE/ActiveAESink.cpp         |  59 +++++-
+ .../Engines/ActiveAE/ActiveAESink.cpp         |  59 ++++++-
  .../Engines/ActiveAE/ActiveAESink.h           |   7 +
- xbmc/cores/AudioEngine/Utils/PackerMAT.cpp    | 191 +++++++++++++-----
- xbmc/cores/AudioEngine/Utils/PackerMAT.h      |  44 ++--
- .../Audio/DVDAudioCodecPassthrough.cpp        |  55 +++--
- .../Audio/DVDAudioCodecPassthrough.h          |   8 +-
- 6 files changed, 273 insertions(+), 91 deletions(-)
+ xbmc/cores/AudioEngine/Utils/PackerMAT.cpp    | 157 ++++++++++++++++--
+ xbmc/cores/AudioEngine/Utils/PackerMAT.h      |  27 ++-
+ .../Audio/DVDAudioCodecPassthrough.cpp        |  28 +---
+ .../Audio/DVDAudioCodecPassthrough.h          |   3 -
+ 6 files changed, 229 insertions(+), 52 deletions(-)
 
 diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
 --- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
@@ -194,7 +194,7 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.h b/xbmc/cores
    void ReturnBuffers();
    void SetSilenceTimer();
    bool NeedIECPacking();
-+  //! Writes the MAT frame in progress completed with padding, see CPackerMAT::Close
++  // writes the MAT frame in progress completed with padding, see CPackerMAT::Close
 +  void EndMATFrame(bool discard);
  
    unsigned int OutputSamples(CSampleBuffer* samples);
@@ -220,13 +220,7 @@ diff --git a/xbmc/cores/AudioEngine/Utils/PackerMAT.cpp b/xbmc/cores/AudioEngine
  #include <array>
  #include <assert.h>
  #include <utility>
-@@ -0,12 +0,16 @@
- 
- namespace
- {
--constexpr uint32_t FORMAT_MAJOR_SYNC = 0xf8726fba;
--
- constexpr auto BURST_HEADER_SIZE = 8;
+@@ -0,6 +0,12 @@
  constexpr auto MAT_BUFFER_SIZE = 61440;
  constexpr auto MAT_BUFFER_LIMIT = MAT_BUFFER_SIZE - 24; // MAT end code size
  constexpr auto MAT_POS_MIDDLE = 30708 + BURST_HEADER_SIZE; // middle point + IEC header in front
@@ -239,18 +233,6 @@ diff --git a/xbmc/cores/AudioEngine/Utils/PackerMAT.cpp b/xbmc/cores/AudioEngine
  
  // magic MAT format values, meaning is unknown at this point
  constexpr std::array<uint8_t, 20> mat_start_code = {0x07, 0x9E, 0x00, 0x03, 0x84, 0x01, 0x01,
-@@ -0,11 +0,6 @@
- 
-   return info;
- }
--
--int GetSampleRate(int ratebits)
--{
--  return (ratebits & 8 ? 44100 : 48000) << (ratebits & 7);
--}
- } // namespace
- 
- CPackerMAT::CPackerMAT()
 @@ -0,6 +0,22 @@
    m_buffer.reserve(MAT_BUFFER_SIZE);
  }
@@ -278,7 +260,7 @@ diff --git a/xbmc/cores/AudioEngine/Utils/PackerMAT.cpp b/xbmc/cores/AudioEngine
  // case they'll be preceded by smaller frames to keep the average bitrate constant.
  // A constant padding to 2560 bytes can work (this is how the ffmpeg spdifenc module works), however
  // high-bitrate streams can overshoot this size and therefor require proper handling of dynamic padding.
--bool CPackerMAT::PackTrueHD(const uint8_t* data, int size, std::optional<double> pts)
+-bool CPackerMAT::PackTrueHD(const uint8_t* data, int size)
 +void CPackerMAT::PackTrueHD(const uint8_t* data, int size)
  {
    // discard too small packets (cannot be valid)
@@ -349,29 +331,20 @@ diff --git a/xbmc/cores/AudioEngine/Utils/PackerMAT.cpp b/xbmc/cores/AudioEngine
    }
  
    // Record the offset of frame time to output time, used to size the padding
-@@ -0,16 +0,11 @@
+@@ -0,6 +0,12 @@
      }
    }
  
--  // the unit is laid out at its input timing and presented at its output timing
--  m_state.lastUnitPts.reset();
--  if (pts && m_state.outputTimingValid)
--  {
--    const int16_t delay = static_cast<int16_t>(m_state.outputTiming - frameSamples - frameTime);
--    const double offset = delay + static_cast<double>(GetCount()) / (64 >> (m_state.ratebits & 7));
--    m_state.lastUnitPts = *pts - offset / GetSampleRate(m_state.ratebits);
--    if (!m_state.bufferPts)
--      m_state.bufferPts = m_state.lastUnitPts;
--  }
 +  // a unit is booked where it plays, its lead after its place on the wire
 +  m_unitPos = m_outputBytes + GetCount();
 +  if (m_state.outputTimingValid)
 +    m_unitPos += static_cast<int16_t>(m_state.outputTiming - frameSamples - frameTime) *
 +                 (64 >> (m_state.ratebits & 7));
- 
++
    // write actual audio data to the buffer
    int remaining = FillDataBuffer(data, size, Type::DATA);
-@@ -0,34 +0,105 @@
+ 
+@@ -0,15 +0,57 @@
        remaining = FillDataBuffer(data + (size - remaining), remaining, Type::DATA);
  
        assert(remaining == 0);
@@ -393,9 +366,7 @@ diff --git a/xbmc/cores/AudioEngine/Utils/PackerMAT.cpp b/xbmc/cores/AudioEngine
 +  m_bookedEnd = m_gapEnd;
 +  FillGap(m_gapEnd - MAT_GAP_HEADROOM);
 +}
- 
--  // return true if have MAT packet
--  return !m_outputQueue.empty();
++
 +void CPackerMAT::PackFiller()
 +{
 +  Close(false);
@@ -405,9 +376,8 @@ diff --git a/xbmc/cores/AudioEngine/Utils/PackerMAT.cpp b/xbmc/cores/AudioEngine
 +  m_gapEnd = std::max(m_gapEnd, m_outputBytes) + MAT_BUFFER_SIZE;
 +  m_bookedEnd = m_gapEnd;
 +  FillGap(m_gapEnd);
- }
- 
--CPackerMAT::OutputFrame CPackerMAT::GetOutputFrame()
++}
++
 +bool CPackerMAT::Close(bool discard)
 +{
 +  // a unit with bytes output already goes out whole, the units after it are dropped
@@ -418,7 +388,9 @@ diff --git a/xbmc/cores/AudioEngine/Utils/PackerMAT.cpp b/xbmc/cores/AudioEngine
 +    m_bufferCount = m_straddleEnd;
 +    m_bookedEnd = m_straddleEnd > 0 ? m_straddlePos + MAT_UNIT_TIME : m_outputBytes;
 +  }
-+
+ 
+-  // return true if have MAT packet
+-  return !m_outputQueue.empty();
 +  const bool completed = GetCount() > 0;
 +  if (completed)
 +  {
@@ -429,20 +401,10 @@ diff --git a/xbmc/cores/AudioEngine/Utils/PackerMAT.cpp b/xbmc/cores/AudioEngine
 +  m_gapEnd = m_bookedEnd;
 +  Restart();
 +  return completed;
-+}
-+
-+std::vector<uint8_t> CPackerMAT::GetOutputFrame()
- {
-   if (m_outputQueue.empty())
-     return {};
- 
--  OutputFrame frame = std::move(m_outputQueue.front());
-+  std::vector<uint8_t> buffer = std::move(m_outputQueue.front());
-   m_outputQueue.pop_front();
- 
--  return frame;
-+  return buffer;
  }
+ 
+ std::vector<uint8_t> CPackerMAT::GetOutputFrame()
+@@ -0,10 +0,39 @@
  
  void CPackerMAT::Reset()
  {
@@ -483,55 +445,24 @@ diff --git a/xbmc/cores/AudioEngine/Utils/PackerMAT.cpp b/xbmc/cores/AudioEngine
  }
  
  void CPackerMAT::WriteHeader()
-@@ -0,18 +0,10 @@
-   assert(GetCount() == MAT_BUFFER_SIZE);
+@@ -0,7 +0,9 @@
  
    // push MAT packet to output queue
--  const std::optional<double> pts = m_state.bufferPts ? m_state.bufferPts : m_state.straddlePts;
--  m_outputQueue.push_back({std::move(m_buffer), pts});
-+  m_outputQueue.emplace_back(std::move(m_buffer));
+   m_outputQueue.emplace_back(std::move(m_buffer));
 +  m_outputBytes += MAT_BUFFER_SIZE;
  
    m_buffer.clear();
    m_bufferCount = 0;
--
--  // the last unit written runs into the next buffer, else this buffer's content does
--  if (!m_state.lastUnitPts)
--    m_state.lastUnitPts = pts;
--  if (m_state.lastUnitPts)
--    *m_state.lastUnitPts += static_cast<double>(MAT_BUFFER_SIZE) / (64 >> (m_state.ratebits & 7)) /
--                            GetSampleRate(m_state.ratebits);
--  m_state.straddlePts = m_state.lastUnitPts;
--  m_state.bufferPts.reset();
 +  m_straddleEnd = 0;
  }
 diff --git a/xbmc/cores/AudioEngine/Utils/PackerMAT.h b/xbmc/cores/AudioEngine/Utils/PackerMAT.h
 --- a/xbmc/cores/AudioEngine/Utils/PackerMAT.h
 +++ b/xbmc/cores/AudioEngine/Utils/PackerMAT.h
-@@ -0,7 +0,6 @@
- #pragma once
- 
- #include <deque>
--#include <optional>
- #include <stdint.h>
- #include <vector>
- 
-@@ -0,18 +0,24 @@
- class CPackerMAT
- {
- public:
--  struct OutputFrame
--  {
--    std::vector<uint8_t> data;
--    std::optional<double> pts; // seconds, content time of the first byte
--  };
-+  static constexpr uint32_t FORMAT_MAJOR_SYNC = 0xf8726fba;
- 
+@@ -0,9 +0,19 @@
    CPackerMAT();
    ~CPackerMAT() = default;
  
--  bool PackTrueHD(const uint8_t* data, int size, std::optional<double> pts);
--  OutputFrame GetOutputFrame();
+-  bool PackTrueHD(const uint8_t* data, int size);
 +  //! Packs a buffer of whole TrueHD units, booked as one MAT frame time from its first unit
 +  void PackUnits(const uint8_t* data, int size);
 +  //! A gap of `frames` MAT frame times the engine booked
@@ -541,23 +472,15 @@ diff --git a/xbmc/cores/AudioEngine/Utils/PackerMAT.h b/xbmc/cores/AudioEngine/U
 +  //! Starts a gap: the frame in progress is completed with padding, true when there was one;
 +  //! with `discard` it keeps only a unit that straddles into it from the last frame output
 +  bool Close(bool discard);
-+  std::vector<uint8_t> GetOutputFrame();
+   std::vector<uint8_t> GetOutputFrame();
    void Reset();
 +  //! Booked time not output yet in MAT frame times, below zero while padding runs ahead of it
 +  double GetPending() const;
  
  private:
    struct MATState
-@@ -0,14 +0,11 @@
-     // frame-time to output-time offset, used to size the padding carry-forward
-     // on the next branch point.
+@@ -0,6 +0,9 @@
      int32_t nOutputTimeOffset;
--
--    // content time of the current buffer's first byte, from the first audio
--    // unit with a pts that starts in it, else carried from the previous buffer
--    std::optional<double> bufferPts;
--    std::optional<double> straddlePts;
--    std::optional<double> lastUnitPts;
    };
  
 +  void PackTrueHD(const uint8_t* data, int size);
@@ -566,12 +489,10 @@ diff --git a/xbmc/cores/AudioEngine/Utils/PackerMAT.h b/xbmc/cores/AudioEngine/U
    void WriteHeader();
    void WritePadding();
    void AppendData(const uint8_t* data, int size, Type type);
-@@ -0,5 +0,17 @@
- 
+@@ -0,4 +0,16 @@
    uint32_t m_bufferCount{0};
    std::vector<uint8_t> m_buffer;
--  std::deque<OutputFrame> m_outputQueue;
-+  std::deque<std::vector<uint8_t>> m_outputQueue;
+   std::deque<std::vector<uint8_t>> m_outputQueue;
 +
 +  // in bytes since the reset: the frames output, the end of the booked time, and in a gap where
 +  // the next unit plays
@@ -588,14 +509,14 @@ diff --git a/xbmc/cores/AudioEngine/Utils/PackerMAT.h b/xbmc/cores/AudioEngine/U
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.cpp
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.cpp
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.cpp
-@@ -0,6 +0,7 @@
- extern "C"
- {
- #include <libavcodec/avcodec.h>
-+#include <libavutil/intreadwrite.h>
- }
+@@ -0,7 +0,6 @@
+ #include "DVDAudioCodecPassthrough.h"
  
- namespace
+ #include "DVDCodecs/DVDCodecs.h"
+-#include "cores/AudioEngine/Utils/PackerMAT.h"
+ #include "utils/log.h"
+ 
+ #include <algorithm>
 @@ -0,12 +0,7 @@
    m_deviceIsRAW = processInfo.WantsRawPassthrough();
  
@@ -609,17 +530,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.cpp
  }
  
  CDVDAudioCodecPassthrough::~CDVDAudioCodecPassthrough(void)
-@@ -0,7 +0,8 @@
- 
-   if (pData && iSize > 0)
-   {
--    if (m_packerMAT && packet.pts != DVD_NOPTS_VALUE)
-+    if (m_format.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD && !m_deviceIsRAW &&
-+        packet.pts != DVD_NOPTS_VALUE)
-       m_packetPts.emplace_back(m_streamBytes, packet.pts);
-     m_streamBytes += iSize;
-   }
-@@ -0,13 +0,8 @@
+@@ -0,27 +0,9 @@
    if (m_format.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD)
    {
      if (m_trueHDBuffer.empty())
@@ -630,85 +541,41 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.cpp
 -        m_packerMAT = std::make_unique<CPackerMAT>();
 -    }
 -
-     if (m_deviceIsRAW) // RAW
-     {
-       m_dataSize = PackTrueHD();
-@@ -0,19 +0,38 @@
-       std::optional<double> pts;
-       while (!m_packetPts.empty() && m_packetPts.front().first <= unitStart)
-       {
--        pts = m_packetPts.front().second / DVD_TIME_BASE;
-+        pts = m_packetPts.front().second;
-         m_packetPts.pop_front();
-       }
- 
--      if (m_packerMAT->PackTrueHD(m_buffer, m_dataSize, pts))
-+      // the sink packs MAT frames from a major sync on, 24 units to a buffer of one frame time
-+      if (m_dataSize >= 10 && AV_RB32(m_buffer + 4) == CPackerMAT::FORMAT_MAJOR_SYNC)
-+        m_trueHDRatebits = m_buffer[8] >> 4;
-+      if (!m_trueHDRatebits)
-       {
--        CPackerMAT::OutputFrame frame = m_packerMAT->GetOutputFrame();
--        m_trueHDBuffer = std::move(frame.data);
--        m_matPts = frame.pts ? *frame.pts * DVD_TIME_BASE : DVD_NOPTS_VALUE;
+-    if (m_deviceIsRAW) // RAW
+-    {
+-      m_dataSize = PackTrueHD();
+-    }
+-    else // IEC
+-    {
+-      if (m_packerMAT->PackTrueHD(m_buffer, m_dataSize))
+-      {
+-        m_trueHDBuffer = m_packerMAT->GetOutputFrame();
 -        m_dataSize = TRUEHD_BUF_SIZE;
 -      }
 -      else
-         m_dataSize = 0;
-+        return true;
-+      }
-+
-+      const double unitTime = static_cast<double>(40 << (*m_trueHDRatebits & 7)) * DVD_TIME_BASE /
-+                              m_format.m_sampleRate;
-+
-+      // the buffer's pts is its first unit's pts, extrapolated by whole units from the packet pts
-+      if (m_trueHDoffset == 0)
-+        m_trueHDPtsFromPacket = false;
-+      if (pts && !m_trueHDPtsFromPacket)
-+      {
-+        m_trueHDPts = *pts - (m_trueHDoffset == 0 ? 0 : m_trueHDframes) * unitTime;
-+        m_trueHDPtsFromPacket = true;
-+      }
-+
-+      m_dataSize = PackTrueHD();
-+      if (m_dataSize)
-+      {
-+        m_matPts = m_trueHDPts;
-+        if (m_trueHDPts != DVD_NOPTS_VALUE)
-+          m_trueHDPts += 24 * unitTime;
-+      }
-     }
+-        m_dataSize = 0;
+-    }
++    m_dataSize = PackTrueHD();
    }
  
-@@ -0,7 +0,7 @@
-   frame.planes = 1;
-   frame.bits_per_sample = m_hints.bitspersample;
-   frame.duration = DVD_MSEC_TO_TIME(frame.format.m_streamInfo.GetDuration());
--  if (m_packerMAT && m_format.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD)
-+  if (!m_deviceIsRAW && m_format.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD)
-     frame.pts = m_matPts;
-   else
-     frame.pts = m_currentPts;
-@@ -0,8 +0,8 @@
-   m_packetPts.clear();
-   m_streamBytes = 0;
-   m_parsedBytes = 0;
+   return true;
+@@ -0,8 +0,6 @@
+   m_currentPts = DVD_NOPTS_VALUE;
+   m_nextPts = DVD_NOPTS_VALUE;
+   m_parser.Reset();
 -  if (m_packerMAT)
 -    m_packerMAT->Reset();
-+  m_trueHDRatebits.reset();
-+  m_trueHDPts = DVD_NOPTS_VALUE;
  }
  
  int CDVDAudioCodecPassthrough::GetBufferSize()
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.h b/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.h
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.h
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.h
-@@ -0,11 +0,11 @@
- #include <deque>
+@@ -0,11 +0,9 @@
+ #include "cores/AudioEngine/Utils/AEStreamInfo.h"
+ 
  #include <list>
- #include <memory>
-+#include <optional>
- #include <utility>
+-#include <memory>
  #include <vector>
  
  class CProcessInfo;
@@ -716,19 +583,11 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.h b
  
  class CDVDAudioCodecPassthrough : public CDVDAudioCodec
  {
-@@ -0,10 +0,14 @@
+@@ -0,7 +0,6 @@
    std::string m_codecName;
  
    // TrueHD specifics
 -  std::unique_ptr<CPackerMAT> m_packerMAT;
-   std::deque<std::pair<uint64_t, double>> m_packetPts; // stream offset of a packet, its pts
-   uint64_t m_streamBytes{0};
-   uint64_t m_parsedBytes{0};
-+  // IEC: the rate bits once a major sync was seen, and of the buffer being grouped its first
-+  // unit's pts and whether a packet gave it
-+  std::optional<int> m_trueHDRatebits;
-+  double m_trueHDPts{DVD_NOPTS_VALUE};
-+  bool m_trueHDPtsFromPacket{false};
-   double m_matPts{DVD_NOPTS_VALUE};
    std::vector<uint8_t> m_trueHDBuffer;
    unsigned int m_trueHDoffset = 0;
+   unsigned int m_trueHDframes = 0;

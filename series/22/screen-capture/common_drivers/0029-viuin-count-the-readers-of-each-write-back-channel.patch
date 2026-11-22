@@ -1,0 +1,497 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 15 Nov 2026 00:49:34 -0600
+Subject: [PATCH] viuin: count the readers of each write-back channel
+
+Both vdins shared one viuin frontend and both write-back channels one
+state, so stopping one capture cleared the route of another capture of
+the same tap and froze it. A failed start returned -1 and left its
+frontend open. A v4l2 stop closed the frontend after fe_lock dropped,
+or never when another driver such as amlvideo2 stopped vdin.
+---
+ drivers/media/vin/tvin/vdin/vdin_debug.c   |   2 +-
+ drivers/media/vin/tvin/vdin/vdin_drv.c     |  59 ++++++--
+ drivers/media/vin/tvin/vdin/vdin_drv.h     |   2 +
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c |  10 +-
+ drivers/media/vin/tvin/viu/viuin.c         | 152 +++++++++++++--------
+ 5 files changed, 146 insertions(+), 79 deletions(-)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_debug.c b/drivers/media/vin/tvin/vdin/vdin_debug.c
+--- a/drivers/media/vin/tvin/vdin/vdin_debug.c
++++ b/drivers/media/vin/tvin/vdin/vdin_debug.c
+@@ -0,7 +0,7 @@
+ 
+ 	port = val;
+ 
+-	frontend = tvin_get_frontend(port, 0);
++	frontend = vdin_get_frontend(devp, port, 0);
+ 	if (frontend && frontend->dec_ops &&
+ 	    frontend->dec_ops->callmaster_det) {
+ 		/*call the frontend det function*/
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.c b/drivers/media/vin/tvin/vdin/vdin_drv.c
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.c
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.c
+@@ -0,6 +0,17 @@
+ }
+ EXPORT_SYMBOL(tvin_notify_vdin_skip_frame);
+ 
++/* viuin registers one frontend per vdin, under the vdin index */
++struct tvin_frontend_s *vdin_get_frontend(struct vdin_dev_s *devp,
++					  enum tvin_port_e port, int index)
++{
++	struct tvin_frontend_s *fe = NULL;
++
++	if (port >= TVIN_PORT_VIU1 && port < TVIN_PORT_VENC_MAX)
++		fe = tvin_get_frontend(port, devp->index);
++	return fe ?: tvin_get_frontend(port, index);
++}
++
+ /*
+  * 1. find the corresponding frontend according to the port & save it.
+  * 2. set default register, including:
+@@ -0,7 +0,7 @@
+  */
+ int vdin_open_fe(enum tvin_port_e port, int index,  struct vdin_dev_s *devp)
+ {
+-	struct tvin_frontend_s *fe = tvin_get_frontend(port, index);
++	struct tvin_frontend_s *fe = vdin_get_frontend(devp, port, index);
+ 	int ret = 0;
+ 
+ 	if (!fe) {
+@@ -0,7 +0,6 @@
+ 		return -1;
+ 	}
+ 
+-	devp->frontend = fe;
+ 	devp->parm.port = port;
+ 
+ 	devp->parm.info.status = TVIN_SIG_STATUS_NULL;
+@@ -0,12 +0,14 @@
+ 		devp->vdin_clk_flag = 1;
+ 	}
+ 
+-	if (devp->frontend->dec_ops && devp->frontend->dec_ops->open)
+-		ret = devp->frontend->dec_ops->open(devp->frontend,
+-			port, devp->port_type);
++	if (fe->dec_ops && fe->dec_ops->open)
++		ret = fe->dec_ops->open(fe, port, devp->port_type);
+ 	/* check open status */
+-	if (ret)
+-		return 1;
++	if (ret) {
++		devp->frontend = NULL;
++		return ret;
++	}
++	devp->frontend = fe;
+ 
+ 	if (IS_HDMI_SRC(port) || IS_TVAFE_SRC(port)) {
+ 		/* init vdin state machine */
+@@ -0,6 +0,7 @@
+ int start_tvin_service(int no, struct vdin_parm_s  *para)
+ {
+ 	struct tvin_frontend_s *fe;
++	bool fe_opened = false;
+ 	int ret = 0;
+ 	struct vdin_dev_s *devp = vdin_devp[no];
+ 	struct vdin_dev_s *vdin0_devp = vdin_devp[0];
+@@ -0,20 +0,29 @@
+ 		devp->bt_path = para->bt_path;
+ 		fe = tvin_get_frontend(devp->parm.port, 1);
+ 	} else {
+-		fe = tvin_get_frontend(devp->parm.port, 0);
++		fe = vdin_get_frontend(devp, devp->parm.port, 0);
+ 	}
+ 
+ 	if (fe) {
+ 		fe->private_data = para;
+ 		fe->port         = devp->parm.port;
++
++		/* a debug open that failed still sets VDIN_FLAG_DEC_OPENED */
++		if (fe->dec_ops->open &&
++		    (!(devp->flags & VDIN_FLAG_DEC_OPENED) || devp->frontend != fe)) {
++			ret = fe->dec_ops->open(fe, fe->port, devp->port_type);
++			if (ret) {
++				devp->frontend = NULL;
++				mutex_unlock(&devp->fe_lock);
++				return ret;
++			}
++			fe_opened = true;
++		}
+ 		devp->frontend   = fe;
+ 
+ 		/* vdin msr clock gate enable */
+ 		if (devp->msr_clk)
+ 			clk_prepare_enable(devp->msr_clk);
+-
+-		if (fe->dec_ops->open && !(devp->flags & VDIN_FLAG_DEC_OPENED))
+-			fe->dec_ops->open(fe, fe->port, devp->port_type);
+ 	} else {
+ 		pr_err("%s(%d): not supported port 0x%x\n",
+ 		       __func__, no, devp->parm.port);
+@@ -0,8 +0,13 @@
+ 	ret = vdin_start_dec(devp);
+ 	if (ret) {
+ 		pr_err("[vdin]%s kmalloc error.\n", __func__);
++		/* release the frontend opened above, the caller may not stop */
++		if (fe_opened && fe->dec_ops->close) {
++			fe->dec_ops->close(fe, devp->port_type);
++			devp->frontend = NULL;
++		}
+ 		mutex_unlock(&devp->fe_lock);
+-		return -1;
++		return ret;
+ 	}
+ 
+ 	devp->flags |= VDIN_FLAG_DEC_OPENED;
+@@ -0,6 +0,9 @@
+ 	if (!(devp->flags & VDIN_FLAG_DEC_STARTED)) {
+ 		pr_err("vdin%d %s:decode hasn't started flags=0x%x\n",
+ 			devp->index, __func__, devp->flags);
++		/* a decoder that stopped itself left its frontend open */
++		if (devp->work_mode == VDIN_WORK_MD_V4L)
++			vdin_close_fe(devp);
+ 		mutex_unlock(&devp->fe_lock);
+ 		return -EBUSY;
+ 	}
+@@ -0,6 +0,9 @@
+ 			end_time,
+ 			end_time - devp->start_time);
+ 	pr_info("vdin%d %s flags=0x%x\n", devp->index, __func__, devp->flags);
++	/* v4l2 mode closes the frontend after the decoder */
++	if (devp->work_mode == VDIN_WORK_MD_V4L)
++		vdin_close_fe(devp);
+ 	mutex_unlock(&devp->fe_lock);
+ 	return 0;
+ }
+@@ -0,7 +0,7 @@
+ 			ret = -EFAULT;
+ 			break;
+ 		}
+-		fe = tvin_get_frontend(port_call, 0);
++		fe = vdin_get_frontend(devp, port_call, 0);
+ 		if (fe && fe->dec_ops && fe->dec_ops->callmaster_det) {
+ 			/*call the frontend det function*/
+ 			callmaster_status =
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.h b/drivers/media/vin/tvin/vdin/vdin_drv.h
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.h
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.h
+@@ -0,6 +0,8 @@
+ void vdin_remove_class_files(struct class *vdin_class);
+ int vdin_create_device_files(struct device *dev);
+ void vdin_remove_device_files(struct device *dev);
++struct tvin_frontend_s *vdin_get_frontend(struct vdin_dev_s *devp,
++					  enum tvin_port_e port, int index);
+ int vdin_open_fe(enum tvin_port_e port, int index,
+ 		 struct vdin_dev_s *devp);
+ void vdin_close_fe(struct vdin_dev_s *devp);
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,15 +0,7 @@
+ 
+ int vdin_v4l2_stop_tvin(struct vdin_dev_s *devp)
+ {
+-	int ret;
+-
+-	ret = stop_tvin_service(devp->index);
+-
+-	mutex_lock(&devp->fe_lock);
+-	vdin_close_fe(devp);
+-	mutex_unlock(&devp->fe_lock);
+-
+-	return ret;
++	return stop_tvin_service(devp->index);
+ }
+ 
+ void vdin_v4l2_init(struct vdin_dev_s *devp, struct platform_device *pl_dev)
+diff --git a/drivers/media/vin/tvin/viu/viuin.c b/drivers/media/vin/tvin/viu/viuin.c
+--- a/drivers/media/vin/tvin/viu/viuin.c
++++ b/drivers/media/vin/tvin/viu/viuin.c
+@@ -0,6 +0,13 @@
+ module_param(open_cnt, ushort, 0664);
+ MODULE_PARM_DESC(open_cnt, "open_cnt for vdin0/1");
+ 
++#define VIUIN_CHAN_MAX	2
++/* one frontend per vdin, its index the vdin's */
++#define VIUIN_FE_NUM	2
++
++/* both write-back channels program the registers below; one lock orders them */
++static DEFINE_SPINLOCK(viuin_lock);
++
+ struct viuin_s {
+ 	unsigned int flag;
+ 	struct vframe_prop_s *prop;
+@@ -0,8 +0,16 @@
+ 	struct tvin_frontend_s frontend;
+ 	struct vdin_parm_s parm;
+ 	unsigned int enc_info_addr;
++	/* the write-back channels this frontend reads */
++	unsigned int chans;
+ };
+ 
++/* a channel carries one tap to every reader */
++static struct {
++	enum tvin_port_e tap;
++	unsigned int readers;
++} viuin_chan[VIUIN_CHAN_MAX];
++
+ static inline u32 rd_viu(u32 reg)
+ {
+ 	return (u32)aml_read_vcbus(reg);
+@@ -0,6 +0,12 @@
+ 	return val;
+ }
+ 
++static bool viuin_is_wb1(enum tvin_port_e port)
++{
++	return port >= TVIN_PORT_VIU1_WB1_VDIN_BIST &&
++	       port <= TVIN_PORT_VIU1_WB1_POST_BLEND;
++}
++
+ static int viuin_support(struct tvin_frontend_s *fe, enum tvin_port_e port)
+ {
+ 	if ((port >= TVIN_PORT_VIU1 && port < TVIN_PORT_VIU1_MAX) ||
+@@ -0,10 +0,12 @@
+ }
+ EXPORT_SYMBOL(viuin_clear_loopback_path);
+ 
++/* mux0 (vdin source 7) is bits 15:0, mux1 (source 9) bits 31:16 */
+ static void viuin_set_vdin_if_mux_ctrl(enum tvin_port_e port)
+ {
+ 	unsigned int viu_mux = 0;
+ 	unsigned int viu_sel = 0;
++	unsigned int base = viuin_is_wb1(port) ? 16 : 0;
+ 
+ 	switch (port) {
+ 	/* wr_bak_chan1_sel wb_chan_sel*/
+@@ -0,41 +0,23 @@
+ 			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL_T3X, viu_mux, 0, 7);
+ 			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL_T3X, viu_mux, 8, 7);
+ 		} else if (cpu_after_eq(MESON_CPU_MAJOR_ID_T7)) {
+-			/* for vdi6 , vdin source 7*/
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 0, 7);
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 0, 7);
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 8, 7);
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 8, 7);
+-			/* for vdi8 , vdin source 9*/
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 16, 7);
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 16, 7);
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 24, 7);
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 24, 7);
++			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base, 7);
++			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, base, 7);
++			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base + 8, 7);
++			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, base + 8, 7);
+ 		} else {
+-			/* for vdi6 , vdin source 7*/
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 0, 5);
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 0, 5);
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 8, 5);
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 8, 5);
+-			/* for vdi8 , vdin source 9*/
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 16, 5);
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 16, 5);
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 24, 5);
+-			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 24, 5);
++			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base, 5);
++			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, base, 5);
++			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base + 8, 5);
++			wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, base + 8, 5);
+ 		}
+ 	} else if (viu_sel == 2) {
+-		/* for vdi6 , vdin source 7*/
+-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 0, 5);
+-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 0, 5);
+-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 8, 5);
+-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 8, 5);
+-		/* for vdi8 , vdin source 9*/
+-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 16, 5);
+-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 16, 5);
+-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, 24, 5);
+-		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, 24, 5);
++		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base, 5);
++		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, base, 5);
++		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base + 8, 5);
++		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, viu_mux, base + 8, 5);
+ 	} else {
+-		wr_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0);
++		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, base, 16);
+ 	}
+ }
+ 
+@@ -0,8 +0,7 @@
+ 		}
+ 		break;
+ 	default:
+-		wr_bits_viu(VIU_WR_BAK_CTRL, 0, 0, 4);
+-		wr_bits_viu(VIU_WR_BAK_CTRL, 0, 4, 4);
++		wr_bits_viu(VIU_WR_BAK_CTRL, 0, viuin_is_wb1(port) ? 4 : 0, 4);
+ 		wr_bits_viu(VPP1_WR_BAK_CTRL, 0, 0, 2);
+ 		wr_bits_viu(VPP2_WR_BAK_CTRL, 0, 0, 2);
+ 		break;
+@@ -0,8 +0,7 @@
+ 		wr_bits_viu(VPP_WR_BAK_CTRL, 0xff, 16, 8);
+ 		break;
+ 	default:
+-		wr_bits_viu(VPP_WR_BAK_CTRL, 0, 0, 4);
+-		wr_bits_viu(VPP_WR_BAK_CTRL, 0, 4, 4);
++		wr_bits_viu(VPP_WR_BAK_CTRL, 0, viuin_is_wb1(port) ? 4 : 0, 4);
+ 		wr_bits_viu(VPP1_WR_BAK_CTRL, 0, 0, 2);
+ 		wr_bits_viu(VPP2_WR_BAK_CTRL, 0, 0, 2);
+ 		break;
+@@ -0,7 +0,9 @@
+ 	enum tvin_port_type_e port_type)
+ {
+ 	struct viuin_s *devp = container_of(fe, struct viuin_s, frontend);
++	unsigned int c = viuin_is_wb1(port);
+ 	unsigned int viu_mux = 0;
++	unsigned long flags;
+ 
+ 	if (!memcpy(&devp->parm, fe->private_data,
+ 		    sizeof(struct vdin_parm_s))) {
+@@ -0,6 +0,21 @@
+ 	}
+ 	/*no need check here, will timeout sometimes*/
+ 	/*viuin_check_venc_line(devp);*/
++	spin_lock_irqsave(&viuin_lock, flags);
++	/* another port on the channel would re-route its readers */
++	if (devp->chans ||
++	    (viuin_chan[c].readers && viuin_chan[c].tap != port)) {
++		spin_unlock_irqrestore(&viuin_lock, flags);
++		return -EBUSY;
++	}
++	devp->chans = BIT(c);
++	devp->flag = 0;
++	open_cnt++;
++	if (viuin_chan[c].readers++) {
++		spin_unlock_irqrestore(&viuin_lock, flags);
++		return 0;
++	}
++	viuin_chan[c].tap = port;
+ 	if (port == TVIN_PORT_VIU1_VIDEO && !is_meson_s5_cpu() && !is_meson_t3x_cpu()) {/*old chip*/
+ 		/* enable hsync for vdin loop */
+ 		wr_bits_viu(VIU_MISC_CTRL1, 1, 28, 1);
+@@ -0,7 +0,6 @@
+ 			if (port >= TVIN_PORT_VIU1_VIDEO &&
+ 			    port <= TVIN_PORT_VIU1_WB0_POST_BLEND) {
+ 				wr_bits_viu(WR_BACK_MISC_CTRL, 1, 0, 1);/*vd0 hsync*/
+-				wr_bits_viu(WR_BACK_MISC_CTRL, 0, 1, 1);/*vd1 hsync*/
+ 			} else {
+ 				wr_bits_viu(WR_BACK_MISC_CTRL, 0xf, 0, 4);
+ 			}
+@@ -0,22 +0,40 @@
+ 		wr_bits_viu(VPU_VIU_VENC_MUX_CTRL, viu_mux, 4, 4);
+ 		wr_bits_viu(VPU_VIU_VENC_MUX_CTRL, viu_mux, 8, 4);
+ 	}
+-	devp->flag = 0;
+-	open_cnt++;
++	spin_unlock_irqrestore(&viuin_lock, flags);
+ 	return 0;
+ }
+ 
+ static void viuin_close(struct tvin_frontend_s *fe, enum tvin_port_type_e port_type)
+ {
+ 	struct viuin_s *devp = container_of(fe, struct viuin_s, frontend);
++	unsigned long flags;
++	unsigned int c;
+ 
+ 	/*no need check here, will timeout sometimes*/
+ 	/*viuin_check_venc_line(devp);*/
++	spin_lock_irqsave(&viuin_lock, flags);
++	/* a frontend whose open failed reads no channel */
++	if (!devp->chans) {
++		spin_unlock_irqrestore(&viuin_lock, flags);
++		return;
++	}
++	for (c = 0; c < VIUIN_CHAN_MAX; c++) {
++		if (!(devp->chans & BIT(c)) || --viuin_chan[c].readers)
++			continue;
++		wr_bits_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0, c ? 16 : 0, 16);
++#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
++		/* txhd2 keystone path close */
++		if (is_meson_txhd2_cpu() && rd_bits_viu(VPP_WR_BAK_CTRL, 11, 1))
++			wr_bits_viu(VPP_WR_BAK_CTRL, 0, 11, 1);
++#endif
++	}
++	devp->chans = 0;
+ 	memset(&devp->parm, 0, sizeof(struct vdin_parm_s));
+ 	/*close the venc to vdin path*/
+ 	if (open_cnt)
+ 		open_cnt--;
+-	if (open_cnt == 0) {
++	if (!viuin_chan[0].readers && !viuin_chan[1].readers) {
+ 		if (cpu_after_eq(MESON_CPU_MAJOR_ID_G12A)) {
+ 			wr_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0);
+ 			wr_viu(VPP_WR_BAK_CTRL, 0);
+@@ -0,9 +0,10 @@
+ 			wr_bits_viu(VPU_VIU_VENC_MUX_CTRL, 0, 8, 4);
+ 			wr_bits_viu(VPU_VIU_VENC_MUX_CTRL, 0, 4, 4);
+ 		}
++		if (rd_viu(VPU_VIU2VDIN_HDN_CTRL) != 0)
++			wr_viu(VPU_VIU2VDIN_HDN_CTRL, 0x0);
+ 	}
+-	if (rd_viu(VPU_VIU2VDIN_HDN_CTRL) != 0)
+-		wr_viu(VPU_VIU2VDIN_HDN_CTRL, 0x0);
++	spin_unlock_irqrestore(&viuin_lock, flags);
+ }
+ 
+ static void viuin_start(struct tvin_frontend_s *fe, enum tvin_sig_fmt_e fmt,
+@@ -0,13 +0,8 @@
+ 		devp->flag |= AMVIUIN_DEC_STOP;
+ 	else
+ 		pr_info("[viuin..]%s viu in dec isn't start.\n", __func__);
++	/* the last reader's close disables the channel */
+ 	//pr_info("%s %d Disable VIU to VDIN\n", __func__, __LINE__);
+-	wr_viu(VPU_VIU_VDIN_IF_MUX_CTRL, 0);
+-#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+-	/* txhd2 keystone path close */
+-	if (is_meson_txhd2_cpu() && rd_bits_viu(VPP_WR_BAK_CTRL, 11, 1))
+-		wr_bits_viu(VPP_WR_BAK_CTRL, 0, 11, 1);
+-#endif
+ }
+ 
+ static int viuin_isr(struct tvin_frontend_s *fe, unsigned int hcnt64,
+@@ -0,17 +0,22 @@
+ static int viuin_probe(struct platform_device *pdev)
+ {
+ 	struct viuin_s *viuin_devp;
++	int i;
+ 
+-	viuin_devp = kmalloc(sizeof(*viuin_devp), GFP_KERNEL);
++	viuin_devp = kcalloc(VIUIN_FE_NUM, sizeof(*viuin_devp), GFP_KERNEL);
+ 	if (!viuin_devp)
+ 		return -ENOMEM;
+-	memset(viuin_devp, 0, sizeof(struct viuin_s));
+-	sprintf(viuin_devp->frontend.name, "%s", DEVICE_NAME);
+-	if (!tvin_frontend_init(&viuin_devp->frontend,
+-				&viu_dec_ops, &viu_sm_ops, 0)) {
+-		if (tvin_reg_frontend(&viuin_devp->frontend))
+-			pr_info("[viuin..]%s register viu frontend error.\n",
+-				__func__);
++	for (i = 0; i < VIUIN_FE_NUM; i++) {
++		if (i)
++			sprintf(viuin_devp[i].frontend.name, "%s%d", DEVICE_NAME, i);
++		else
++			sprintf(viuin_devp[i].frontend.name, "%s", DEVICE_NAME);
++		if (!tvin_frontend_init(&viuin_devp[i].frontend,
++					&viu_dec_ops, &viu_sm_ops, i)) {
++			if (tvin_reg_frontend(&viuin_devp[i].frontend))
++				pr_info("[viuin..]%s register viu frontend error.\n",
++					__func__);
++		}
+ 	}
+ 	platform_set_drvdata(pdev, viuin_devp);
+ 	pr_info("[viuin..]%s probe ok.\n", __func__);
+@@ -0,9 +0,11 @@
+ static int viuin_remove(struct platform_device *pdev)
+ {
+ 	struct viuin_s *devp = platform_get_drvdata(pdev);
++	int i;
+ 
+ 	if (devp) {
+-		tvin_unreg_frontend(&devp->frontend);
++		for (i = 0; i < VIUIN_FE_NUM; i++)
++			tvin_unreg_frontend(&devp[i].frontend);
+ 		kfree(devp);
+ 	}
+ 	return 0;

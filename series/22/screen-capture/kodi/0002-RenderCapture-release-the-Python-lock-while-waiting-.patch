@@ -8,8 +8,8 @@ getImage blocks until the next captured frame, up to its timeout,
 while holding the interpreter lock. A capture add-on polling it stalls
 every other Python add-on for as long as it waits.
 ---
- xbmc/interfaces/legacy/RenderCapture.h | 13 ++++++++++++-
- 1 file changed, 12 insertions(+), 1 deletion(-)
+ xbmc/interfaces/legacy/RenderCapture.h | 24 ++++++++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
 
 diff --git a/xbmc/interfaces/legacy/RenderCapture.h b/xbmc/interfaces/legacy/RenderCapture.h
 --- a/xbmc/interfaces/legacy/RenderCapture.h
@@ -22,29 +22,61 @@ diff --git a/xbmc/interfaces/legacy/RenderCapture.h b/xbmc/interfaces/legacy/Ren
  #include "ServiceBroker.h"
  #include "application/ApplicationComponents.h"
  #include "application/ApplicationPlayer.h"
-@@ -0,6 +0,16 @@
+@@ -0,6 +0,7 @@
+ #include <chrono>
+ #include <cstdint>
+ #include <memory>
++#include <mutex>
+ 
+ namespace XBMCAddon
+ {
+@@ -0,6 +0,18 @@
+       unsigned int m_width{0};
        unsigned int m_height{0};
        std::unique_ptr<uint8_t[]> m_buffer;
- 
-+#ifndef SWIG
-+      //! waits for the next frame without holding the interpreter lock
-+      bool WaitFrame(unsigned int msec)
-+      {
-+        KODI::RENDERING::CAPTURE::CCaptureHandle& handle = *m_handle;
-+        DelayedCallGuard dg(languageHook);
-+        return handle.WaitNext(std::chrono::milliseconds(msec ? msec : 1000));
-+      }
-+#endif
++      std::mutex m_lock;
 +
++#ifndef SWIG
++      //! getImage uses the handle and the buffer without the interpreter lock, so it and capture()
++      //! hold this lock across them; a thread waits for it without the interpreter lock
++      std::unique_lock<std::mutex> LockCapture()
++      {
++        DelayedCallGuard dg(languageHook);
++        return std::unique_lock(m_lock);
++      }
++
++#endif
+ 
      public:
        RenderCapture() = default;
-       ~RenderCapture() override = default;
-@@ -0,7 +0,7 @@
+@@ -0,6 +0,7 @@
+       inline XbmcCommons::Buffer getImage(unsigned int msecs = 0)
+ #endif
+       {
++        const auto lock = LockCapture();
+         if (!GetPixels(msecs))
+           return XbmcCommons::Buffer(0);
+ 
+@@ -0,6 +0,7 @@
+       inline void capture(int width, int height)
+ #endif
+       {
++        const auto lock = LockCapture();
+         // cancel any previous request before its buffer goes away
+         m_handle.reset();
+ 
+@@ -0,8 +0,12 @@
        {
          if (!m_handle)
            return false;
 -        if (!m_handle->WaitNext(std::chrono::milliseconds(msec ? msec : 1000)))
-+        if (!WaitFrame(msec))
-           return false;
+-          return false;
++        {
++          // wait for the next frame without holding the interpreter lock
++          DelayedCallGuard dg(languageHook);
++          if (!m_handle->WaitNext(std::chrono::milliseconds(msec ? msec : 1000)))
++            return false;
++        }
          const KODI::RENDERING::CAPTURE::CaptureResult result = m_handle->CopyResult();
          // legacy contract: raw output-coded 8-bit BGRA, never tonemapped; an
+         // HDR session delivers PQ/HLG-coded bytes exactly as glReadPixels did

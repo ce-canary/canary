@@ -6,8 +6,8 @@ Subject: [PATCH] ActiveAE: restart the stream sync when the sink is reopened
 A sink reopen during playback, such as the display reset after a
 refresh rate switch, drops the queued sink audio and flushes the
 streams' processing buffers but leaves their sync state alone. The sync
-then measures across the lost audio, and an error under the player's
-threshold stays until a seek.
+then measures across the lost audio. Where the player moves its clock to
+the audio, an error under its threshold stays until a seek.
 ---
  xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 1 +
  1 file changed, 1 insertion(+)

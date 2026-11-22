@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 21 Nov 2026 14:07:31 -0600
+Subject: [PATCH] VideoPlayer: take the DVD time from the VOBU on screen
+
+The DVD play time put the offset of the last packet read on the clock.
+The read runs ahead of the picture by the queues, so the time paired the
+clock with a VOBU not yet shown.
+---
+ .../DVDInputStreamNavigator.cpp               |  6 +++++-
+ .../DVDInputStreams/DVDInputStreamNavigator.h |  6 ++++--
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 21 +++++++++++++++++--
+ 3 files changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.cpp
+@@ -0,6 +0,7 @@
+         m_iTime = (int) ( m_dll.dvdnav_get_current_time(m_dvdnav)  / 90 );
+ 
+         NavPacket nav{.position = position,
++                      .time = m_iTime,
+                       .part = m_iPart,
+                       .partCount = m_iPartCount,
+                       .menu = menu,
+@@ -0,12 +0,15 @@
+     it->pts = it->start - offset;
+ }
+ 
+-void CDVDInputStreamNavigator::ReleaseNavPackets(double presented)
++const CDVDInputStreamNavigator::NavPacket* CDVDInputStreamNavigator::ReleaseNavPackets(
++    double presented)
+ {
+   // a VOBU is passed once the picture reaches the start of the next one
+   while (m_navPackets.size() > 1 && presented != DVD_NOPTS_VALUE &&
+          m_navPackets[1].pts != DVD_NOPTS_VALUE && presented >= m_navPackets[1].pts)
+     m_navPackets.pop_front();
++
++  return m_navPackets.empty() ? nullptr : &m_navPackets.front();
+ }
+ 
+ void CDVDInputStreamNavigator::OnBack()
+diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h
+--- a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h
++++ b/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamNavigator.h
+@@ -0,6 +0,7 @@
+   struct NavPacket
+   {
+     dvdnav_nav_position_t position{};
++    int time{0}; // ms into the PGC at the start of the VOBU
+     int part{0}; // the part and part count of its cell
+     int partCount{0};
+     bool menu{false}; // has buttons, or is outside a title
+@@ -0,8 +0,9 @@
+   VideoStreamInfo GetVideoStreamInfo();
+ 
+   void SetNavPacketOffset(double offset);
+-  // drops the VOBUs the picture at `presented` has passed, none while it is not known
+-  void ReleaseNavPackets(double presented);
++  // drops the VOBUs the picture at `presented` has passed, none while it is not known, returns
++  // the one on screen
++  const NavPacket* ReleaseNavPackets(double presented);
+ 
+   void SaveCurrentState(const CStreamDetails& details) override;
+   UpdateState UpdateItemFromSavedStates(CFileItem& item, double time, bool& closed) override;
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,9 +0,14 @@
+ 
+     // a DVD VOBU stops being the position once the picture on screen has passed it, which only
+     // the clock of the new pictures tells
++    const CDVDInputStreamNavigator::NavPacket* nav = nullptr;
++    double presented = DVD_NOPTS_VALUE;
+     if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_DVD))
+-      std::static_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream)
+-          ->ReleaseNavPackets(GetPresentedPts());
++    {
++      presented = GetPresentedPts();
++      nav = std::static_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream)
++                ->ReleaseNavPackets(presented);
++    }
+ 
+     // Raw (pre-EDL) upper bound of the stream, needed below to tell whether the last
+     // chapter is fully contained within a trailing EDL cut.
+@@ -0,6 +0,18 @@
+       state.time = blurayTime();
+       state.timeMax = pDisplayTime->GetTotalTime();
+     }
++    else if (nav && pDisplayTime->GetTotalTime() > 0)
++    {
++      // until the clock runs on the new pictures the time holds at the start of the VOBU
++      state.time = nav->time;
++      if (nav->pts != DVD_NOPTS_VALUE)
++      {
++        state.time_offset = DVD_MSEC_TO_TIME(nav->time) - nav->pts;
++        if (presented != DVD_NOPTS_VALUE)
++          state.time = DVD_TIME_TO_MSEC(std::max(presented, nav->pts) + state.time_offset);
++      }
++      state.timeMax = pDisplayTime->GetTotalTime();
++    }
+     else if (pDisplayTime && pDisplayTime->GetTotalTime() > 0)
+     {
+       if (state.dts != DVD_NOPTS_VALUE)

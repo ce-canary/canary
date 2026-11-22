@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 20 Nov 2026 17:07:15 -0600
+Subject: [PATCH] DT: capture video that does not fill the output with vdin1 on
+ t7
+
+The vendor T7 device trees set VDIN_NOT_DATA_INPUT_DROP on vdin1.
+vdin then drops every frame whose measured active size is not the
+output size. Video that does not fill the output, as in a letterbox,
+pillarbox, window or zoom, gives a VD1 tap of another size. Its
+capture gets no frame and T7 screenshots miss the video.
+---
+ arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi
+@@ -0,4 +0,5 @@
+ 	/* VD1, VD2, VD3, OSD1, OSD2, VPP, POST_BLEND; the driver holds 7 */
+ 	fe_ports = <0x0000a002 0x0000a003 0x0000a004 0x0000a005
+ 		    0x0000a006 0x0000a008 0x0000a009>;
++	/delete-property/ vdin_function_sel;
+ };

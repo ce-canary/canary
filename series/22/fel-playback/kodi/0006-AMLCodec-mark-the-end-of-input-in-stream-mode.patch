@@ -192,8 +192,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
    std::string   GetHDRStaticMetadata(bool dv_enable);
  
 @@ -0,6 +0,8 @@
-   bool             m_handbackFrame{false};
    bool             m_handbackOff{false};
+   std::atomic<bool> m_lowerLayers{false};
    bool             m_drainPrebuffer{false};
 +  bool             m_inputWritten{false};
 +  bool             m_inputEndSent{false};

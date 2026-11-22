@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 17 Nov 2026 11:33:43 -0600
+Subject: [PATCH] vvc1: stamp anchors with their releasing packet's decode time
+
+When a stream that can reorder has decode-time stamps
+(KEYFRAME_PTS_ONLY), as from MKV VfW and AVI, each anchor kept its own
+decode time. It is shown after the B pictures that follow it, so stamps
+fell out of display order. In decode order a skipped P is the packet
+that releases the held anchor, but the ucode reports no picture for it.
+---
+ drivers/frame_provider/decoder/vc1/vvc1.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/drivers/frame_provider/decoder/vc1/vvc1.c b/drivers/frame_provider/decoder/vc1/vvc1.c
+--- a/drivers/frame_provider/decoder/vc1/vvc1.c
++++ b/drivers/frame_provider/decoder/vc1/vvc1.c
+@@ -0,6 +0,7 @@
+ static u32 buf_size = 32 * 1024 * 1024;
+ static u32 buf_offset;
+ static u32 avi_flag;
++static u32 dts_stamps;
+ static u32 unstable_pts_debug;
+ static u32 unstable_pts;
+ static u32 vvc1_ratio;
+@@ -0,6 +0,17 @@
+ 		hw->ref_use[hw->refs[0]]--; 	//old ref0 unused
+ 		hw->refs[0] = hw->refs[1];
+ 		hw->refs[1] = index;
++		/* with decode stamps an anchor takes its releasing packet's decode time */
++		if (dts_stamps &&
++			pts_pickout_between_us64(PTS_TYPE_VIDEO, hw->pics[hw->refs[0]].offset,
++				hw->pics[index].offset, &hw->pics[hw->refs[0]].pts,
++				&hw->pics[hw->refs[0]].pts64) == 0) {
++			hw->pics[hw->refs[0]].pts_valid = 1;
++		} else if (dts_stamps && hw->pics[index].pts_valid) {
++			hw->pics[hw->refs[0]].pts = hw->pics[index].pts;
++			hw->pics[hw->refs[0]].pts64 = hw->pics[index].pts64;
++			hw->pics[hw->refs[0]].pts_valid = 1;
++		}
+ 		index = hw->refs[0];
+ 	}
+ 	vc1_print(0, VC1_DEBUG_DETAIL,"%s: hw->refs[0] = %d, hw->refs[1] = %d\n", __func__, hw->refs[0], hw->refs[1]);
+@@ -0,6 +0,8 @@
+ 	vvc1_ratio = (vvc1_amstream_dec_info.ratio >> DISP_RATIO_ASPECT_RATIO_BIT);
+ 
+ 	avi_flag = (unsigned long) vvc1_amstream_dec_info.param & 0x01;
++	/* decode times of a stream that can reorder (KEYFRAME_PTS_ONLY) */
++	dts_stamps = ((unsigned long) vvc1_amstream_dec_info.param & 0x100) >> 8;
+ 
+ 	unstable_pts = (((unsigned long) vvc1_amstream_dec_info.param & 0x40) >> 6);
+ 	if (unstable_pts_debug == 1) {

@@ -12,7 +12,7 @@ highlight and arrow keys found no button.
  ...ced-button-when-its-highlight-starts.patch | 44 +++++++++++++++++++
  tools/depends/target/libdvdnav/Makefile       |  4 +-
  3 files changed, 49 insertions(+), 2 deletions(-)
- create mode 100644 tools/depends/target/libdvdnav/09-all-select-the-forced-button-when-its-highlight-starts.patch
+ create mode 100644 tools/depends/target/libdvdnav/08-all-select-the-forced-button-when-its-highlight-starts.patch
 
 diff --git a/cmake/modules/FindLibDvdNav.cmake b/cmake/modules/FindLibDvdNav.cmake
 --- a/cmake/modules/FindLibDvdNav.cmake
@@ -21,16 +21,16 @@ diff --git a/cmake/modules/FindLibDvdNav.cmake b/cmake/modules/FindLibDvdNav.cma
                  "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/04-all-vm-keep-the-random-state-in-the-vm.patch"
                  "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/05-all-forget-a-skipped-wait-when-the-vm-hops.patch"
                  "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/06-all-run-the-cell-step-after-a-sync-wait.patch"
--                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/07-all-wait-before-a-cell-step-that-opens-another-vob.patch")
-+                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/07-all-wait-before-a-cell-step-that-opens-another-vob.patch"
-+                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/09-all-select-the-forced-button-when-its-highlight-starts.patch")
+-                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/07-all-wait-at-a-non-seamless-pgc-join.patch")
++                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/07-all-wait-at-a-non-seamless-pgc-join.patch"
++                "${CORE_SOURCE_DIR}/tools/depends/target/${${CMAKE_FIND_PACKAGE_NAME}_MODULE_LC}/08-all-select-the-forced-button-when-its-highlight-starts.patch")
  
      if(WIN32 OR WINDOWS_STORE)
        set(${${CMAKE_FIND_PACKAGE_NAME}_MODULE}_libType shared)
-diff --git a/tools/depends/target/libdvdnav/09-all-select-the-forced-button-when-its-highlight-starts.patch b/tools/depends/target/libdvdnav/09-all-select-the-forced-button-when-its-highlight-starts.patch
+diff --git a/tools/depends/target/libdvdnav/08-all-select-the-forced-button-when-its-highlight-starts.patch b/tools/depends/target/libdvdnav/08-all-select-the-forced-button-when-its-highlight-starts.patch
 new file mode 100644
 --- /dev/null
-+++ b/tools/depends/target/libdvdnav/09-all-select-the-forced-button-when-its-highlight-starts.patch
++++ b/tools/depends/target/libdvdnav/08-all-select-the-forced-button-when-its-highlight-starts.patch
 @@ -0,0 +0,44 @@
 +Subject: [PATCH] dvdnav: select the forced button when its highlight starts
 +
@@ -44,7 +44,7 @@ new file mode 100644
 + 1 file changed, 7 insertions(+), 8 deletions(-)
 +
 +diff --git a/src/dvdnav.c b/src/dvdnav.c
-+index 08f60d1385..c5fdacea1a 100644
++index 812b980af5..882c6bb475 100644
 +--- a/src/dvdnav.c
 ++++ b/src/dvdnav.c
 +@@ -809,14 +809,6 @@ dvdnav_status_t dvdnav_get_next_cache_block(dvdnav_t *this, uint8_t **buf,
@@ -62,7 +62,7 @@ new file mode 100644
 +     pthread_mutex_unlock(&this->vm_lock);
 +     return DVDNAV_STATUS_OK;
 +   }
-+@@ -920,6 +912,13 @@ dvdnav_status_t dvdnav_get_next_cache_block(dvdnav_t *this, uint8_t **buf,
++@@ -956,6 +948,13 @@ dvdnav_status_t dvdnav_get_next_cache_block(dvdnav_t *this, uint8_t **buf,
 +     if (this->last_cmd_nav_lbn == this->pci.pci_gi.nv_pck_lbn)
 +       this->last_cmd_nav_lbn = SRI_END_OF_CELL;
 + 
@@ -83,17 +83,17 @@ diff --git a/tools/depends/target/libdvdnav/Makefile b/tools/depends/target/libd
                                    04-all-vm-keep-the-random-state-in-the-vm.patch \
                                    05-all-forget-a-skipped-wait-when-the-vm-hops.patch \
                                    06-all-run-the-cell-step-after-a-sync-wait.patch \
--                                  07-all-wait-before-a-cell-step-that-opens-another-vob.patch
-+                                  07-all-wait-before-a-cell-step-that-opens-another-vob.patch \
-+                                  09-all-select-the-forced-button-when-its-highlight-starts.patch
+-                                  07-all-wait-at-a-non-seamless-pgc-join.patch
++                                  07-all-wait-at-a-non-seamless-pgc-join.patch \
++                                  08-all-select-the-forced-button-when-its-highlight-starts.patch
  
  MESON_BUILD_TYPE=release
  
 @@ -0,6 +0,7 @@
  	cd $(PLATFORM); patch -p1 -i ../05-all-forget-a-skipped-wait-when-the-vm-hops.patch
  	cd $(PLATFORM); patch -p1 -i ../06-all-run-the-cell-step-after-a-sync-wait.patch
- 	cd $(PLATFORM); patch -p1 -i ../07-all-wait-before-a-cell-step-that-opens-another-vob.patch
-+	cd $(PLATFORM); patch -p1 -i ../09-all-select-the-forced-button-when-its-highlight-starts.patch
+ 	cd $(PLATFORM); patch -p1 -i ../07-all-wait-at-a-non-seamless-pgc-join.patch
++	cd $(PLATFORM); patch -p1 -i ../08-all-select-the-forced-button-when-its-highlight-starts.patch
  ifeq ($(TARGET_PLATFORM),windows)
  	cd $(PLATFORM); patch -p1 -i ../01-win-uwpcompat.patch
  	cd $(PLATFORM); patch -p1 -i ../02-win-remove-lib-version.patch

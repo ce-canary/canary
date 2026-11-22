@@ -9,15 +9,24 @@ still waits for a vblank. The five to six writes at a DV open block
 the player for 217 to 290 ms before the decoder starts, and the close
 writes cost about as much again.
 ---
- .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  |  60 +++----
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  |  63 +++----
  .../VideoPlayer/DVDCodecs/Video/AMLCodec.h    |   5 +-
  xbmc/windowing/amlogic/AMLDisplay.cpp         | 154 +++++++++++++++++-
  xbmc/windowing/amlogic/AMLDisplay.h           |  27 +++
- 4 files changed, 214 insertions(+), 32 deletions(-)
+ 4 files changed, 215 insertions(+), 34 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,7 +0,7 @@
+           // the picture is off, so the switches of its full layer go now, as at a close
+           if (m_lowerLayers)
+           {
+-            CloseLayers();
++            CloseLayers({});
+             m_lowerLayers = false;
+           }
+           heldModule = OutputModule::DV;
 @@ -0,30 +0,31 @@
    auto* AmlDisplay =
        static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
@@ -169,15 +178,16 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
  }
  
  void CAMLCodec::CloseAmlVideo()
-@@ -0,7 +0,7 @@
- 
-   // the open of a full layer picture enabled its layer, and the picture went off before this open
-   if (pictureFEL && !fullLayer)
--    CloseLayers();
-+    CloseLayers({});
-   m_handback = m_outputModule != OutputModule::NONE;
-   // the core can still run on a picture that went off at this take when the first frame shows
-   m_handbackOff = !convert;
+@@ -0,8 +0,7 @@
+     {
+       auto* AmlDisplay =
+           static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
+-      AmlDisplay->aml_set_drmProperty("dv_debug", DRM_MODE_OBJECT_CRTC, "enable_fel 0");
+-      AmlDisplay->aml_set_drmProperty("dv_debug", DRM_MODE_OBJECT_CRTC, "enable_mel 0");
++      AmlDisplay->SetCrtcProperties({{"dv_debug", "enable_fel 0"}, {"dv_debug", "enable_mel 0"}});
+     }
+   }
+   return ret;
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
@@ -201,8 +211,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
 -  static void   CloseLayers();
 +  static void   CloseLayers(std::vector<AMLCrtcWrite> writes);
    Hold          HoldOnClose(bool dvEnabled, int& dvPolicy);
-   bool          TakeHold(const CDVDStreamInfo& hints, const AMLVideoOutput& output, bool doviIsFEL);
    void          EndHold(bool failed);
+   void          SetStreamStartLevel(uint32_t level);
 diff --git a/xbmc/windowing/amlogic/AMLDisplay.cpp b/xbmc/windowing/amlogic/AMLDisplay.cpp
 --- a/xbmc/windowing/amlogic/AMLDisplay.cpp
 +++ b/xbmc/windowing/amlogic/AMLDisplay.cpp

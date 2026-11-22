@@ -9,15 +9,15 @@ two apart, and a still sends nothing at all. No message reports the
 end. An end mark must follow the demuxer's own end of stream, since
 the input's EOF needs a read past the last byte.
 ---
- .../DVDCodecs/Video/DVDVideoCodec.h           |  5 ++++
- xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h |  5 ++++
- .../DVDDemuxers/DVDDemuxFFmpeg.cpp            |  5 ++++
+ .../DVDCodecs/Video/DVDVideoCodec.h           |  5 ++
+ xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemux.h |  5 ++
+ .../DVDDemuxers/DVDDemuxFFmpeg.cpp            |  5 ++
  .../VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.h  |  1 +
  xbmc/cores/VideoPlayer/DVDMessage.h           |  1 +
- xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 27 +++++++++++++++++++
- xbmc/cores/VideoPlayer/VideoPlayer.h          |  2 ++
- xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp   | 10 +++++++
- 8 files changed, 56 insertions(+)
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 50 +++++++++++++++----
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |  3 ++
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp   | 10 ++++
+ 8 files changed, 70 insertions(+), 10 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h
@@ -89,6 +89,14 @@ diff --git a/xbmc/cores/VideoPlayer/DVDMessage.h b/xbmc/cores/VideoPlayer/DVDMes
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,7 @@
+   m_navTail = false;
+   m_inputEnded = false;
+   m_videoDrained = false;
++  m_videoInputEndSent = false;
+   m_navStop = false;
+   m_navStopped = false;
+   m_discAudioPick = false;
 @@ -0,6 +0,10 @@
          continue;
        }
@@ -100,43 +108,43 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
        // check for a still frame state
        if (std::shared_ptr<CDVDInputStream::IMenus> pStream = std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream))
        {
-@@ -0,6 +0,12 @@
+@@ -0,11 +0,7 @@
+         }
+         else if (!m_navTail)
+         {
+-          if (m_CurrentVideo.id >= 0 && m_CurrentVideo.packets > 0 && !m_videoDrained)
+-          {
+-            m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
+-            m_videoDrained = true;
+-          }
++          SendVideoDrain();
+           m_inputEnded = true;
  
-       if (!m_inputEnded && m_CurrentVideo.id >= 0 && m_CurrentVideo.packets > 0)
-       {
-+        // a demuxer can come back empty on a late read, a disc that gets here has no next item;
-+        // the input's EOF needs a read past the last byte, which a demuxer may never make
-+        if (m_pInputStream->IsEOF() || (m_pDemuxer && m_pDemuxer->IsAtEnd()) ||
-+            std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream))
-+          SendVideoInputEnd();
-+
-         m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
+           m_CurrentAudio.inited = false;
+@@ -0,11 +0,7 @@
+         continue;
        }
+ 
+-      if (!m_videoDrained && m_CurrentVideo.id >= 0 && m_CurrentVideo.packets > 0)
+-      {
+-        m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
+-        m_videoDrained = true;
+-      }
++      SendVideoDrain();
        m_inputEnded = true;
-@@ -0,6 +0,10 @@
-       continue;
-     }
  
-+    // the still state can leave and return while packets flow, only new input needs a new end
-+    if (pStream->type == StreamType::VIDEO)
-+      m_videoInputEndSent = false;
-+
-     if (STREAM_SOURCE_MASK(pStream->source) != STREAM_SOURCE_DEMUX_SUB)
-     {
-       m_syncWait.reset();
-@@ -0,7 +0,10 @@
-   if (!m_navTail)
-   {
-     if (m_CurrentVideo.id >= 0)
-+    {
-+      SendVideoInputEnd();
-       m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
-+    }
-     m_inputEnded = true;
+       m_CurrentAudio.inited = false;
+@@ -0,6 +0,8 @@
+     pPacket->iSize, pPacket->dts/1000000, pPacket->pts/1000000, pPacket->duration/1000.0,
+     m_clock.GetClock()/1000000.0,m_processInfo->GetLevelVQ());
+   m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsgDemuxerPacket>(pPacket, drop));
++  // the still state can leave and return while packets flow, only new input needs a new end
++  m_videoInputEndSent = false;
+   m_videoDrained = false;
  
-     m_CurrentAudio.inited = false;
-@@ -0,6 +0,16 @@
-   return true;
+   if (!drop)
+@@ -0,6 +0,36 @@
+ #endif
  }
  
 +// queues behind the last packet, once for each run of input
@@ -149,20 +157,49 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
 +  m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_INPUT_END));
 +}
 +
- // seeks in the tail are dropped, as they would act on the next item, unless the read is held in
- // the title; a disc audio or subtitle pick goes to the disc, whose stream registers carry it into
- // the next item; video and program picks have no disc register and are dropped
++// once for each run of video input, and once more when the end of the input is known
++void CVideoPlayer::SendVideoDrain()
++{
++  if (m_CurrentVideo.id < 0 || m_CurrentVideo.packets == 0)
++    return;
++
++  // a demuxer can come back empty on a late read, a disc that gets here has no next item;
++  // the input's EOF needs a read past the last byte, which a demuxer may never make
++  const bool inputEnd = m_pInputStream->IsEOF() || (m_pDemuxer && m_pDemuxer->IsAtEnd()) ||
++                        std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream);
++  if (m_videoDrained && (!inputEnd || m_videoInputEndSent))
++    return;
++
++  if (inputEnd)
++    SendVideoInputEnd();
++
++  m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
++  m_videoDrained = true;
++}
++
+ // passes a pick of a disc stream to the disc, false when the disc does not allow the change; in a
+ // nav tail the demuxer of the old item still holds the streams a pick names
+ bool CVideoPlayer::SelectDiscStream(const SelectionStream& st)
+@@ -0,6 +0,7 @@
+   m_navTail = false;
+   m_inputEnded = false;
+   m_videoDrained = false;
++  m_videoInputEndSent = false;
+   m_lastVideoTitleTime = DVD_NOPTS_VALUE;
+ #if defined(HAVE_LIBBLURAY)
+   if (const auto bluray = GetBlurayInputStream())
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.h
 +++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
-@@ -0,6 +0,7 @@
+@@ -0,6 +0,8 @@
+   void ReportBlurayReadPresented();
    void ReportBlurayItemPlayedOut();
    void CloseSubtitleForNextStream();
-   bool PlayNavTail();
 +  void SendVideoInputEnd();
-   bool DropInNavTail(CDVDMsg& msg);
++  void SendVideoDrain();
    bool SelectDiscStream(const SelectionStream& st);
    bool TakeDiscAudioPick(CDemuxStream* stream);
+   bool OpenStream(CCurrentStream& current, int64_t demuxerId, int iStream, int source, bool reset = true);
 @@ -0,6 +0,7 @@
    double m_lastVideoTitleTime{DVD_NOPTS_VALUE};
    bool m_navStop{false};
@@ -170,7 +207,7 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/Video
 +  bool m_videoInputEndSent{false};
    // the demuxer has no more for now, the players play out what they hold
    bool m_inputEnded{false};
-   bool m_discAudioPick{false};
+   // the video player has a drain for the video input so far
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
 --- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp

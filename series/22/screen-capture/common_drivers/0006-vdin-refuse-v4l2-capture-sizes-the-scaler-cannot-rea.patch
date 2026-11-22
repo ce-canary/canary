@@ -9,7 +9,8 @@ under the canvas alignment skips the horizontal one. vdin then writes
 the source size into the small capture buffers and corrupts memory.
 ---
  drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 20 ++++++++++++++++++++
- 1 file changed, 20 insertions(+)
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.h |  3 +++
+ 2 files changed, 23 insertions(+)
 
 diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
 --- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
@@ -49,9 +50,9 @@ diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin
  		return -EINVAL;
  	}
  
-+	/* the vdin scalers cannot shrink by 32 or more */
-+	if (devp->v4l2_fmt.fmt.pix_mp.width * 32 <= vdin_cap_param.h_active ||
-+		devp->v4l2_fmt.fmt.pix_mp.height * 32 <= vdin_cap_param.v_active) {
++	if (devp->v4l2_fmt.fmt.pix_mp.width * VDIN_V4L2_MAX_SHRINK <= vdin_cap_param.h_active ||
++	    devp->v4l2_fmt.fmt.pix_mp.height * VDIN_V4L2_MAX_SHRINK <=
++	    vdin_cap_param.v_active) {
 +		dprintk(0, "%s,out of scale range!v4l2_fmt:%dx%d active:%dx%d\n",
 +			__func__, devp->v4l2_fmt.fmt.pix_mp.width,
 +			devp->v4l2_fmt.fmt.pix_mp.height, vdin_cap_param.h_active,
@@ -62,3 +63,16 @@ diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin
  	if (devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21 ||
  		devp->v4l2_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV21M)
  		vdin_cap_param.dfmt = TVIN_NV21;
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.h b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.h
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.h
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.h
+@@ -0,6 +0,9 @@
+ #include <linux/amlogic/meson_uvm_core.h>
+ #define VDIN_V4L2_GET_LOOPBACK_FMT_BY_VOUT_SERVE
+ 
++/* the vdin scalers can not shrink by this much or more */
++#define VDIN_V4L2_MAX_SHRINK	32
++
+ #define VDIN_DEV_VER		0x20240116
+ #define VDIN_DEV_VER2		"v4l2 base func ok"
+ #define VDIN_V4L_DV_NAME	"vdin_video"

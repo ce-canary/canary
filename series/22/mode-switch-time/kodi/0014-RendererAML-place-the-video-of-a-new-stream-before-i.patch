@@ -9,61 +9,13 @@ pass, which runs after the first frame is released. amvideo turns the
 layer on at the first frame only if it was enabled before, and a
 Dolby Vision start can wait a vsync while it is still off.
 ---
- .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp      | 15 ++++++++++++---
- xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h |  2 ++
- .../VideoPlayer/VideoRenderers/BaseRenderer.h     |  2 ++
- .../VideoRenderers/HwDecRender/RendererAML.cpp    | 12 ++++++++++++
- .../VideoRenderers/HwDecRender/RendererAML.h      |  2 ++
- .../VideoPlayer/VideoRenderers/RenderManager.cpp  | 12 ++++++++++--
- .../VideoPlayer/VideoRenderers/RenderManager.h    |  3 ++-
- 7 files changed, 42 insertions(+), 6 deletions(-)
+ xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h |  2 ++
+ .../VideoRenderers/HwDecRender/RendererAML.cpp       | 12 ++++++++++++
+ .../VideoRenderers/HwDecRender/RendererAML.h         |  2 ++
+ .../VideoPlayer/VideoRenderers/RenderManager.cpp     | 12 ++++++++++--
+ .../cores/VideoPlayer/VideoRenderers/RenderManager.h |  3 ++-
+ 5 files changed, 28 insertions(+), 3 deletions(-)
 
-diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
---- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
-+++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
-@@ -0,11 +0,14 @@
-   }
- }
- 
--void CAMLCodec::ShowMainVideo(const bool show)
-+namespace
- {
--  static std::mutex saved_mutex;
--  static int saved_disable_video = -1;
-+std::mutex saved_mutex;
-+int saved_disable_video = -1;
-+} // namespace
- 
-+void CAMLCodec::ShowMainVideo(const bool show)
-+{
-   std::lock_guard<std::mutex> lock(saved_mutex);
-   int disable_video = show ? 0:1;
-   if (saved_disable_video == disable_video)
-@@ -0,6 +0,12 @@
-   saved_disable_video = disable_video;
- }
- 
-+bool CAMLCodec::IsMainVideoHidden()
-+{
-+  std::lock_guard<std::mutex> lock(saved_mutex);
-+  return saved_disable_video == 1;
-+}
-+
- void CAMLCodec::SetVideoZoom(const float zoom)
- {
-   // input zoom range is 0.5 to 2.0 with a default of 1.0.
-diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
---- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
-+++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
-@@ -0,6 +0,8 @@
-   //! output stays set up for the next decoder, and a picture under a held HDR10 or Dolby Vision
-   //! output leaves that forced output to the hold or the decoder that took it
-   static void   DropKeptPicture(bool taken);
-+  //! Whether Kodi last switched the video layer off
-+  static bool   IsMainVideoHidden();
-   //! Makes this decoder the newest, and the one that takes or ends a held output no decoder
-   //! claimed
-   void          ClaimHold();
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h b/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/BaseRenderer.h

@@ -6,35 +6,49 @@ Subject: [PATCH] VideoPlayer: stay in the loop until the decoder ends video
 Video counted as finished when its message queue was empty, while
 the decoder could still hold the rest of the stream. The rest was
 dropped at close, or played on after the player left its main loop.
+The end drain also needed a video timestamp, so a stream without
+one was never drained.
 ---
- xbmc/cores/VideoPlayer/VideoPlayer.cpp | 13 ++++++++++---
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 17 +++++++++++++----
  xbmc/cores/VideoPlayer/VideoPlayer.h   |  2 ++
- 2 files changed, 12 insertions(+), 3 deletions(-)
+ 2 files changed, 15 insertions(+), 4 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 @@ -0,6 +0,7 @@
-   m_CurrentAudioID3.hint.Clear();
    m_SpeedState.Reset(DVD_NOPTS_VALUE);
+   m_seekStart = false;
    m_navTail = false;
-+  m_inputEnded = false;
++  m_videoDrained = false;
    m_navStop = false;
    m_navStopped = false;
    m_discAudioPick = false;
-@@ -0,10 +0,11 @@
+@@ -0,8 +0,11 @@
+         }
+         else if (!m_navTail)
+         {
+-          if (m_CurrentVideo.id >= 0)
++          if (m_CurrentVideo.id >= 0 && m_CurrentVideo.packets > 0 && !m_videoDrained)
++          {
+             m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
++            m_videoDrained = true;
++          }
+ 
+           m_CurrentAudio.inited = false;
+           m_CurrentVideo.inited = false;
+@@ -0,9 +0,10 @@
          continue;
        }
  
 -      if (m_CurrentVideo.inited)
-+      if (!m_inputEnded && m_CurrentVideo.id >= 0 && m_CurrentVideo.packets > 0)
++      if (!m_videoDrained && m_CurrentVideo.id >= 0 && m_CurrentVideo.packets > 0)
        {
          m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
++        m_videoDrained = true;
        }
-+      m_inputEnded = true;
  
        m_CurrentAudio.inited = false;
-       m_CurrentVideo.inited = false;
 @@ -0,9 +0,11 @@
          continue;
        }
@@ -50,26 +64,18 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
          CThread::Sleep(100ms);
          continue;
 @@ -0,6 +0,7 @@
-     {
-       m_syncWait.reset();
-       m_navTail = false;
-+      m_inputEnded = false;
-     }
+     pPacket->iSize, pPacket->dts/1000000, pPacket->pts/1000000, pPacket->duration/1000.0,
+     m_clock.GetClock()/1000000.0,m_processInfo->GetLevelVQ());
+   m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsgDemuxerPacket>(pPacket, drop));
++  m_videoDrained = false;
  
-     // see if we can find something better to play
-@@ -0,6 +0,7 @@
-   {
-     if (m_CurrentVideo.id >= 0)
-       m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN));
-+    m_inputEnded = true;
- 
-     m_CurrentAudio.inited = false;
-     m_CurrentVideo.inited = false;
+   if (!drop)
+     m_CurrentVideo.packets++;
 @@ -0,6 +0,7 @@
    m_syncStartPtsWait.reset();
    m_seekStart = false;
    m_navTail = false;
-+  m_inputEnded = false;
++  m_videoDrained = false;
    m_lastVideoTitleTime = DVD_NOPTS_VALUE;
  #if defined(HAVE_LIBBLURAY)
    if (const auto bluray = GetBlurayInputStream())
@@ -80,8 +86,8 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/Video
    double m_lastVideoTitleTime{DVD_NOPTS_VALUE};
    bool m_navStop{false};
    bool m_navStopped{false};
-+  // the demuxer has no more for now, the players play out what they hold
-+  bool m_inputEnded{false};
++  // the video player has a drain for the video input so far
++  bool m_videoDrained{false};
    bool m_discAudioPick{false};
  
    CEdl m_Edl;

@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: matthane <matthan.evans@icloud.com>
-Date: Mon, 9 Nov 2026 11:11:58 -0600
+Date: Sat, 21 Nov 2026 14:02:30 -0600
 Subject: [PATCH] RenderManager: wait for a delayed display reset at configure
 
 With a delayed refresh change the display reset ran after a mode
@@ -23,9 +23,9 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/core
  #include "windowing/WinSystem.h"
  
 +#include <algorithm>
+ #include <cmath>
  #include <memory>
  #include <mutex>
- 
 @@ -0,7 +0,8 @@
      m_presentevent.notifyAll();
    }
@@ -66,9 +66,9 @@ diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
 +  return static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetDisplayResetEnd();
 +}
 +
- #if defined(HAVE_LIBBLURAY)
- namespace
+ bool aml_display_last_vblank(std::chrono::steady_clock::time_point& time)
  {
+   const CAMLDisplay* display =
 diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
 --- a/xbmc/utils/AMLUtils.h
 +++ b/xbmc/utils/AMLUtils.h
@@ -88,9 +88,9 @@ diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
 +bool aml_display_reset_pending();
 +// when the last delayed display reset ended, the clock's epoch when none ran
 +std::chrono::steady_clock::time_point aml_display_reset_end();
- // `next` is the clip of the next item, nullptr when unknown
- void aml_continue_presentation(const BLURAY_CLIP_INFO* next);
- void aml_end_presentation(bool stop);
+ // the time of the last vblank of the display, on CLOCK_MONOTONIC as the steady clock; false while
+ // the output is off
+ bool aml_display_last_vblank(std::chrono::steady_clock::time_point& time);
 diff --git a/xbmc/windowing/amlogic/WinSystemAmlogic.h b/xbmc/windowing/amlogic/WinSystemAmlogic.h
 --- a/xbmc/windowing/amlogic/WinSystemAmlogic.h
 +++ b/xbmc/windowing/amlogic/WinSystemAmlogic.h

@@ -7,18 +7,18 @@ The Kodi feeder stops while a screensaver runs, so hyperiond falls back
 to its next source. Users with an animated screensaver may want the
 LEDs to follow it instead.
 ---
- .../packages/addons/service/hyperion.ng/changelog.txt  |  1 +
- .../addons/service/hyperion.ng/source/default.py       | 10 ++++++++--
- .../language/resource.language.en_gb/strings.po        |  8 ++++++++
- .../service/hyperion.ng/source/resources/settings.xml  |  8 ++++++++
- 4 files changed, 25 insertions(+), 2 deletions(-)
+ .../packages/addons/service/hyperion.ng/changelog.txt     | 1 +
+ .../packages/addons/service/hyperion.ng/source/default.py | 7 ++++++-
+ .../resources/language/resource.language.en_gb/strings.po | 8 ++++++++
+ .../service/hyperion.ng/source/resources/settings.xml     | 8 ++++++++
+ 4 files changed, 23 insertions(+), 1 deletion(-)
 
 diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt
 --- a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt
 +++ b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.txt
 @@ -0,6 +0,7 @@
  - Drop platform script
- - Feed the Kodi picture, video and menus, to Hyperion by itself over hyperiond's flatbuffer server, on by default (screen capture used to be opt-in)
+ - Feed the Kodi picture as shown, video, menus and on-screen display, to Hyperion by itself over hyperiond's flatbuffer server, on by default (screen capture used to be opt-in)
  - Build without the DRM and framebuffer screen grabbers
 +- Add an option to keep feeding Hyperion while a screensaver runs
  122
@@ -32,9 +32,9 @@ diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/defa
          self.screensaver = xbmc.getCondVisibility('System.ScreenSaverActive')
          self.feed = xbmcaddon.Addon().getSettingInt('KODI_FEED')
 +        self.feed_screensaver = xbmcaddon.Addon().getSettingBool('KODI_SCREENSAVER')
-         self.video_only = False
-         self.retry_at = 0
-         self.empty = 0
+         self.capture = None
+         self.builder = flatbuffers.Builder(CAPTURE_WIDTH * CAPTURE_HEIGHT * 4)
+         self.sock = None
 @@ -0,6 +0,7 @@
  
      def onSettingsChanged(self):
@@ -43,28 +43,25 @@ diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/defa
  
      def onScreensaverActivated(self):
          self.screensaver = True
-@@ -0,9 +0,13 @@
+@@ -0,8 +0,11 @@
+         self.screensaver = False
  
-     def target(self):
-         # what to capture, None while nothing may be fed
+     def feeding(self):
 -        if self.feed == FEED_OFF or self.screensaver:
 +        if self.feed == FEED_OFF:
-             return None
--        if self.player.isPlayingVideo():
+             return False
 +        if self.screensaver:
-+            # a screensaver covers the video, so only the composite shows it
-+            if self.feed != FEED_ALL or not self.feed_screensaver:
-+                return None
-+        elif self.player.isPlayingVideo():
-             return FEED_VIDEO
-         if self.feed == FEED_ALL and not self.video_only and time.monotonic() >= self.retry_at:
-             return FEED_ALL
++            # a screensaver over a video counts as a menu
++            return self.feed == FEED_ALL and self.feed_screensaver
+         if self.feed == FEED_PLAYBACK:
+             return self.player.isPlayingVideo()
+         return True
 diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/resources/language/resource.language.en_gb/strings.po b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/resources/language/resource.language.en_gb/strings.po
 --- a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/resources/language/resource.language.en_gb/strings.po
 +++ b/projects/Amlogic-ce/packages/addons/service/hyperion.ng/source/resources/language/resource.language.en_gb/strings.po
 @@ -0,3 +0,11 @@
  msgctxt "#30005"
- msgid "Disable the Hyperion Ambilight add-on if it is installed. Only one add-on can capture Kodi at a time."
+ msgid "Disable the Hyperion Ambilight add-on if it is installed. Both add-ons would send their picture to Hyperion."
  msgstr ""
 +
 +msgctxt "#30006"

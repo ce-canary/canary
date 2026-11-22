@@ -4,10 +4,10 @@ Date: Sat, 31 Oct 2026 20:15:52 -0500
 Subject: [PATCH] ActiveAE: count queued passthrough packets by their duration
 
 A passthrough buffer holds one frame in bytes, so its nb_samples is no
-sample count. The stream queues counted a MAT frame as 1.28 s instead
-of 20 ms. The engine counted every passthrough buffer as one frame.
-That included a pause burst shorter than a frame and a skipped packet
-that plays nothing.
+sample count. The stream queues counted a MAT frame as 1.28 s, not
+20 ms. The player read that as cached audio: a passthrough start left
+its cache wait early and took its start clock from that delay. The
+engine also counted a pause burst or a skipped packet as a whole frame.
 ---
  .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 31 +++++++++++++------
  .../AudioEngine/Engines/ActiveAE/ActiveAE.h   |  5 +--

@@ -9,9 +9,9 @@ last picture of one item to the first picture of the next. An open on
 a running player already changes the item without a player exit.
 ---
  .../ApplicationMessageHandling.cpp            |  10 +-
- xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 163 ++++++++++++++++--
- xbmc/cores/VideoPlayer/VideoPlayer.h          |   9 +
- 3 files changed, 164 insertions(+), 18 deletions(-)
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp        | 157 ++++++++++++++++--
+ xbmc/cores/VideoPlayer/VideoPlayer.h          |   8 +
+ 3 files changed, 156 insertions(+), 19 deletions(-)
 
 diff --git a/xbmc/application/ApplicationMessageHandling.cpp b/xbmc/application/ApplicationMessageHandling.cpp
 --- a/xbmc/application/ApplicationMessageHandling.cpp
@@ -105,102 +105,89 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
    m_CurrentVideo.Clear();
    m_CurrentAudio.Clear();
    m_CurrentSubtitle.Clear();
-@@ -0,6 +0,85 @@
-   SetCaching(CACHESTATE_FLUSH);
- }
- 
-+// At the end of a played out item, reports its close and end as OnExit does and waits for the
-+// next item to open in this player. The video stream stays open, so its decoder keeps the last
-+// picture. Returns whether the main loop goes on: an open was queued, or the next item opens.
-+bool CVideoPlayer::ParkAtEnd()
-+{
-+  // menu and live inputs, and a video decoder of the input itself, end as they did
-+  if (m_error || std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream) ||
-+      m_item.IsPVR() || m_item.IsLiveTV() || m_item.IsEPG() ||
-+      m_CurrentVideo.hint.externalInterfaces)
-+    return false;
-+
-+  CloseStream(m_CurrentAudio, true);
-+  CloseStream(m_CurrentTeletext, true);
-+  CloseStream(m_CurrentRadioRDS, true);
-+  CloseStream(m_CurrentAudioID3, true);
-+  CloseStream(m_CurrentSubtitle, false);
-+  m_overlayContainer.Clear();
-+
-+  if (m_bAbortRequest)
-+    return false;
-+
-+  // the player plays until its audio played out, as at a stock end
-+  {
-+    std::unique_lock lock(m_parkSection);
-+    if (m_messenger.GetPacketCount(CDVDMsg::PLAYER_OPENFILE) > 0)
-+      return true;
-+    m_parked = true;
-+  }
-+
-+  m_endReported = true;
-+
-+  IPlayerCallback* cb = &m_callback;
-+  CFileItem fileItem(m_item);
-+  UpdateFileItemStreamDetails(fileItem, UpdateStreamDetails::UPDATE_IF_FLAGGED);
-+  CVideoSettings vs = m_processInfo->GetVideoSettings();
-+  m_outboundEvents->Submit([=]() { cb->StoreVideoSettings(fileItem, vs); });
-+
-+  CBookmark bookmark;
-+  bookmark.totalTimeInSeconds = 0;
-+  bookmark.timeInSeconds = 0;
-+  if (m_State.startTime == 0)
-+  {
-+    bookmark.totalTimeInSeconds = m_State.timeMax / 1000;
-+    bookmark.timeInSeconds = m_State.time / 1000;
-+  }
-+  bookmark.player = m_name;
-+  bookmark.playerState = GetPlayerState();
-+  m_outboundEvents->Submit([=]() { cb->OnPlayerCloseFile(fileItem, bookmark); });
-+
-+  m_pDemuxer.reset();
-+  m_pSubtitleDemuxer.reset();
-+  m_subtitleDemuxerMap.clear();
-+  m_pCCDemuxer.reset();
-+  if (m_pInputStream.use_count() > 1)
-+    throw std::runtime_error("m_pInputStream reference count is greater than 1");
-+  m_pInputStream.reset();
-+
-+  m_outboundEvents->Submit([=]() { cb->OnPlayBackEnded(); });
-+
-+  // only an open acts on a parked player, as a stopped one ignores the rest
-+  while (!m_bAbortRequest)
-+  {
-+    std::shared_ptr<CDVDMsg> msg;
-+    if (m_messenger.Get(msg, 100ms) != MSGQ_OK)
-+      continue;
-+
-+    if (msg->IsType(CDVDMsg::PLAYER_OPENFILE))
-+    {
-+      m_messenger.Put(msg, 1);
-+      return true;
-+    }
-+    if (msg->IsType(CDVDMsg::GENERAL_SYNCHRONIZE))
-+      std::static_pointer_cast<CDVDMsgGeneralSynchronize>(msg)->Wait(100ms, SYNCSOURCE_PLAYER);
-+    else if (msg->IsType(CDVDMsg::PLAYER_SEEK))
-+      m_processInfo->SetStateSeeking(false);
-+  }
-+  return false;
-+}
-+
- void CVideoPlayer::Process()
- {
-   // Try to resolve the correct mime type. This can take some time, for example if a requested
-@@ -0,6 +0,9 @@
+@@ -0,7 +0,81 @@
        if (!m_pInputStream->IsEOF())
          CLog::Log(LOGINFO, "{} - eof reading from demuxer", __FUNCTION__);
  
-+      if (ParkAtEnd())
-+        continue;
+-      break;
++      // at the end of a played out item, report its close and end as OnExit does and wait for
++      // the next item to open in this player; the video stream stays open, so its decoder keeps
++      // the last picture
++      // menu and live inputs, and a video decoder of the input itself, end as they did
++      if (m_error || std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream) ||
++          m_item.IsPVR() || m_item.IsLiveTV() || m_item.IsEPG() ||
++          m_CurrentVideo.hint.externalInterfaces)
++        break;
 +
-       break;
++      // the audio plays out before it closes, as at the end of a file
++      CloseStream(m_CurrentAudio, true);
++      CloseStream(m_CurrentTeletext, true);
++      CloseStream(m_CurrentRadioRDS, true);
++      CloseStream(m_CurrentAudioID3, true);
++      CloseStream(m_CurrentSubtitle, false);
++      m_overlayContainer.Clear();
++
++      if (m_bAbortRequest)
++        break;
++
++      {
++        std::unique_lock lock(m_parkSection);
++        if (m_messenger.GetPacketCount(CDVDMsg::PLAYER_OPENFILE) > 0)
++          continue;
++        m_parked = true;
++      }
++
++      m_endReported = true;
++
++      IPlayerCallback* cb = &m_callback;
++      CFileItem fileItem(m_item);
++      UpdateFileItemStreamDetails(fileItem, UpdateStreamDetails::UPDATE_IF_FLAGGED);
++      CVideoSettings vs = m_processInfo->GetVideoSettings();
++      m_outboundEvents->Submit([=]() { cb->StoreVideoSettings(fileItem, vs); });
++
++      CBookmark bookmark;
++      bookmark.totalTimeInSeconds = 0;
++      bookmark.timeInSeconds = 0;
++      if (m_State.startTime == 0)
++      {
++        bookmark.totalTimeInSeconds = m_State.timeMax / 1000;
++        bookmark.timeInSeconds = m_State.time / 1000;
++      }
++      bookmark.player = m_name;
++      bookmark.playerState = GetPlayerState();
++      m_outboundEvents->Submit([=]() { cb->OnPlayerCloseFile(fileItem, bookmark); });
++
++      m_pDemuxer.reset();
++      m_pSubtitleDemuxer.reset();
++      m_subtitleDemuxerMap.clear();
++      m_pCCDemuxer.reset();
++      if (m_pInputStream.use_count() > 1)
++        throw std::runtime_error("m_pInputStream reference count is greater than 1");
++      m_pInputStream.reset();
++
++      m_outboundEvents->Submit([=]() { cb->OnPlayBackEnded(); });
++
++      // only an open acts on a parked player, as a stopped one ignores the rest
++      while (!m_bAbortRequest)
++      {
++        std::shared_ptr<CDVDMsg> msg;
++        if (m_messenger.Get(msg, 100ms) != MSGQ_OK)
++          continue;
++
++        if (msg->IsType(CDVDMsg::PLAYER_OPENFILE))
++        {
++          m_messenger.Put(msg, 1);
++          break;
++        }
++        if (msg->IsType(CDVDMsg::GENERAL_SYNCHRONIZE))
++          std::static_pointer_cast<CDVDMsgGeneralSynchronize>(msg)->Wait(100ms, SYNCSOURCE_PLAYER);
++        else if (msg->IsType(CDVDMsg::PLAYER_SEEK))
++          m_processInfo->SetStateSeeking(false);
++      }
++      continue;
      }
  
+     // Drop the packets the demuxer replays after a subtitle stream change
 @@ -0,8 +0,11 @@
    // If we decide nothing was played then the state is cleared
    // For other input streams no action is taken (as NONE is returned by the default virtual function)
@@ -330,21 +317,13 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.h
 +++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
-@@ -0,6 +0,7 @@
-   void DestroyPlayers();
- 
-   void Prepare();
-+  bool ParkAtEnd();
-   bool ShouldDeferSync(bool ready, std::chrono::steady_clock::time_point now);
-   bool ShouldWaitForSync(std::chrono::steady_clock::time_point now);
-   std::shared_ptr<CDVDInputStreamBluray> GetBlurayInputStream() const;
 @@ -0,6 +0,14 @@
    bool m_videoDrained{false};
    bool m_playersFlushed{false};
    bool m_discAudioPick{false};
-+  //! between the end of an item and the next open in this player; read from any thread
++  // between the end of an item and the next open in this player; read from any thread
 +  std::atomic<bool> m_parked{false};
-+  //! orders the park against an open, so an open queued at the end is never parked over
++  // orders the park against an open, so an open queued at the end is never parked over
 +  CCriticalSection m_parkSection;
 +  // the parked item's close and end were reported
 +  bool m_endReported{false};

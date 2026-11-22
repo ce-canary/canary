@@ -4,17 +4,16 @@ Date: Sun, 8 Nov 2026 22:58:43 -0600
 Subject: [PATCH] VideoPlayer: wake the player loop on display reset and
  messages
 
-The player thread sleeps 50 ms while the display is lost and up to
-100 ms per pass while the input is retried or has ended. A start sync
-posted in that window waits for the sleep to end, so the first frame
-sits on screen for up to 100 ms before the clock starts. Short clips
-that are fully buffered, such as Blu-ray menu intros, hit this.
+The player thread sleeps a fixed time on each idle pass, up to 100 ms.
+A start sync or a display reset posted meanwhile waits out the sleep.
+The first frame of a fully buffered clip, such as a Blu-ray menu
+intro, then holds up to 100 ms before the clock starts.
 ---
- xbmc/cores/VideoPlayer/DVDMessageQueue.cpp | 12 ++++++++++++
+ xbmc/cores/VideoPlayer/DVDMessageQueue.cpp | 12 +++++++++++
  xbmc/cores/VideoPlayer/DVDMessageQueue.h   |  1 +
- xbmc/cores/VideoPlayer/VideoPlayer.cpp     |  7 ++++---
- xbmc/cores/VideoPlayer/VideoPlayer.h       |  1 +
- 4 files changed, 18 insertions(+), 3 deletions(-)
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp     | 25 +++++++++++++++-------
+ xbmc/cores/VideoPlayer/VideoPlayer.h       |  2 ++
+ 4 files changed, 32 insertions(+), 8 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDMessageQueue.cpp b/xbmc/cores/VideoPlayer/DVDMessageQueue.cpp
 --- a/xbmc/cores/VideoPlayer/DVDMessageQueue.cpp
@@ -52,6 +51,21 @@ diff --git a/xbmc/cores/VideoPlayer/DVDMessageQueue.h b/xbmc/cores/VideoPlayer/D
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,6 +0,14 @@
+   return true;
+ }
+ 
++void CVideoPlayer::StopThread(bool bWait)
++{
++  // the player loop's waits do not wake on the stop event
++  m_messenger.Abort();
++  m_displayReset.Set();
++  CThread::StopThread(bWait);
++}
++
+ bool CVideoPlayer::CloseFile(bool reopen)
+ {
+   CLog::Log(LOGINFO, "CVideoPlayer::CloseFile()");
 @@ -0,7 +0,7 @@
      if (m_displayLost)
      {
@@ -62,11 +76,56 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
      }
  
 @@ -0,7 +0,7 @@
+           ReportAVStarted();
+         // the menu state routes the remote's keys to the disc program's page
+         UpdatePlayState(200);
+-        CThread::Sleep(10ms);
++        m_messenger.WaitForMessage(10ms);
+         continue;
+       }
+       m_navStop = false;
+@@ -0,7 +0,7 @@
+         }
+         ProcessPacket(stream, packet);
+       }
+-      CThread::Sleep(10ms);
++      m_messenger.WaitForMessage(10ms);
+       continue;
+     }
+ 
+@@ -0,7 +0,7 @@
+       if (m_playSpeed == DVD_PLAYSPEED_PAUSE)
+       {
+         PollBlurayEvents();
+-        CThread::Sleep(10ms);
++        m_messenger.WaitForMessage(10ms);
+         continue;
+       }
+ 
+@@ -0,7 +0,7 @@
+       if (navWait)
+       {
+         PollBlurayEvents();
+-        CThread::Sleep(10ms);
++        m_messenger.WaitForMessage(10ms);
+         continue;
+       }
+ 
+@@ -0,7 +0,7 @@
        if (next == CDVDInputStream::NEXTSTREAM_RETRY && !IsBlurayTitleEndHeld())
        {
          // a BD-J title end waits on the disc program, which acts on its own thread
 -        CThread::Sleep(IsBlurayTitleEndWait() ? 10ms : 100ms);
 +        m_messenger.WaitForMessage(IsBlurayTitleEndWait() ? 10ms : 100ms);
+         continue;
+       }
+ 
+@@ -0,7 +0,7 @@
+ 
+       if (next == CDVDInputStream::NEXTSTREAM_RETRY)
+       {
+-        CThread::Sleep(10ms);
++        m_messenger.WaitForMessage(10ms);
          continue;
        }
  
@@ -90,6 +149,14 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/VideoPlayer.h
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.h
 +++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
+@@ -0,6 +0,7 @@
+   void OnStartup() override;
+   void OnExit() override;
+   void Process() override;
++  void StopThread(bool bWait = true) override;
+   void VideoParamsChange() override;
+   void GetDebugInfo(std::string &audio, std::string &video, std::string &general) override;
+   void UpdateClockSync(bool enabled) override;
 @@ -0,6 +0,7 @@
    bool m_updateStreamDetails{false};
  

@@ -1,0 +1,142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Fri, 20 Nov 2026 13:45:02 -0600
+Subject: [PATCH] DVDAudioCodecPassthrough: stamp TrueHD buffers with content
+ time
+
+A TrueHD buffer of 24 units took the pts of the packet that completed
+the buffer before it, which can start units ahead of the buffer. The
+engine times a buffer from its first unit, so the sync error was off
+by those units. After a seek the first buffer took the pts of the
+first packet after the reset, not of its first unit.
+---
+ .../Audio/DVDAudioCodecPassthrough.cpp        | 46 ++++++++++++++++++-
+ .../Audio/DVDAudioCodecPassthrough.h          |  9 ++++
+ 2 files changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.cpp
+@@ -0,6 +0,7 @@
+ #include "utils/log.h"
+ 
+ #include <algorithm>
++#include <optional>
+ 
+ extern "C"
+ {
+@@ -0,6 +0,7 @@
+   {
+     m_dataSize = m_bufferSize;
+     unsigned int consumed = m_parser.AddData(m_backlogBuffer, m_backlogSize, &m_buffer, &m_dataSize);
++    m_parsedBytes += consumed;
+     m_bufferSize = std::max(m_bufferSize, m_dataSize);
+     if (consumed != m_backlogSize)
+     {
+@@ -0,6 +0,14 @@
+     }
+   }
+ 
++  if (pData && iSize > 0)
++  {
++    if (m_format.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD &&
++        packet.pts != DVD_NOPTS_VALUE)
++      m_packetPts.emplace_back(m_streamBytes, packet.pts);
++    m_streamBytes += iSize;
++  }
++
+   if (pData && !m_backlogSize)
+   {
+     if (iSize <= 0)
+@@ -0,6 +0,7 @@
+ 
+     m_dataSize = m_bufferSize;
+     int used = m_parser.AddData(pData, iSize, &m_buffer, &m_dataSize);
++    m_parsedBytes += used;
+     m_bufferSize = std::max(m_bufferSize, m_dataSize);
+ 
+     if (used != iSize)
+@@ -0,7 +0,33 @@
+     if (m_trueHDBuffer.empty())
+       m_trueHDBuffer.resize(TRUEHD_BUF_SIZE);
+ 
++    // a packet pts belongs to the first unit that starts in the packet
++    const uint64_t unitStart = m_parsedBytes - m_parser.GetBufferSize() - m_dataSize;
++    std::optional<double> pts;
++    while (!m_packetPts.empty() && m_packetPts.front().first <= unitStart)
++    {
++      pts = m_packetPts.front().second;
++      m_packetPts.pop_front();
++    }
++
++    const double unitTime = DVD_MSEC_TO_TIME(m_format.m_streamInfo.GetDuration()) / 24;
++
++    // the buffer's pts is its first unit's pts, extrapolated by whole units from the packet pts
++    if (m_trueHDoffset == 0)
++      m_trueHDPtsFromPacket = false;
++    if (pts && !m_trueHDPtsFromPacket)
++    {
++      m_trueHDPts = *pts - (m_trueHDoffset == 0 ? 0 : m_trueHDframes) * unitTime;
++      m_trueHDPtsFromPacket = true;
++    }
++
+     m_dataSize = PackTrueHD();
++    if (m_dataSize)
++    {
++      m_trueHDBufferPts = m_trueHDPts;
++      if (m_trueHDPts != DVD_NOPTS_VALUE)
++        m_trueHDPts += 24 * unitTime;
++    }
+   }
+ 
+   return true;
+@@ -0,7 +0,10 @@
+   frame.planes = 1;
+   frame.bits_per_sample = m_hints.bitspersample;
+   frame.duration = DVD_MSEC_TO_TIME(frame.format.m_streamInfo.GetDuration());
+-  frame.pts = m_currentPts;
++  if (m_format.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD)
++    frame.pts = m_trueHDBufferPts;
++  else
++    frame.pts = m_currentPts;
+   m_currentPts = DVD_NOPTS_VALUE;
+ }
+ 
+@@ -0,6 +0,10 @@
+   m_currentPts = DVD_NOPTS_VALUE;
+   m_nextPts = DVD_NOPTS_VALUE;
+   m_parser.Reset();
++  m_packetPts.clear();
++  m_streamBytes = 0;
++  m_parsedBytes = 0;
++  m_trueHDPts = DVD_NOPTS_VALUE;
+ }
+ 
+ int CDVDAudioCodecPassthrough::GetBufferSize()
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.h b/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Audio/DVDAudioCodecPassthrough.h
+@@ -0,7 +0,9 @@
+ #include "cores/AudioEngine/Utils/AEBitstreamPacker.h"
+ #include "cores/AudioEngine/Utils/AEStreamInfo.h"
+ 
++#include <deque>
+ #include <list>
++#include <utility>
+ #include <vector>
+ 
+ class CProcessInfo;
+@@ -0,6 +0,13 @@
+   std::string m_codecName;
+ 
+   // TrueHD specifics
++  std::deque<std::pair<uint64_t, double>> m_packetPts; // stream offset of a packet, its pts
++  uint64_t m_streamBytes{0};
++  uint64_t m_parsedBytes{0};
++  // the first unit's pts of the buffer being grouped, and whether a packet gave it
++  double m_trueHDPts{DVD_NOPTS_VALUE};
++  bool m_trueHDPtsFromPacket{false};
++  double m_trueHDBufferPts{DVD_NOPTS_VALUE};
+   std::vector<uint8_t> m_trueHDBuffer;
+   unsigned int m_trueHDoffset = 0;
+   unsigned int m_trueHDframes = 0;

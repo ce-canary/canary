@@ -8,53 +8,17 @@ item for most of the item. Audio and subtitle picks made then are
 dropped, so the user's pick is lost. An external subtitle pick does not
 depend on the disc's streams but is dropped as well.
 ---
- xbmc/cores/VideoPlayer/VideoPlayer.cpp | 100 ++++++++++++++++---------
- xbmc/cores/VideoPlayer/VideoPlayer.h   |   1 +
- 2 files changed, 65 insertions(+), 36 deletions(-)
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 99 +++++++++++++++++---------
+ xbmc/cores/VideoPlayer/VideoPlayer.h   |  1 +
+ 2 files changed, 65 insertions(+), 35 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
-@@ -0,7 +0,9 @@
-   return true;
+@@ -0,6 +0,43 @@
+ #endif
  }
  
--// picks and seeks in the tail are dropped, as they are once the demuxer closes for the reopen
-+// seeks in the tail are dropped, as they would act on the next item; a disc audio or subtitle
-+// pick goes to the disc, whose stream registers carry it into the next item; video and program
-+// picks have no disc register and are dropped
- bool CVideoPlayer::DropInNavTail(CDVDMsg& msg)
- {
-   if (!m_navTail)
-@@ -0,9 +0,63 @@
-     m_processInfo->SetStateSeeking(false);
-     return true;
-   }
--  return msg.IsType(CDVDMsg::PLAYER_SEEK_CHAPTER) || msg.IsType(CDVDMsg::PLAYER_SET_AUDIOSTREAM) ||
--         msg.IsType(CDVDMsg::PLAYER_SET_VIDEOSTREAM) ||
--         msg.IsType(CDVDMsg::PLAYER_SET_SUBTITLESTREAM) || msg.IsType(CDVDMsg::PLAYER_SET_PROGRAM);
-+  if (msg.IsType(CDVDMsg::PLAYER_SET_AUDIOSTREAM))
-+  {
-+    SelectDiscStream(m_SelectionStreams.Get(
-+        StreamType::AUDIO, static_cast<CDVDMsgPlayerSetAudioStream&>(msg).GetStreamId()));
-+    return true;
-+  }
-+  if (msg.IsType(CDVDMsg::PLAYER_SET_SUBTITLESTREAM))
-+  {
-+    const SelectionStream& st{m_SelectionStreams.Get(
-+        StreamType::SUBTITLE, static_cast<CDVDMsgPlayerSetSubtitleStream&>(msg).GetStreamId())};
-+    // an external subtitle does not depend on the disc's streams, and a disc pick replaces a
-+    // current external one at once
-+    if (STREAM_SOURCE_MASK(st.source) != STREAM_SOURCE_DEMUX ||
-+        STREAM_SOURCE_MASK(m_CurrentSubtitle.source) != STREAM_SOURCE_DEMUX)
-+      return false;
-+    SelectDiscStream(st);
-+    return true;
-+  }
-+  return msg.IsType(CDVDMsg::PLAYER_SEEK_CHAPTER) || msg.IsType(CDVDMsg::PLAYER_SET_VIDEOSTREAM) ||
-+         msg.IsType(CDVDMsg::PLAYER_SET_PROGRAM);
-+}
-+
 +// passes a pick of a disc stream to the disc, false when the disc does not allow the change; in a
 +// nav tail the demuxer of the old item still holds the streams a pick names
 +bool CVideoPlayer::SelectDiscStream(const SelectionStream& st)
@@ -90,9 +54,53 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
 +  }
 +#endif
 +  return true;
- }
- 
++}
++
  void CVideoPlayer::HandlePlaySpeed()
+ {
+   const bool isInMenu = IsInMenuInternal();
+@@ -0,7 +0,9 @@
+ 
+   while (m_messenger.Get(pMsg, 0ms) == MSGQ_OK)
+   {
+-    // picks and seeks in the tail are dropped, as they are once the demuxer closes for the reopen
++    // seeks in the tail are dropped, as they would act on the next item; a disc audio or subtitle
++    // pick goes to the disc, whose stream registers carry it into the next item; video and
++    // program picks have no disc register and are dropped
+     if (m_navTail)
+     {
+       if (pMsg->IsType(CDVDMsg::PLAYER_SEEK))
+@@ -0,10 +0,28 @@
+         m_processInfo->SetStateSeeking(false);
+         continue;
+       }
++      if (pMsg->IsType(CDVDMsg::PLAYER_SET_AUDIOSTREAM))
++      {
++        SelectDiscStream(m_SelectionStreams.Get(
++            StreamType::AUDIO, static_cast<CDVDMsgPlayerSetAudioStream&>(*pMsg).GetStreamId()));
++        continue;
++      }
++      if (pMsg->IsType(CDVDMsg::PLAYER_SET_SUBTITLESTREAM))
++      {
++        const SelectionStream& st{m_SelectionStreams.Get(
++            StreamType::SUBTITLE,
++            static_cast<CDVDMsgPlayerSetSubtitleStream&>(*pMsg).GetStreamId())};
++        // an external subtitle does not depend on the disc's streams, and a disc pick replaces a
++        // current external one at once
++        if (STREAM_SOURCE_MASK(st.source) == STREAM_SOURCE_DEMUX &&
++            STREAM_SOURCE_MASK(m_CurrentSubtitle.source) == STREAM_SOURCE_DEMUX)
++        {
++          SelectDiscStream(st);
++          continue;
++        }
++      }
+       if (pMsg->IsType(CDVDMsg::PLAYER_SEEK_CHAPTER) ||
+-          pMsg->IsType(CDVDMsg::PLAYER_SET_AUDIOSTREAM) ||
+           pMsg->IsType(CDVDMsg::PLAYER_SET_VIDEOSTREAM) ||
+-          pMsg->IsType(CDVDMsg::PLAYER_SET_SUBTITLESTREAM) ||
+           pMsg->IsType(CDVDMsg::PLAYER_SET_PROGRAM))
+         continue;
+     }
 @@ -0,21 +0,8 @@
          else if (!st.IsCurrent(m_CurrentAudio))
          {
@@ -147,9 +155,9 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.h b/xbmc/cores/VideoPlayer/Video
 --- a/xbmc/cores/VideoPlayer/VideoPlayer.h
 +++ b/xbmc/cores/VideoPlayer/VideoPlayer.h
 @@ -0,6 +0,7 @@
+   void ReportBlurayReadPresented();
+   void ReportBlurayItemPlayedOut();
    void CloseSubtitleForNextStream();
-   bool PlayNavTail();
-   bool DropInNavTail(CDVDMsg& msg);
 +  bool SelectDiscStream(const SelectionStream& st);
    bool OpenStream(CCurrentStream& current, int64_t demuxerId, int iStream, int source, bool reset = true);
    bool OpenAudioStream(CDVDStreamInfo& hint, bool reset = true);

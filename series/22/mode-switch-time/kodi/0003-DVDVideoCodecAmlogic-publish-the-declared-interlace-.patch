@@ -7,10 +7,12 @@ Subject: [PATCH] DVDVideoCodecAmlogic: publish the declared interlace at the
 The Amlogic decoder never published the stream's declared interlace.
 Only the deinterlacer state, read after the first decoded picture, set
 it. The first renderer configure therefore used the frame rate, and a
-1080i50 stream could have its display mode set twice.
+1080i50 stream could have its display mode set twice. The fallback
+that halves the rate of progressive video ignored the declared flag.
 ---
  xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp | 1 +
- 1 file changed, 1 insertion(+)
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp                     | 1 +
+ 2 files changed, 2 insertions(+)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
@@ -23,3 +25,14 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/x
  
        CLog::Log(LOGINFO, "CDVDVideoCodecAmlogic::{}: Open decoder: fps:{:d}/{:d}", __FUNCTION__, m_hints.fpsrate, m_hints.fpsscale);
        if (m_Codec && !m_Codec->OpenDecoder(m_hints, doviIsFEL, m_output))
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+@@ -0,6 +0,7 @@
+     // is still interlaced overall. Only allow for runtime-detected interlace
+     // (not demuxer-flagged) when hardware confirms progressive.
+     if (m_processInfo.GetVideoInterlaced() &&
++        !m_hints.interlaced &&
+         m_vfmt == "progressive" &&
+         MathUtils::FloatEquals(static_cast<float>(m_picture.iDuration), static_cast<float>(2 * DVD_TIME_BASE) / m_processInfo.GetVideoFps(), 700.0f))
+     {

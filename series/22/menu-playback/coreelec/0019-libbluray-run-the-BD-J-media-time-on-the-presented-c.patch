@@ -1,0 +1,443 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 12 Nov 2026 21:58:33 -0600
+Subject: [PATCH] libbluray: run the BD-J media time on the presented clock
+
+The BD-J media time of a playlist runs on the wall clock from the
+playback start or seek. It keeps counting while the player is paused
+or stalled, so it drifts from the picture on screen and runs past the
+end of the playlist.
+---
+ ...he-media-time-on-the-presented-clock.patch | 424 ++++++++++++++++++
+ 1 file changed, 424 insertions(+)
+ create mode 100644 packages/multimedia/libbluray/patches/libbluray-23-bdj-run-the-media-time-on-the-presented-clock.patch
+
+diff --git a/packages/multimedia/libbluray/patches/libbluray-23-bdj-run-the-media-time-on-the-presented-clock.patch b/packages/multimedia/libbluray/patches/libbluray-23-bdj-run-the-media-time-on-the-presented-clock.patch
+new file mode 100644
+--- /dev/null
++++ b/packages/multimedia/libbluray/patches/libbluray-23-bdj-run-the-media-time-on-the-presented-clock.patch
+@@ -0,0 +0,424 @@
++From 923d92b189d1a54c50a2d3a6baa28483fb150e37 Mon Sep 17 00:00:00 2001
++From: matthane <matthan.evans@icloud.com>
++Date: Thu, 12 Nov 2026 21:57:40 -0600
++Subject: [PATCH] bdj: run the media time on the presented clock
++
++The BD-J media time of a playlist runs on the wall clock from the
++playback start or seek. It keeps counting while the player is paused
++or stalled, so it drifts from the picture on screen and runs past the
++end of the playlist.
++---
++ .../bdj/java/org/videolan/Libbluray.java      |  5 ++
++ .../org/videolan/media/content/BDHandler.java |  6 ++
++ .../media/content/playlist/Handler.java       | 24 ++++++
++ .../bdj/native/org_videolan_Libbluray.c       | 11 +++
++ .../bdj/native/org_videolan_Libbluray.h       |  8 ++
++ src/libbluray/bluray.c                        | 81 ++++++++++++++++++-
++ src/libbluray/bluray.h                        | 16 ++++
++ src/libbluray/bluray_internal.h               |  1 +
++ src/util/time.c                               | 34 ++++++++
++ src/util/time.h                               |  1 +
++ 10 files changed, 183 insertions(+), 4 deletions(-)
++
++diff --git a/src/libbluray/bdj/java/org/videolan/Libbluray.java b/src/libbluray/bdj/java/org/videolan/Libbluray.java
++index dfb68ed4f5..20c49cba37 100644
++--- a/src/libbluray/bdj/java/org/videolan/Libbluray.java
+++++ b/src/libbluray/bdj/java/org/videolan/Libbluray.java
++@@ -640,6 +640,10 @@ public class Libbluray {
++         return tellTimeN(nativePointer);
++     }
++ 
+++    public static long presentedTime() {
+++        return presentedTimeN(nativePointer);
+++    }
+++
++     public static boolean selectRate(float rate) {
++         return selectRateN(nativePointer, rate, 0) == 1 ? true : false;
++     }
++@@ -904,6 +908,7 @@ public class Libbluray {
++     private static native void setUOMaskN(long np, boolean menuCallMask, boolean titleSearchMask);
++     private static native void setKeyInterestN(long np, int mask);
++     private static native long tellTimeN(long np);
+++    private static native long presentedTimeN(long np);
++     private static native int selectRateN(long np, float rate, int reason);
++     private static native int writeRegN(long np, int is_psr, int num, int value, int psr_value_mask);
++     private static native int readRegN(long np, int is_psr, int num);
++diff --git a/src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java b/src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java
++index 0cc6eeb81e..a0a375597b 100644
++--- a/src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java
+++++ b/src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java
++@@ -212,6 +212,12 @@ public abstract class BDHandler implements Player, ServiceContentHandler {
++         }
++     }
++ 
+++    protected boolean isPresentationPending() {
+++        synchronized (this) {
+++            return startPending || seekPending;
+++        }
+++    }
+++
++     public Time getSyncTime() {
++         return getMediaTime();
++     }
++diff --git a/src/libbluray/bdj/java/org/videolan/media/content/playlist/Handler.java b/src/libbluray/bdj/java/org/videolan/media/content/playlist/Handler.java
++index c8a2f9733d..8e648b4dbd 100644
++--- a/src/libbluray/bdj/java/org/videolan/media/content/playlist/Handler.java
+++++ b/src/libbluray/bdj/java/org/videolan/media/content/playlist/Handler.java
++@@ -220,6 +220,30 @@ public class Handler extends BDHandler {
++         }
++     }
++ 
+++    public Time getMediaTime() {
+++        if (!Libbluray.isPresentationHeld())
+++            return super.getMediaTime();
+++        return new Time(getPresentedNanoseconds() / 1000000000.0d);
+++    }
+++
+++    public long getMediaNanoseconds() {
+++        if (!Libbluray.isPresentationHeld())
+++            return super.getMediaNanoseconds();
+++        return getPresentedNanoseconds();
+++    }
+++
+++    /* the media time follows the picture on screen */
+++    private long getPresentedNanoseconds() {
+++        synchronized (this) {
+++            if ((state == Started) && (rate != 0.0f) && !isPresentationPending()) {
+++                long time = Libbluray.presentedTime();
+++                if (time >= 0)
+++                    return (long)(time * TO_NAROSECONDS);
+++            }
+++            return baseMediaTime;
+++        }
+++    }
+++
++     protected void doSetRate(Float factor) {
++         synchronized (this) {
++             if (state == Started) {
++diff --git a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj/native/org_videolan_Libbluray.c
++index 56a063c01c..8eaa4fc674 100644
++--- a/src/libbluray/bdj/native/org_videolan_Libbluray.c
+++++ b/src/libbluray/bdj/native/org_videolan_Libbluray.c
++@@ -338,6 +338,12 @@ JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_tellTimeN(JNIEnv * env,
++     return bd_tell_time(bd);
++ }
++ 
+++JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_presentedTimeN(JNIEnv * env,
+++        jclass cls, jlong np) {
+++    BLURAY* bd = (BLURAY*)(intptr_t)np;
+++    return bdpriv_presented_clock(bd);
+++}
+++
++ JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_selectRateN(JNIEnv * env,
++         jclass cls, jlong np, jfloat rate, jint reason) {
++     BLURAY* bd = (BLURAY*)(intptr_t)np;
++@@ -700,6 +706,11 @@ Java_org_videolan_Libbluray_methods[] =
++         CC("(J)J"),
++         VC(Java_org_videolan_Libbluray_tellTimeN),
++     },
+++    {
+++        CC("presentedTimeN"),
+++        CC("(J)J"),
+++        VC(Java_org_videolan_Libbluray_presentedTimeN),
+++    },
++     {
++         CC("selectRateN"),
++         CC("(JFI)I"),
++diff --git a/src/libbluray/bdj/native/org_videolan_Libbluray.h b/src/libbluray/bdj/native/org_videolan_Libbluray.h
++index d75d5ca874..9d18d2a3de 100644
++--- a/src/libbluray/bdj/native/org_videolan_Libbluray.h
+++++ b/src/libbluray/bdj/native/org_videolan_Libbluray.h
++@@ -196,6 +196,14 @@ JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_soundEffectN
++ JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_tellTimeN
++   (JNIEnv *, jclass, jlong);
++ 
+++/*
+++ * Class:     org_videolan_Libbluray
+++ * Method:    presentedTimeN
+++ * Signature: (J)J
+++ */
+++JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_presentedTimeN
+++  (JNIEnv *, jclass, jlong);
+++
++ /*
++  * Class:     org_videolan_Libbluray
++  * Method:    selectRateN
++diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
++index bc243f978d..4ec62f8067 100644
++--- a/src/libbluray/bluray.c
+++++ b/src/libbluray/bluray.c
++@@ -35,6 +35,7 @@
++ #include "util/logging.h"
++ #include "util/strutl.h"
++ #include "util/mutex.h"
+++#include "util/time.h"
++ #include "bdnav/bdid_parse.h"
++ #include "bdnav/clpi_data.h"
++ #include "bdnav/navigation.h"
++@@ -198,6 +199,13 @@ struct bluray {
++     unsigned        pres_size;
++     unsigned        gc_held;         /* PRES_GC entries in pres_events */
++ 
+++    /* presentation clock of the player for the BD-J media time. Taken after bd->mutex */
+++    BD_MUTEX        clock_mutex;
+++    int64_t         clock_time;      /* title time (1/90000 s) at clock_stamp, -1 if unknown */
+++    int             clock_rate;      /* BLURAY_RATE_NORMAL = 1x */
+++    uint64_t        clock_stamp;     /* monotonic, us */
+++    uint8_t         clock_accept;    /* the pending playback start or seek was presented */
+++
++     /* HDMV graphics */
++     GRAPHICS_CONTROLLER *graphics_controller;
++     SOUND_DATA          *sound_effects;
++@@ -1802,6 +1810,26 @@ static int _gc_flush_input(BLURAY *bd)
++     return nav;
++ }
++ 
+++/* the player clock stays at time (-1 if unknown) until the next playback start or seek is
+++ * presented */
+++static void _clock_reset(BLURAY *bd, int64_t time)
+++{
+++    bd_mutex_lock(&bd->clock_mutex);
+++    bd->clock_time = time;
+++    bd->clock_rate = 0;
+++    bd->clock_accept = 0;
+++    bd_mutex_unlock(&bd->clock_mutex);
+++}
+++
+++static void _bdj_presentation_start(BLURAY *bd)
+++{
+++    bd_mutex_lock(&bd->clock_mutex);
+++    bd->clock_accept = 1;
+++    bd_mutex_unlock(&bd->clock_mutex);
+++
+++    bdj_presentation_start(bd->bdjava);
+++}
+++
++ /* the player has data of the playback start or seek */
++ static void _pres_data_read(BLURAY *bd)
++ {
++@@ -1839,7 +1867,7 @@ static void _pres_hold_end(BLURAY *bd)
++         if (bd->pres_start || bd->pres_seek) {
++             bd->pres_start = 0;
++             bd->pres_seek = 0;
++-            bdj_presentation_start(bd->bdjava);
+++            _bdj_presentation_start(bd);
++         }
++         bdj_process_event(bd->bdjava, BDJ_EVENT_END_OF_PLAYLIST, bd_psr_read(bd->regs, PSR_PLAYLIST));
++     } else {
++@@ -1878,7 +1906,7 @@ static void _pres_release(BLURAY *bd, int64_t title_time)
++         }
++         bd->pres_start = 0;
++         if (bd->title_type == title_bdj) {
++-            bdj_presentation_start(bd->bdjava);
+++            _bdj_presentation_start(bd);
++         }
++     }
++ 
++@@ -1886,7 +1914,7 @@ static void _pres_release(BLURAY *bd, int64_t title_time)
++      * a seek is not presented by the end of the data read before it */
++     if (bd->pres_seek && (title_time == BD_PRESENTED_ALL ? (bd->end_of_playlist & 1) : bd->pres_seek == 2)) {
++         bd->pres_seek = 0;
++-        bdj_presentation_start(bd->bdjava);
+++        _bdj_presentation_start(bd);
++     }
++ 
++     while (bd->pres_count > 0) {
++@@ -1920,7 +1948,7 @@ static void _pres_flush_begin(BLURAY *bd)
++         bd->pres_start = 0;
++         bd->pres_seek = 0;
++         if (bd->title_type == title_bdj) {
++-            bdj_presentation_start(bd->bdjava);
+++            _bdj_presentation_start(bd);
++         }
++     }
++     bd->pres_raised = 0;
++@@ -2035,10 +2063,12 @@ BLURAY *bd_init(void)
++     bd->uo_restriction_level = BLURAY_PLAYER_SETTING_UO_RESTRICTION_RELAXED;
++     bd->presented_time = -1;
++     bd->pres_due = -1;
+++    bd->clock_time = -1;
++ 
++     bd_mutex_init(&bd->mutex);
++     bd_mutex_init(&bd->argb_buffer_mutex);
++     bd_mutex_init(&bd->gfx_mutex);
+++    bd_mutex_init(&bd->clock_mutex);
++ 
++     env = getenv("LIBBLURAY_PERSISTENT_STORAGE");
++     if (env) {
++@@ -2169,6 +2199,7 @@ void bd_close(BLURAY *bd)
++     bd_mutex_destroy(&bd->mutex);
++     bd_mutex_destroy(&bd->argb_buffer_mutex);
++     bd_mutex_destroy(&bd->gfx_mutex);
+++    bd_mutex_destroy(&bd->clock_mutex);
++ 
++     BD_DEBUG(DBG_BLURAY, "BLURAY destroyed!\n");
++ 
++@@ -2272,6 +2303,7 @@ static int64_t _seek_internal(BLURAY *bd,
++             media_time = clip->in_time;
++         }
++         media_time = media_time - clip->in_time + clip->title_time;
+++        _clock_reset(bd, (int64_t)media_time * 2);
++ 
++         /* BD-J media time stays at the target until its first picture is presented */
++         if (!start && _pres_holding(bd) && bd->bdj_started && !bd->bdj_wait_start) {
++@@ -3140,6 +3172,7 @@ static int _open_playlist(BLURAY *bd, unsigned playlist, unsigned angle)
++     bd->end_of_playlist = 0;
++     bd->pres_read = 0;
++     bd->presented_time = -1;
+++    _clock_reset(bd, -1);
++     bd->st0.ig_pid = 0;
++ 
++     // Get the initial clip of the playlist
++@@ -4192,6 +4225,7 @@ static int _play_title(BLURAY *bd, unsigned title)
++     bd->presented_time = -1;
++     bd->bdj_started = 0;
++     _pres_flush(bd);
+++    _clock_reset(bd, -1);
++ 
++     if (!bd->disc_info.titles) {
++         BD_DEBUG(DBG_BLURAY | DBG_CRIT, "_play_title(#%d): No disc index\n", title);
++@@ -4664,6 +4698,45 @@ int64_t bd_presented(BLURAY *bd, int64_t title_time)
++     return next;
++ }
++ 
+++static int64_t _clock_at(BLURAY *bd, uint64_t now)
+++{
+++    int64_t elapsed = now > bd->clock_stamp ? (int64_t)(now - bd->clock_stamp) : 0;
+++
+++    if (bd->clock_time < 0) {
+++        return -1;
+++    }
+++    return bd->clock_time + elapsed * bd->clock_rate / 1000000;
+++}
+++
+++void bd_set_presentation_clock(BLURAY *bd, int64_t title_time, int rate)
+++{
+++    uint64_t now = bd_get_monotonic_us();
+++
+++    bd_mutex_lock(&bd->clock_mutex);
+++    if (bd->clock_accept) {
+++        if (title_time < 0) {
+++            bd->clock_time = _clock_at(bd, now);
+++            bd->clock_rate = 0;
+++        } else {
+++            bd->clock_time = title_time;
+++            bd->clock_rate = rate;
+++        }
+++        bd->clock_stamp = now;
+++    }
+++    bd_mutex_unlock(&bd->clock_mutex);
+++}
+++
+++int64_t bdpriv_presented_clock(BLURAY *bd)
+++{
+++    int64_t time;
+++
+++    bd_mutex_lock(&bd->clock_mutex);
+++    time = _clock_at(bd, bd_get_monotonic_us());
+++    bd_mutex_unlock(&bd->clock_mutex);
+++
+++    return time;
+++}
+++
++ static int _get_rate_uo_index(BLURAY *bd, uint32_t rate, bd_uo_mask_index_e *uo_index)
++ {
++     if (BLURAY_RATE_PAUSED == rate) {
++diff --git a/src/libbluray/bluray.h b/src/libbluray/bluray.h
++index 984681cb35..8ec3937fae 100644
++--- a/src/libbluray/bluray.h
+++++ b/src/libbluray/bluray.h
++@@ -1191,6 +1191,22 @@ BD_PUBLIC void bd_set_presentation_hold(BLURAY *bd, int enable);
++  */
++ BD_PUBLIC int64_t bd_presented(BLURAY *bd, int64_t title_time);
++ 
+++/**
+++ *
+++ *  Report the title time of the picture on screen and the rate it advances at.
+++ *
+++ *  The time is extrapolated at the rate until the next call. With the presentation hold
+++ *  the BD-J media time of a started playlist follows it. A seek holds it at the seek
+++ *  target, and a playlist or title change makes it unknown, until a call after the
+++ *  pending playback start or seek is presented. Call after bd_presented().
+++ *
+++ * @param bd  BLURAY object
+++ * @param title_time title time of the picture on screen (1/90000s), or -1 to freeze
+++ *                   the last value
+++ * @param rate  playback rate (BLURAY_RATE_NORMAL = 1x, 0 = stopped)
+++ */
+++BD_PUBLIC void bd_set_presentation_clock(BLURAY *bd, int64_t title_time, int rate);
+++
++ /**
++  *
++  *  Set current playback rate.
++diff --git a/src/libbluray/bluray_internal.h b/src/libbluray/bluray_internal.h
++index a1105c4baa..c085118b51 100644
++--- a/src/libbluray/bluray_internal.h
+++++ b/src/libbluray/bluray_internal.h
++@@ -73,6 +73,7 @@ BD_PRIVATE int      bdpriv_play_playlist_at(struct bluray *bd, int playlist, int
++ BD_PRIVATE void     bdpriv_select_rate(struct bluray *bd, float rate, int reason);
++ BD_PRIVATE int      bdpriv_seek(struct bluray *bd, int playitem, int playmark, int64_t time);
++ BD_PRIVATE int      bdpriv_sound_effect(struct bluray *bd, int id);
+++BD_PRIVATE int64_t  bdpriv_presented_clock(struct bluray *bd);
++ 
++ /*
++  * BD-J overlay
++diff --git a/src/util/time.c b/src/util/time.c
++index e0480c505e..b60774a2da 100644
++--- a/src/util/time.c
+++++ b/src/util/time.c
++@@ -29,6 +29,7 @@
++ #   include <windows.h>
++ #elif defined(HAVE_SYS_TIME_H)
++ #   include <sys/time.h>
+++#   include <time.h>
++ #else
++ #   error no time support found
++ #endif
++@@ -73,3 +74,36 @@ uint64_t bd_get_scr(void)
++ 
++     return now - t0;
++ }
+++
+++#if defined(_WIN32)
+++
+++uint64_t bd_get_monotonic_us(void)
+++{
+++    LARGE_INTEGER frequency, counter;
+++
+++    QueryPerformanceFrequency(&frequency);
+++    QueryPerformanceCounter(&counter);
+++
+++    return (uint64_t)(counter.QuadPart / frequency.QuadPart) * 1000000 +
+++           (uint64_t)(counter.QuadPart % frequency.QuadPart) * 1000000 / frequency.QuadPart;
+++}
+++
+++#elif defined(CLOCK_MONOTONIC)
+++
+++uint64_t bd_get_monotonic_us(void)
+++{
+++    struct timespec ts;
+++    clock_gettime(CLOCK_MONOTONIC, &ts);
+++    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+++}
+++
+++#else
+++
+++uint64_t bd_get_monotonic_us(void)
+++{
+++    struct timeval tv;
+++    gettimeofday(&tv, 0);
+++    return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+++}
+++
+++#endif
++diff --git a/src/util/time.h b/src/util/time.h
++index 62a1fcb243..eeefc01a16 100644
++--- a/src/util/time.h
+++++ b/src/util/time.h
++@@ -25,5 +25,6 @@
++ #include <stdint.h>
++ 
++ BD_PRIVATE uint64_t bd_get_scr(void);
+++BD_PRIVATE uint64_t bd_get_monotonic_us(void);
++ 
++ #endif // LIBBLURAY_TIME_H_

@@ -1,0 +1,549 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 16 Nov 2026 14:18:15 -0600
+Subject: [PATCH] AMLCodec: keep the Dolby Vision output for the next decoder
+
+A decoder close ends the Dolby Vision source, and the core follows it
+to bypass until the next decoder starts it again. Between two Dolby
+Vision items the sink sees Dolby Vision, SDR, then Dolby Vision, and
+can drop the picture for seconds.
+---
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  | 247 ++++++++++++++++--
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.h    |  37 ++-
+ .../DVDCodecs/Video/DVDVideoCodecAmlogic.cpp  |   4 +-
+ .../DVDCodecs/Video/DVDVideoCodecAmlogic.h    |   2 +
+ xbmc/utils/AMLUtils.cpp                       |  11 +
+ xbmc/utils/AMLUtils.h                         |   2 +
+ 6 files changed, 285 insertions(+), 18 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,6 +0,42 @@
+   return (size + need_padding_size);
+ }
+ 
++namespace
++{
++
++// a player hands the output of its video decoder on to the decoder of the next item; the hold
++// outlives the decoder instances, so it is global, under holdMutex
++std::mutex holdMutex;
++// generations of the decoders in creation order; a generation is never reused, an address is
++uint64_t lastGen{0};
++// the close that hands the output on: of the decoder of armGen, on the thread that armed it
++uint64_t armGen{0};
++std::thread::id armThread;
++// the held output and the decoder that takes or ends it, none while holdOwner is 0
++bool holdKept{false};
++uint64_t holdOwner{0};
++CAMLCodec::OutputModule heldModule{CAMLCodec::OutputModule::NONE};
++int holdDecoderTimeout{0};
++
++// whether OpenDecoder runs the Dolby Vision core for `hints` put out as `output`
++bool RunsDolbyVision(const CDVDStreamInfo& hints, const AMLVideoOutput& output)
++{
++  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
++  const bool dv2sdr = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV2SDR);
++  const bool dv2hdr = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV2HDR);
++  const bool displaySupportDv = static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())
++                                    ->GetAmlDisplay()
++                                    ->aml_display_support_dv();
++  return aml_support_dolby_vision() &&
++         !settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_DISABLE) &&
++         ((output.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION &&
++           (displaySupportDv || hints.dovi.dv_profile == 5)) ||
++          ((output.hdrType != StreamHdrType::HDR_TYPE_NONE && dv2sdr) ||
++           (output.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && dv2hdr)));
++}
++
++} // namespace
++
+ /*************************************************************************/
+ CAMLCodec::CAMLCodec(CProcessInfo &processInfo)
+   : m_opened(false)
+@@ -0,7 +0,7 @@
+     am_private->dovi_zero_level5 = value;
+ }
+ 
+-bool CAMLCodec::OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, StreamHdrType outputHdrType)
++bool CAMLCodec::OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, const AMLVideoOutput& output)
+ {
+   m_speed = DVD_PLAYSPEED_NORMAL;
+   m_drain = false;
+@@ -0,6 +0,7 @@
+   m_brightness = -1;
+   m_vadj1_enabled = false;
+   m_hints = hints;
++  m_output = output;
+   m_state = 0;
+   m_hints.pClock = hints.pClock;
+   m_tp_last_frame = std::chrono::system_clock::now();
+@@ -0,9 +0,47 @@
+   m_buffer_level_ready = false;
+   m_setUp = true;
+ 
++  // a decoder that plays the format of the held output plays under it, and its close ends the hold
++  // or hands it on; any other ends the hold before it sets up its own output
++  {
++    std::lock_guard<std::mutex> lock(holdMutex);
++    m_outputModule = OutputModule::NONE;
++    if (holdKept && !holdOwner)
++      holdOwner = m_holdGen;
++    if (holdKept && holdOwner == m_holdGen)
++    {
++      const bool take = heldModule == OutputModule::DV && RunsDolbyVision(hints, m_output);
++      CLog::Log(LOGDEBUG, "CAMLCodec::{}: {} the held output", __FUNCTION__,
++                take ? "takes" : "releases");
++      if (take)
++      {
++        m_outputModule = heldModule;
++        holdKept = false;
++        holdOwner = 0;
++
++        // a native Dolby Vision open forces no mode; the core would play it in a mapping's held IPT
++        const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
++        if (m_outputModule == OutputModule::DV && hints.dovi.dv_profile != 0 &&
++            !settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV2SDR) &&
++            !settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV2HDR))
++        {
++          auto* AmlDisplay =
++              static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
++          if (AmlDisplay->aml_get_drmProperty("dv_mode", DRM_MODE_OBJECT_CRTC) ==
++              AMDV_OUTPUT_MODE_IPT)
++            AmlDisplay->aml_set_drmProperty("dv_mode", DRM_MODE_OBJECT_CRTC,
++                                            AMDV_OUTPUT_MODE_IPT_TUNNEL);
++        }
++      }
++      else
++        ReleaseKept();
++    }
++  }
++
+   if (!OpenAmlVideo(hints))
+   {
+     CLog::Log(LOGERROR, "CAMLCodec::OpenDecoder - cannot open amlvideo device");
++    EndHold(true);
+     return false;
+   }
+ 
+@@ -0,10 +0,7 @@
+   bool dv2hdr(settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV2HDR));
+   bool display_support_dv(static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay()->aml_display_support_dv());
+   bool user_dv_disable(settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_DISABLE));
+-  bool dv_enable(device_support_dv && !user_dv_disable &&
+-      ((outputHdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && (display_support_dv || hints.dovi.dv_profile == 5)) ||
+-      ((outputHdrType != StreamHdrType::HDR_TYPE_NONE && dv2sdr) ||
+-       (outputHdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && dv2hdr))));
++  bool dv_enable(RunsDolbyVision(hints, m_output));
+   CLog::Log(LOGINFO, "CAMLCodec::OpenDecoder Amlogic device {} support DV, DV is {} by user, display {} support DV, DV system is {}",
+     device_support_dv ? "does" : "does not", user_dv_disable ? "disabled" : "enabled",
+     display_support_dv ? "does" : "does not", dv_enable ? "enabled" : "disabled");
+@@ -0,6 +0,7 @@
+     {
+       unsigned int dv_mode = AMDV_OUTPUT_MODE_IPT_TUNNEL;
+       AmlDisplay->aml_set_drmProperty("dv_policy", DRM_MODE_OBJECT_CRTC, AMDV_FORCE_OUTPUT_MODE);
++      m_outputModule = OutputModule::NONE;
+       if (!dv2sdr && !dv2hdr)
+       {
+         if (settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_LED) == AML_DV_PLAYER_LED)
+@@ -0,7 +0,7 @@
+ 
+     AmlDisplay->aml_set_drmProperty("dv_enable", DRM_MODE_OBJECT_CRTC, 0);
+     if (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_SDR2HDR) &&
+-        outputHdrType == StreamHdrType::HDR_TYPE_HDR10 && !m_processInfo.GetIsHdr10Plus())
++        m_output.hdrType == StreamHdrType::HDR_TYPE_HDR10 && !m_processInfo.GetIsHdr10Plus())
+       forceOutput = FORCE_OUTPUT_BT2020_PQ;
+     else if (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_HDR2SDR))
+       forceOutput = FORCE_OUTPUT_BT709;
+@@ -0,6 +0,7 @@
+   if (ret != CODEC_ERROR_NONE)
+   {
+     CLog::Log(LOGDEBUG, "CAMLCodec::OpenDecoder codec init failed, ret=0x{:x}", -ret);
++    EndHold(true);
+     return false;
+   }
+ 
+@@ -0,7 +0,10 @@
+ 
+   // the device and the output belong to the last decoder that opened
+   if (!m_setUp)
++  {
++    HoldOnClose(dv_enabled, dolby_vision_policy);
+     return;
++  }
+ 
+   SetPollDevice(-1);
+ 
+@@ -0,8 +0,11 @@
+     m_dll->codec_set_cntl_mode(&am_private->vcodec, TRICKMODE_NONE);
+   }
+ 
++  const Hold hold = HoldOnClose(dv_enabled, dolby_vision_policy);
++
+   // disable Dolby Vision VS-Engine for non DV media
+-  if (dv_enabled && dolby_vision_policy == AMDV_FORCE_OUTPUT_MODE)
++  if (hold == Hold::NONE && m_outputModule != OutputModule::DV && dv_enabled &&
++      dolby_vision_policy == AMDV_FORCE_OUTPUT_MODE)
+     AmlDisplay->aml_set_drmProperty("dv_mode", DRM_MODE_OBJECT_CRTC, AMDV_OUTPUT_MODE_BYPASS);
+ 
+   m_dll->codec_close(&am_private->vcodec);
+@@ -0,20 +0,48 @@
+ 
+   // return tsync to default so external apps work
+   CSysfsPath("/sys/class/tsync/enable", 1);
++  if (hold == Hold::NONE)
++  {
++    // a title under a held output closes as one that follows the source, so the core takes the
++    // gap without video to bypass
++    if (m_outputModule == OutputModule::DV)
++    {
++      AmlDisplay->aml_set_drmProperty("dv_policy", DRM_MODE_OBJECT_CRTC, AMDV_FOLLOW_SOURCE);
++      dolby_vision_policy = AMDV_FOLLOW_SOURCE;
++    }
++    CloseOutput(dv_enabled, dolby_vision_policy, m_decoder_timeout);
++
++    ShowMainVideo(false);
++  }
++  else
++  {
++    CloseLayers();
++
++    ShowMainVideo(false);
++  }
++
++  CloseAmlVideo();
++}
++
++void CAMLCodec::CloseOutput(bool dvEnabled, int dvPolicy, int decoderTimeout)
++{
++  auto* AmlDisplay =
++      static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
++
+   // disable Dolby Vision driver
+-  if (dv_enabled)
++  if (dvEnabled)
+   {
+     // the transition needs a few display frames before the core powers down
+     std::chrono::time_point<std::chrono::system_clock> now(std::chrono::system_clock::now());
+     while (AmlDisplay->aml_get_drmProperty("dv_status", DRM_MODE_OBJECT_CRTC) != 0 &&
+-           (std::chrono::system_clock::now() - now) < std::chrono::seconds(m_decoder_timeout))
++           (std::chrono::system_clock::now() - now) < std::chrono::seconds(decoderTimeout))
+       usleep(10000); // wait 10ms
+ 
+     while (AmlDisplay->aml_get_drmProperty("dv_video_on", DRM_MODE_OBJECT_CRTC) == 1 &&
+-           (std::chrono::system_clock::now() - now) < std::chrono::seconds(m_decoder_timeout))
++           (std::chrono::system_clock::now() - now) < std::chrono::seconds(decoderTimeout))
+       usleep(10000); // wait 10ms
+ 
+-    if (dolby_vision_policy == AMDV_FORCE_OUTPUT_MODE)
++    if (dvPolicy == AMDV_FORCE_OUTPUT_MODE)
+       AmlDisplay->aml_set_drmProperty("dv_policy", DRM_MODE_OBJECT_CRTC, AMDV_FOLLOW_SOURCE);
+     else
+       AmlDisplay->aml_set_drmProperty("enable_hdr10plus", DRM_MODE_OBJECT_CRTC, 1);
+@@ -0,13 +0,17 @@
+     AmlDisplay->aml_set_drmProperty("force_output", DRM_MODE_OBJECT_CRTC, FORCE_OUTPUT_BT709);
+   }
+ 
++  CloseLayers();
++}
++
++void CAMLCodec::CloseLayers()
++{
++  auto* AmlDisplay =
++      static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
++
+   AmlDisplay->aml_set_drmProperty("dv_debug", DRM_MODE_OBJECT_CRTC, "enable_fel 0");
+   AmlDisplay->aml_set_drmProperty("dv_debug", DRM_MODE_OBJECT_CRTC, "enable_mel 0");
+   AmlDisplay->aml_set_drmProperty("dv_debug", DRM_MODE_OBJECT_CRTC, "force_unmap");
+-
+-  ShowMainVideo(false);
+-
+-  CloseAmlVideo();
+ }
+ 
+ void CAMLCodec::CloseAmlVideo()
+@@ -0,6 +0,109 @@
+   }
+ }
+ 
++void CAMLCodec::ContinuePresentation()
++{
++  std::lock_guard<std::mutex> lock(holdMutex);
++  armGen = lastGen;
++  armThread = std::this_thread::get_id();
++}
++
++void CAMLCodec::EndPresentation(bool stop)
++{
++  std::lock_guard<std::mutex> lock(holdMutex);
++  if (stop)
++    armGen = 0;
++  if (holdKept && (!holdOwner || stop))
++    ReleaseKept();
++}
++
++void CAMLCodec::ClaimHold()
++{
++  std::lock_guard<std::mutex> lock(holdMutex);
++  m_holdGen = ++lastGen;
++  if (holdKept && !holdOwner)
++    holdOwner = m_holdGen;
++}
++
++// the armed close of an open decoder hands its output on to the next decoder; a decoder that
++// closes before it took the hold it claimed passes the hold on unclaimed
++CAMLCodec::Hold CAMLCodec::HoldOnClose(bool dvEnabled, int dvPolicy)
++{
++  std::lock_guard<std::mutex> lock(holdMutex);
++  // a stream change the video thread runs closes a decoder the join did not arm
++  const bool armed = armGen == m_holdGen && armThread == std::this_thread::get_id();
++  if (armed)
++    armGen = 0;
++  if (holdOwner == m_holdGen)
++    holdOwner = 0;
++  if (!armed || !m_opened || holdKept)
++    return Hold::NONE;
++
++  Hold hold = Hold::NONE;
++  auto* AmlDisplay =
++      static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
++  if (dvEnabled)
++  {
++    // the core keeps a forced mode over the gap without video, where it follows the source to
++    // bypass otherwise
++    const int dvMode = AmlDisplay->aml_get_drmProperty("dv_mode", DRM_MODE_OBJECT_CRTC);
++    if (m_outputModule == OutputModule::DV || dvMode == AMDV_OUTPUT_MODE_IPT ||
++        dvMode == AMDV_OUTPUT_MODE_IPT_TUNNEL)
++    {
++      // the mode is stored only once the policy is forced
++      if (dvPolicy != AMDV_FORCE_OUTPUT_MODE)
++      {
++        AmlDisplay->aml_set_drmProperty("dv_policy", DRM_MODE_OBJECT_CRTC, AMDV_FORCE_OUTPUT_MODE);
++        AmlDisplay->aml_set_drmProperty("dv_mode", DRM_MODE_OBJECT_CRTC, dvMode);
++      }
++      heldModule = OutputModule::DV;
++      hold = Hold::OUTPUT_DV;
++    }
++  }
++
++  if (hold != Hold::NONE)
++  {
++    holdDecoderTimeout = m_decoder_timeout;
++    holdKept = true;
++  }
++  CLog::Log(LOGDEBUG, "CAMLCodec::{}: armed close keeps {}, dv core {}, dv policy {}", __FUNCTION__,
++            hold == Hold::OUTPUT_DV ? "the dv output" : "nothing", dvEnabled, dvPolicy);
++  return hold;
++}
++
++void CAMLCodec::EndHold(bool failed)
++{
++  std::lock_guard<std::mutex> lock(holdMutex);
++  if (failed && m_outputModule != OutputModule::NONE)
++  {
++    RestoreOutput(m_decoder_timeout);
++    m_outputModule = OutputModule::NONE;
++  }
++}
++
++// under holdMutex
++void CAMLCodec::ReleaseKept()
++{
++  RestoreOutput(holdDecoderTimeout);
++  holdKept = false;
++  holdOwner = 0;
++}
++
++// the output teardown of a decoder close, where the hold of the output ends
++void CAMLCodec::RestoreOutput(int decoderTimeout)
++{
++  auto* AmlDisplay =
++      static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
++  const int dvPolicy = AmlDisplay->aml_get_drmProperty("dv_policy", DRM_MODE_OBJECT_CRTC);
++  const bool dvEnabled = AmlDisplay->aml_get_drmProperty("dv_enable", DRM_MODE_OBJECT_CRTC);
++
++  ShowMainVideo(false);
++
++  if (dvEnabled && dvPolicy == AMDV_FORCE_OUTPUT_MODE)
++    AmlDisplay->aml_set_drmProperty("dv_mode", DRM_MODE_OBJECT_CRTC, AMDV_OUTPUT_MODE_BYPASS);
++  CloseOutput(dvEnabled, dvPolicy, decoderTimeout);
++}
++
+ void CAMLCodec::Reset()
+ {
+   CLog::Log(LOGDEBUG, "CAMLCodec::Reset");
+@@ -0,8 +0,10 @@
+ 
+ void CAMLCodec::ShowMainVideo(const bool show)
+ {
++  static std::mutex saved_mutex;
+   static int saved_disable_video = -1;
+ 
++  std::lock_guard<std::mutex> lock(saved_mutex);
+   int disable_video = show ? 0:1;
+   if (saved_disable_video == disable_video)
+     return;
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+@@ -0,6 +0,7 @@
+ #include "cores/IPlayer.h"
+ #include "windowing/Resolution.h"
+ #include "rendering/RenderSystem.h"
++#include "utils/AMLUtils.h"
+ #include "utils/BitstreamConverter.h"
+ #include "utils/Geometry.h"
+ 
+@@ -0,7 +0,7 @@
+   CAMLCodec(CProcessInfo &processInfo);
+   virtual ~CAMLCodec();
+ 
+-  bool          OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, StreamHdrType outputHdrType);
++  bool          OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, const AMLVideoOutput& output);
+   bool          Enable_vadj1();
+   void          CloseDecoder();
+   void          Reset();
+@@ -0,14 +0,43 @@
+   //! device, missed vsyncs): the caller then waits for the vblank itself
+   static bool   WaitPresentStep(uint64_t& seen, int fenceFd);
+ 
++  //! The next close of the newest decoder, on this thread, hands its output on to the decoder of
++  //! the next item, which plays under it if it plays the same format
++  static void   ContinuePresentation();
++  //! Ends a hold that no decoder claimed; a `stop` also disarms the next close and ends a hold
++  //! a decoder claimed but did not take
++  static void   EndPresentation(bool stop);
++  //! Makes this decoder the newest, and the one that takes or ends a held output no decoder
++  //! claimed
++  void          ClaimHold();
++
++  //! The module whose forced output a decoder plays under
++  enum class OutputModule
++  {
++    NONE,
++    DV,
++  };
++
+ private:
+-  void          ShowMainVideo(const bool show);
++  enum class Hold
++  {
++    NONE,
++    OUTPUT_DV,
++  };
++
++  static void   ShowMainVideo(const bool show);
+   void          SetVideoZoom(const float zoom);
+   void          SetVideoContrast(const int contrast);
+   void          SetVideoBrightness(const int brightness);
+   void          SetVideoSaturation(const int saturation);
+   bool          OpenAmlVideo(const CDVDStreamInfo &hints);
+   void          CloseAmlVideo();
++  static void   CloseOutput(bool dvEnabled, int dvPolicy, int decoderTimeout);
++  static void   CloseLayers();
++  Hold          HoldOnClose(bool dvEnabled, int dvPolicy);
++  void          EndHold(bool failed);
++  static void   ReleaseKept();
++  static void   RestoreOutput(int decoderTimeout);
+   std::string   GetVfmMap(const std::string &name);
+   void          SetVfmMap(const std::string &name, const std::string &map);
+   int           DequeueBuffer();
+@@ -0,8 +0,11 @@
+   std::atomic<bool> m_opened;
+   bool             m_drain = false;
+   bool             m_setUp{false};
++  uint64_t         m_holdGen{0};
++  OutputModule     m_outputModule{OutputModule::NONE};
+   am_private_t    *am_private;
+   CDVDStreamInfo   m_hints;
++  AMLVideoOutput   m_output;
+   int              m_speed;
+   uint64_t         m_cur_pts;
+   uint64_t         m_last_pts;
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+@@ -0,6 +0,7 @@
+   }
+ 
+   m_Codec->SetDoviZeroLevel5(zeroLevel5);
++  m_Codec->ClaimHold();
+   if (m_bitstream)
+     m_bitstream->SetDoviZeroLevel5(zeroLevel5);
+ 
+@@ -0,6 +0,7 @@
+     m_videobuffer.color_transfer = output.colorTransfer;
+     m_sdrWhite = output.sdrWhite;
+     m_sdrGamma = output.sdrGamma;
++    m_output = output;
+   }
+ 
+   m_processInfo.SetVideoDecoderName(m_pFormatName, true);
+@@ -0,7 +0,7 @@
+       m_processInfo.SetIsHdr10Plus(IsHdr10Plus);
+ 
+       CLog::Log(LOGINFO, "CDVDVideoCodecAmlogic::{}: Open decoder: fps:{:d}/{:d}", __FUNCTION__, m_hints.fpsrate, m_hints.fpsscale);
+-      if (m_Codec && !m_Codec->OpenDecoder(m_hints, doviIsFEL, m_videobuffer.hdrType))
++      if (m_Codec && !m_Codec->OpenDecoder(m_hints, doviIsFEL, m_output))
+         CLog::Log(LOGERROR, "CDVDVideoCodecAmlogic::{}: Failed to open Amlogic Codec", __FUNCTION__);
+ 
+       m_videoBufferPool = std::shared_ptr<CAMLVideoBufferPool>(new CAMLVideoBufferPool());
+diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h
+@@ -0,6 +0,7 @@
+ #include "DVDStreamInfo.h"
+ #include "threads/CriticalSection.h"
+ #include "cores/VideoPlayer/Buffers/VideoBuffer.h"
++#include "utils/AMLUtils.h"
+ #include "utils/BitstreamConverter.h"
+ #include "utils/MVCFrameNumRewriter.h"
+ 
+@@ -0,6 +0,7 @@
+   bool            m_opened;
+   int             m_codecControlFlags;
+   CDVDStreamInfo  m_hints;
++  AMLVideoOutput  m_output;
+   float           m_sdrWhite{0.0f};
+   float           m_sdrGamma{0.0f};
+   double          m_framerate;
+diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
+--- a/xbmc/utils/AMLUtils.cpp
++++ b/xbmc/utils/AMLUtils.cpp
+@@ -0,6 +0,7 @@
+ #include "utils/log.h"
+ #include "utils/StringUtils.h"
+ #include "ServiceBroker.h"
++#include "cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h"
+ #include "utils/RegExp.h"
+ #include "settings/Settings.h"
+ #include "settings/SettingsComponent.h"
+@@ -0,6 +0,16 @@
+   return (StringUtils::EqualsNoCase(videostarted.Get<std::string>().value_or("0x0"), "0x1"));
+ }
+ 
++void aml_continue_presentation()
++{
++  CAMLCodec::ContinuePresentation();
++}
++
++void aml_end_presentation(bool stop)
++{
++  CAMLCodec::EndPresentation(stop);
++}
++
+ int aml_amdv_wait(StreamHdrType hdrType)
+ {
+   if (hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)
+diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
+--- a/xbmc/utils/AMLUtils.h
++++ b/xbmc/utils/AMLUtils.h
+@@ -0,5 +0,7 @@
+ };
+ AMLVideoOutput aml_video_output(const CDVDStreamInfo& source);
+ bool aml_video_started();
++void aml_continue_presentation();
++void aml_end_presentation(bool stop);
+ int aml_amdv_wait(StreamHdrType hdrType);
+ void aml_set_3d_video_mode(unsigned int mode, bool framepacking_support, int view_mode);

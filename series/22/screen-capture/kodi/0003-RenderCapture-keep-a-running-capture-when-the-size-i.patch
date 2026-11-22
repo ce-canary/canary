@@ -23,9 +23,9 @@ diff --git a/xbmc/interfaces/legacy/RenderCapture.h b/xbmc/interfaces/legacy/Ren
  
  #include <chrono>
 @@ -0,6 +0,14 @@
-       std::unique_ptr<uint8_t[]> m_buffer;
+         return std::unique_lock(m_lock);
+       }
  
- #ifndef SWIG
 +      //! a continuous capture that has not ended
 +      bool IsRunning() const
 +      {
@@ -34,13 +34,13 @@ diff --git a/xbmc/interfaces/legacy/RenderCapture.h b/xbmc/interfaces/legacy/Ren
 +               state == KODI::RENDERING::CAPTURE::CaptureState::LATCHED;
 +      }
 +
-       //! waits for the next frame without holding the interpreter lock
-       bool WaitFrame(unsigned int msec)
-       {
+ #endif
+ 
+     public:
 @@ -0,6 +0,11 @@
-       inline void capture(int width, int height)
  #endif
        {
+         const auto lock = LockCapture();
 +        // a running continuous capture already delivers fresh frames at this size
 +        if (m_handle && static_cast<unsigned int>(width) == m_width &&
 +            static_cast<unsigned int>(height) == m_height && IsRunning())

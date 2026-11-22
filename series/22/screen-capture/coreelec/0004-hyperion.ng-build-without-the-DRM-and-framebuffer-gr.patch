@@ -18,7 +18,7 @@ diff --git a/projects/Amlogic-ce/packages/addons/service/hyperion.ng/changelog.t
 @@ -0,6 +0,7 @@
  - Remove Amlogic grabber
  - Drop platform script
- - Feed the Kodi picture, video and menus, to Hyperion by itself over hyperiond's flatbuffer server, on by default (screen capture used to be opt-in)
+ - Feed the Kodi picture as shown, video, menus and on-screen display, to Hyperion by itself over hyperiond's flatbuffer server, on by default (screen capture used to be opt-in)
 +- Build without the DRM and framebuffer screen grabbers
  122
  - Add platform script

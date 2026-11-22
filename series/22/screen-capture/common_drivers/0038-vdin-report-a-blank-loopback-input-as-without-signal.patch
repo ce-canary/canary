@@ -1,0 +1,151 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 15 Nov 2026 01:03:56 -0600
+Subject: [PATCH] vdin: report a blank loopback input as without signal
+
+vdin drops a blank loopback frame, for example during an HDMI mute, and
+tells the reader nothing, so a reader gives up on a capture that resumes
+with the picture. The size registers latch at a go_field and are not
+reset at a start, so the first interrupts after a start can read a frame
+from before it or a partial one.
+---
+ drivers/media/vin/tvin/vdin/vdin_drv.c     | 42 ++++++++++++++++++++--
+ drivers/media/vin/tvin/vdin/vdin_drv.h     |  5 +++
+ drivers/media/vin/tvin/vdin/vdin_v4l2_if.c | 16 +++++++++
+ 3 files changed, 61 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.c b/drivers/media/vin/tvin/vdin/vdin_drv.c
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.c
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.c
+@@ -0,6 +0,8 @@
+ 		return;
+ 	devp->vdin_v4l2.held &= ~mask;
+ 	devp->vdin_v4l2.pending &= ~mask;
++	devp->vdin_v4l2.last_blank &= ~mask;
++	devp->vdin_v4l2.no_signal &= ~mask;
+ 	if (fe->dec_ops->tap_release(fe, mask))
+ 		return;
+ 	if (devp->vdin_v4l2.sched_field)
+@@ -0,6 +0,8 @@
+ 	}
+ 
+ 	if (devp->parm.port != TVIN_PORT_VIU1 || viu_hw_irq != 0) {
++		/* vdin has no clear for a go_field edge latched before the enable */
++		irq_set_irqchip_state(devp->irq, IRQCHIP_STATE_PENDING, false);
+ 		if (!(devp->flags & VDIN_FLAG_ISR_REQ)) {
+ #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+ 			ret = request_irq(devp->irq, vdin_v4l2_isr, IRQF_SHARED,
+@@ -0,7 +0,7 @@
+ 	int ret = 0;
+ 	unsigned int offset;
+ 	unsigned int protect_mode;
+-	bool blank;
++	bool blank, lost;
+ 	unsigned int input, mask;
+ 	bool field, turns;
+ 
+@@ -0,7 +0,41 @@
+ 	 * does not hold the others
+ 	 */
+ 	turns = devp->vdin_v4l2.sched_armed > 1 || devp->vdin_v4l2.pend_num;
+-	blank = vdin_is_v4l2_input_blank(devp);
++	/* the shadows describe no frame of this stream before one began */
++	blank = devp->curr_wr_vfe && vdin_is_v4l2_input_blank(devp);
++	/* the input of the frame that just finished, as userbits[0] names it */
++	vfe = turns ? devp->last_wr_vfe : NULL;
++	if (vfe)
++		input = vfe->v4l2_entries ? vfe->v4l2_input : devp->vdin_v4l2.input;
++	else if (turns)
++		input = devp->vdin_v4l2.sched_cur;
++	else
++		input = devp->vdin_v4l2.sched_armed ? devp->vdin_v4l2.run[0] :
++			devp->vdin_v4l2.input;
++	if (!vfe || !vfe->v4l2_unlanded) {
++		/* at most one judged read per start can hold a stale or partial latch,
++		 * so no signal takes two blank reads in a row
++		 */
++		lost = blank && (devp->vdin_v4l2.last_blank & BIT(input));
++		if (blank)
++			devp->vdin_v4l2.last_blank |= BIT(input);
++		else
++			devp->vdin_v4l2.last_blank &= ~BIT(input);
++		/* the bit is written before the event, so ENUMINPUT after DQEVENT reads it */
++		if (lost || (devp->vdin_v4l2.no_signal & BIT(input))) {
++			struct v4l2_event ev = {
++				.type = V4L2_EVENT_SOURCE_CHANGE,
++				.id = input,
++				.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION,
++			};
++
++			if (lost)
++				devp->vdin_v4l2.no_signal |= BIT(input);
++			else
++				devp->vdin_v4l2.no_signal &= ~BIT(input);
++			v4l2_event_queue(&devp->video_dev, &ev);
++		}
++	}
+ 	if ((!vdin_is_input_valid(devp) &&
+ 	     (devp->vdin_function_sel & VDIN_NOT_DATA_INPUT_DROP)) || blank) {
+ 		devp->vdin_irq_flag = VDIN_IRQ_FLG_FAKE_IRQ;
+diff --git a/drivers/media/vin/tvin/vdin/vdin_drv.h b/drivers/media/vin/tvin/vdin/vdin_drv.h
+--- a/drivers/media/vin/tvin/vdin/vdin_drv.h
++++ b/drivers/media/vin/tvin/vdin/vdin_drv.h
+@@ -0,6 +0,11 @@
+ 	 */
+ 	unsigned int held;
+ 	unsigned int pending;
++	/* inputs whose last judged frame was blank, and those whose last two
++	 * were, until released or stop_streaming
++	 */
++	unsigned int last_blank;
++	unsigned int no_signal;
+ 	/* the port the frontend gave each input */
+ 	enum tvin_port_e sched_port[VDIN_V4L2_INPUT_MAX];
+ 	/* fixed at STREAMON for inputs that join */
+diff --git a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+--- a/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
++++ b/drivers/media/vin/tvin/vdin/vdin_v4l2_if.c
+@@ -0,6 +0,8 @@
+ 	}
+ 
+ 	inp->std = V4L2_STD_ALL;
++	if (devp->vdin_v4l2.no_signal & BIT(inp->index))
++		inp->status |= V4L2_IN_ST_NO_SIGNAL;
+ 	str = tvin_port_str(devp->v4l2_port[inp->index]);
+ 
+ 	if (str)
+@@ -0,6 +0,15 @@
+ 	return 0;
+ }
+ 
++static int vdin_vidioc_subscribe_event(struct v4l2_fh *fh,
++				       const struct v4l2_event_subscription *sub)
++{
++	if (sub->type == V4L2_EVENT_SOURCE_CHANGE)
++		return v4l2_src_change_event_subscribe(fh, sub);
++
++	return -EINVAL;
++}
++
+ static const struct v4l2_ioctl_ops vdin_v4l2_ioctl_ops = {
+ 	.vidioc_querystd	= vdin_vidioc_querystd,
+ 	.vidioc_enum_input	= vdin_vidioc_enum_input,
+@@ -0,6 +0,9 @@
+ 	.vidioc_g_fmt_vid_cap			= vdin_vidioc_g_fmt_vid_cap,
+ 	.vidioc_g_fmt_vid_out_mplane	= vdin_vidioc_g_fmt_vid_cap_mplane,
+ 	.vidioc_g_fmt_vid_out			= vdin_vidioc_g_fmt_vid_cap,
++
++	.vidioc_subscribe_event = vdin_vidioc_subscribe_event,
++	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
+ };
+ 
+ static void vdin_vdev_release(struct video_device *vdev)
+@@ -0,6 +0,8 @@
+ 
+ 	dprintk(2, "%s\n", __func__);
+ 	vdin_v4l2_stop_tvin(devp);
++	devp->vdin_v4l2.last_blank = 0;
++	devp->vdin_v4l2.no_signal = 0;
+ 
+ 	devp->vb_queue.streaming = false;
+ 

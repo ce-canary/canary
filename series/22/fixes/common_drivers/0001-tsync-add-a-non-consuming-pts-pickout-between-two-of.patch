@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 18 Nov 2026 17:54:59 -0600
+Subject: [PATCH] tsync: add a non-consuming pts pickout between two offsets
+
+A VC-1 skipped P frame is decoded without a picture, so its pts
+record is never looked up and stays in the video valid list. vvc1
+cannot stamp an anchor that a skipped P releases with the skip's
+decode time: no export returns a record by offset range without
+consuming it.
+---
+ drivers/media/frame_sync/ptsserv.c            | 30 +++++++++++++++++++
+ .../linux/amlogic/media/frame_sync/ptsserv.h  |  9 ++++++
+ 2 files changed, 39 insertions(+)
+
+diff --git a/drivers/media/frame_sync/ptsserv.c b/drivers/media/frame_sync/ptsserv.c
+--- a/drivers/media/frame_sync/ptsserv.c
++++ b/drivers/media/frame_sync/ptsserv.c
+@@ -0,6 +0,36 @@
+ }
+ EXPORT_SYMBOL(pts_pickout_offset_us64);
+ 
++int pts_pickout_between_us64(u8 type, u32 after, u32 before, u32 *val,
++			     u64 *us64)
++{
++	struct pts_rec_s *p = NULL;
++	unsigned long flags;
++	int res = -1;
++
++	if (type >= PTS_TYPE_MAX)
++		return -EINVAL;
++
++	spin_lock_irqsave(&lock, flags);
++	if (likely(pts_table[type].status == PTS_RUNNING)) {
++		/* newest first: the walk ends at the records still in flight after `after` */
++		list_for_each_entry_reverse(p, &pts_table[type].valid_list, list) {
++			if (!OFFSET_LATER(p->offset, after))
++				break;
++
++			if (OFFSET_LATER(before, p->offset)) {
++				*val = p->val;
++				*us64 = p->pts_us64;
++				res = 0;
++			}
++		}
++	}
++	spin_unlock_irqrestore(&lock, flags);
++
++	return res;
++}
++EXPORT_SYMBOL(pts_pickout_between_us64);
++
+ int pts_set_resolution(u8 type, u32 level)
+ {
+ 	if (type >= PTS_TYPE_MAX)
+diff --git a/include/linux/amlogic/media/frame_sync/ptsserv.h b/include/linux/amlogic/media/frame_sync/ptsserv.h
+--- a/include/linux/amlogic/media/frame_sync/ptsserv.h
++++ b/include/linux/amlogic/media/frame_sync/ptsserv.h
+@@ -0,6 +0,9 @@
+ 			    u32 *val, u32 pts_margin,
+ 			    u64 *us64);
+ 
++int pts_pickout_between_us64(u8 type, u32 after, u32 before,
++			     u32 *val, u64 *us64);
++
+ int pts_set_resolution(u8 type, u32 level);
+ 
+ int pts_set_rec_size(u8 type, u32 val);
+@@ -0,6 +0,12 @@
+ 	return -1;
+ }
+ 
++int __weak pts_pickout_between_us64(u8 type, u32 after, u32 before,
++			     u32 *val, u64 *us64)
++{
++	return -1;
++}
++
+ int __weak pts_set_resolution(u8 type, u32 level)
+ {
+ 	return -1;
