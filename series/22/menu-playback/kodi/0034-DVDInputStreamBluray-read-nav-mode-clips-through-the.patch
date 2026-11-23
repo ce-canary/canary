@@ -83,8 +83,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDInputStreams/DVDInputStreamBluray.h b/xbm
 +  BD_DIR_H* OpenDir(const char* relPath);
 +  BD_FILE_H* OpenFile(const char* relPath);
    int64_t Seek(int64_t offset, int whence) override;
-   void Abort() override;
    bool IsEOF() override;
+   int64_t GetLength() override;
 diff --git a/xbmc/filesystem/BlurayCallback.cpp b/xbmc/filesystem/BlurayCallback.cpp
 --- a/xbmc/filesystem/BlurayCallback.cpp
 +++ b/xbmc/filesystem/BlurayCallback.cpp

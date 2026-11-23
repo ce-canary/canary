@@ -10,7 +10,7 @@ These builds are for testing and early feature previews. Despite extensive testi
 
 **Status: active.**
 
-- CoreELEC 22: latest build `22.0-Piers_canary_20261119`, based on the nightly of `20261119`.
+- CoreELEC 22: latest build `22.0-Piers_canary_20261123`, based on the nightly of `20261123`.
 
 - **Small fixes:** independent fixes that don't belong to any feature.
 - **Blu-ray menu playback:** full disc menus with more seamless clip transitions.
@@ -150,10 +150,10 @@ Follow CoreELEC's [guide to reporting an issue](https://discourse.coreelec.org/t
 
 | Feature | Kodi | common_drivers | media_modules-aml | CoreELEC | History |
 |---|---|---|---|---|---|
-| Small fixes | [2 commits](https://github.com/ce-canary/xbmc/compare/base/22...topic/22/fixes) | [1 commit](https://github.com/ce-canary/common_drivers/compare/base/22...topic/22/fixes) | [2 commits](https://github.com/ce-canary/media_modules-aml/compare/base/22...topic/22/fixes) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/fixes) |
+| Small fixes | [3 commits](https://github.com/ce-canary/xbmc/compare/base/22...topic/22/fixes) | [1 commit](https://github.com/ce-canary/common_drivers/compare/base/22...topic/22/fixes) | [2 commits](https://github.com/ce-canary/media_modules-aml/compare/base/22...topic/22/fixes) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/fixes) |
 | Blu-ray menu playback | [70 commits](https://github.com/ce-canary/xbmc/compare/topic/22/fixes...topic/22/menu-playback) + [2 commits](https://github.com/ce-canary/xbmc/compare/topic/22/seamless-playlist...topic/22/bdj-media-time) | [6 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/av-sync...topic/22/menu-playback) | none | [20 commits](https://github.com/ce-canary/CoreELEC/compare/topic/22/screen-capture...topic/22/menu-playback) | [history](https://github.com/ce-canary/canary/commits/main/series/22/menu-playback) |
-| A/V sync | [43 commits](https://github.com/ce-canary/xbmc/compare/topic/22/menu-playback...topic/22/av-sync) | [2 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/dv-output...topic/22/av-sync) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/av-sync) |
-| Screen capture | [32 commits](https://github.com/ce-canary/xbmc/compare/topic/22/av-sync...topic/22/screen-capture) | [39 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/menu-playback...topic/22/screen-capture) | none | [5 commits](https://github.com/ce-canary/CoreELEC/compare/base/22...topic/22/screen-capture) | [history](https://github.com/ce-canary/canary/commits/main/series/22/screen-capture) |
+| A/V sync | [44 commits](https://github.com/ce-canary/xbmc/compare/topic/22/menu-playback...topic/22/av-sync) | [2 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/dv-output...topic/22/av-sync) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/av-sync) |
+| Screen capture | [31 commits](https://github.com/ce-canary/xbmc/compare/topic/22/av-sync...topic/22/screen-capture) | [39 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/menu-playback...topic/22/screen-capture) | none | [5 commits](https://github.com/ce-canary/CoreELEC/compare/base/22...topic/22/screen-capture) | [history](https://github.com/ce-canary/canary/commits/main/series/22/screen-capture) |
 | Dolby Vision FEL playback | [6 commits](https://github.com/ce-canary/xbmc/compare/topic/22/screen-capture...topic/22/fel-playback) | none | [8 commits](https://github.com/ce-canary/media_modules-aml/compare/topic/22/fixes...topic/22/fel-playback) | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/fel-playback) |
 | Dolby Vision output | none | [2 commits](https://github.com/ce-canary/common_drivers/compare/topic/22/fixes...topic/22/dv-output) | none | none | [history](https://github.com/ce-canary/canary/commits/main/series/22/dv-output) |
 | Faster mode switches | [23 commits](https://github.com/ce-canary/xbmc/compare/topic/22/fel-playback...topic/22/mode-switch-time) | [1 commit](https://github.com/ce-canary/common_drivers/compare/topic/22/screen-capture...topic/22/mode-switch-time) | [1 commit](https://github.com/ce-canary/media_modules-aml/compare/topic/22/fel-playback...topic/22/mode-switch-time) | [1 commit](https://github.com/ce-canary/CoreELEC/compare/topic/22/canary-only...topic/22/mode-switch-time) | [history](https://github.com/ce-canary/canary/commits/main/series/22/mode-switch-time) |

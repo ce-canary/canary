@@ -8,32 +8,32 @@
         "releases": {
           "0": {
             "file": {
-              "name": "22-20261107/CoreELEC-Amlogic-no.aarch64-22.0-Piers_canary_20261107.tar",
-              "size": 463923200
-            }
-          },
-          "1": {
-            "file": {
               "name": "22-20261111/CoreELEC-Amlogic-no.aarch64-22.0-Piers_canary_20261111.tar",
               "size": 465664000
             }
           },
-          "2": {
+          "1": {
             "file": {
               "name": "22-20261116/CoreELEC-Amlogic-no.aarch64-22.0-Piers_canary_20261116.tar",
               "size": 465776640
             }
           },
-          "3": {
+          "2": {
             "file": {
               "name": "22-20261118/CoreELEC-Amlogic-no.aarch64-22.0-Piers_canary_20261118.tar",
               "size": 465786880
             }
           },
-          "4": {
+          "3": {
             "file": {
               "name": "22-20261119/CoreELEC-Amlogic-no.aarch64-22.0-Piers_canary_20261119.tar",
               "size": 466094080
+            }
+          },
+          "4": {
+            "file": {
+              "name": "22-20261123/CoreELEC-Amlogic-no.aarch64-22.0-Piers_canary_20261123.tar",
+              "size": 466104320
             }
           }
         }

@@ -10,13 +10,13 @@ receiver shows its notice and mutes at every pause, seek and resume.
 Only the sink runs in a pause, and a unit straddles most MAT frames,
 so the codec's packer could not end the stream on a unit boundary.
 ---
- .../Engines/ActiveAE/ActiveAESink.cpp         |  59 ++++++-
+ .../Engines/ActiveAE/ActiveAESink.cpp         |  60 ++++++-
  .../Engines/ActiveAE/ActiveAESink.h           |   7 +
  xbmc/cores/AudioEngine/Utils/PackerMAT.cpp    | 157 ++++++++++++++++--
  xbmc/cores/AudioEngine/Utils/PackerMAT.h      |  27 ++-
  .../Audio/DVDAudioCodecPassthrough.cpp        |  28 +---
  .../Audio/DVDAudioCodecPassthrough.h          |   3 -
- 6 files changed, 229 insertions(+), 52 deletions(-)
+ 6 files changed, 230 insertions(+), 52 deletions(-)
 
 diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
 --- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
@@ -39,9 +39,11 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp b/xbmc/cor
  {
    m_inMsgEvent = inMsgEvent;
    m_stats = nullptr;
-@@ -0,15 +0,20 @@
+@@ -0,15 +0,19 @@
+           return;
+ 
          case CSinkControlProtocol::FLUSH:
-         {
++        {
            ReturnBuffers();
 +          const bool discard = *reinterpret_cast<const bool*>(msg->data);
            // Only discards device audio when asked to, as on a stream flush or pause.
@@ -51,16 +53,13 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp b/xbmc/cor
 +          EndMATFrame(discard);
            // the engine keeps counting what the device still plays
            if (m_stats)
-           {
-             AEDelayStatus status;
-             if (m_sink)
-               m_sink->GetDelay(status);
-+            if (m_requestedFormat.m_dataFormat == AE_FMT_RAW)
-+              status.delay +=
-+                  m_packerMAT->GetPending() * m_sinkFormat.m_streamInfo.GetDuration() / 1000;
-             m_stats->UpdateSinkDelay(status, 0);
-           }
+             ReportDelay();
            msg->Reply(CSinkControlProtocol::ACC);
+           return;
++        }
+ 
+         case CSinkControlProtocol::APPFOCUSED:
+           m_extAppFocused = *(bool*)msg->data;
 @@ -0,6 +0,7 @@
          switch (signal)
          {
@@ -152,10 +151,10 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp b/xbmc/cor
        buffer = &packBuffer;
        totalFrames = size / m_sinkFormat.m_frameSize;
        frames = totalFrames;
-@@ -0,11 +0,22 @@
+@@ -0,7 +0,12 @@
      m_sink->GetDelay(status);
  
-   if (m_requestedFormat.m_dataFormat == AE_FMT_RAW)
+   if (m_requestedFormat.m_dataFormat == AE_FMT_RAW && !filled)
 -    m_stats->UpdateSinkDelay(status, rawPackets, rawPauseMs);
 +  {
 +    // the time the MAT packer holds plays after the device's, the sink waits on the device only
@@ -165,6 +164,14 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp b/xbmc/cor
 +  }
  
    return status.delay * 1000;
+ }
+@@ -0,9 +0,17 @@
+   AEDelayStatus status;
+   if (m_sink)
+     m_sink->GetDelay(status);
++  if (m_requestedFormat.m_dataFormat == AE_FMT_RAW)
++    status.delay += m_packerMAT->GetPending() * m_sinkFormat.m_streamInfo.GetDuration() / 1000;
+   m_stats->UpdateSinkDelay(status, 0);
  }
  
 +void CActiveAESink::EndMATFrame(bool discard)
@@ -197,8 +204,8 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.h b/xbmc/cores
 +  // writes the MAT frame in progress completed with padding, see CPackerMAT::Close
 +  void EndMATFrame(bool discard);
  
-   unsigned int OutputSamples(CSampleBuffer* samples);
-   void SwapInit(CSampleBuffer* samples);
+   // with `filled`, adds the frames the device took and leaves the delay unreported
+   unsigned int OutputSamples(CSampleBuffer* samples, unsigned int* filled = nullptr);
 @@ -0,6 +0,9 @@
    int m_sinkLatency;
    std::unique_ptr<CAEBitstreamPacker> m_packer;

@@ -9,25 +9,17 @@ move to one content frame under a vsync adjust and skips it below
 phase. A late start measured while muted can be skipped unheard; one
 already heard keeps the phase only when moved in whole vsyncs.
 ---
- .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 145 ++++++++++++------
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 144 ++++++++++++------
  .../AudioEngine/Engines/ActiveAE/ActiveAE.h   |   3 +
  .../Engines/ActiveAE/ActiveAEStream.h         |   4 +
  xbmc/cores/VideoPlayer/DVDClock.cpp           |  10 +-
  xbmc/cores/VideoPlayer/DVDClock.h             |   5 +-
  xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp   |   4 +-
- 6 files changed, 114 insertions(+), 57 deletions(-)
+ 6 files changed, 113 insertions(+), 57 deletions(-)
 
 diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
 --- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
 +++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
-@@ -0,6 +0,7 @@
-   stream.m_resampleRatio = 1.0;
-   stream.m_syncError = 0;
-   stream.m_syncState = CAESyncInfo::AESyncState::SYNC_OFF;
-+  stream.m_exactStart = false;
-   m_streamStats.push_back(stream);
- }
- 
 @@ -0,6 +0,7 @@
        float delay = 0;
        str.m_syncState = stream->m_syncState;
@@ -112,13 +104,13 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
 +  }
    const auto keepAudible = [&](double syncError)
    {
--    return fabs(syncError) <= threshold ||
+-    return fabs(syncError) <= startThreshold ||
 -           (clockFollowsAudio && syncError < 0 && -syncError <= MAX_LATE_START_MS);
 +    const bool lateStart{clockFollowsAudio && syncError < 0 && -syncError <= MAX_LATE_START_MS};
 +    // a late start is skipped before it is heard, which keeps the clock sync phase
 +    if (lateStart && phasePeriod > 0)
 +      return false;
-+    return fabs(syncError) <= threshold || lateStart;
++    return fabs(syncError) <= startThreshold || lateStart;
    };
  
    if (newerror && fabs(error) > threshold && stream->m_syncState == CAESyncInfo::AESyncState::SYNC_INSYNC)
@@ -251,7 +243,7 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h b/xbmc/cores/Aud
      unsigned int m_errorTime;
      CAESyncInfo::AESyncState m_syncState;
      bool m_lateStartHandedOver{false};
-+    bool m_exactStart;
++    bool m_exactStart{false};
    };
    std::vector<StreamStats> m_streamStats;
  };

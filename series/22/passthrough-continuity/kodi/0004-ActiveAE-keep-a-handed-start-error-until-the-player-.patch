@@ -68,4 +68,4 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h b/xbmc/cores/Aud
 +    unsigned int m_errorTimeTaken{0};
      CAESyncInfo::AESyncState m_syncState;
      bool m_lateStartHandedOver{false};
-     bool m_exactStart;
+     bool m_exactStart{false};

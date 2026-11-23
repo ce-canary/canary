@@ -14,13 +14,13 @@ vdin1 can give the video at the output size in 10 bits.
  xbmc/rendering/capture/CapturePixels.h        |   5 +
  xbmc/rendering/capture/CaptureTypes.h         |   4 +
  xbmc/settings/Settings.h                      |   1 +
- xbmc/utils/AMLCapture.cpp                     | 301 ++++++++++++++++--
+ xbmc/utils/AMLCapture.cpp                     | 299 ++++++++++++++++--
  xbmc/utils/AMLCapture.h                       |  35 +-
  xbmc/utils/AMLCaptureConvert.cpp              | 275 +++++++++++++++-
  xbmc/utils/AMLCaptureConvert.h                |  17 +
  xbmc/utils/Screenshot.cpp                     |  67 ++--
  xbmc/utils/Screenshot.h                       |   9 +-
- 13 files changed, 727 insertions(+), 58 deletions(-)
+ 13 files changed, 725 insertions(+), 58 deletions(-)
 
 diff --git a/addons/resource.language.en_gb/resources/strings.po b/addons/resource.language.en_gb/resources/strings.po
 --- a/addons/resource.language.en_gb/resources/strings.po
@@ -614,17 +614,15 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
  }
  
  CAMLCapture::CAMLCapture()
-@@ -0,6 +0,16 @@
-   return input == AMLCaptureInput::SCREEN || (IsPresented() && !m_busy);
+@@ -0,6 +0,14 @@
+   return input == AMLCaptureInput::SCREEN || IsPresented();
  }
  
 +bool CAMLCapture::Unreadable(bool log) const
 +{
 +  if (log)
 +    CLog::Log(LOGWARNING, "CAMLCapture::{}: no video frame: {}", __FUNCTION__,
-+              m_displayLost  ? "display lost"
-+              : !m_presented ? "no video presented"
-+                             : "another vdin1 user holds the node");
++              m_displayLost ? "display lost" : "no video presented");
 +  return false;
 +}
 +

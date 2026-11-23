@@ -89,7 +89,7 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
 +
    double error;
    double threshold = 100;
-   if (stream->m_resampleMode)
+   // The error measured at the start of a stream is adjusted whatever the clock speed is.
 @@ -0,44 +0,12 @@
      else
      {

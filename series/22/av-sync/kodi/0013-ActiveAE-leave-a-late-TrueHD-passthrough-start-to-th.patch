@@ -38,7 +38,7 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
 +  const bool clockFollowsAudio{!stream->m_resampleMode};
    const auto keepAudible = [&](double syncError)
    {
-     return fabs(syncError) <= threshold ||
+     return fabs(syncError) <= startThreshold ||
 diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
 --- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
 +++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h

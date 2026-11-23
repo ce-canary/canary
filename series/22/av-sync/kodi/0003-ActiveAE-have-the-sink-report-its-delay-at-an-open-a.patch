@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 20:16:45 -0500
+Subject: [PATCH] ActiveAE: have the sink report its delay at an open and a
+ flush
+
+A pause or a seek flushes the engine. The engine reset set the sink
+delay to 0 until the next write, while the device still reported audio
+to play, so the start of a seek read the audio delay 150 to 200 ms
+short. Only the sink knows what its device holds after an open or a
+flush.
+---
+ xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp |  1 -
+ .../AudioEngine/Engines/ActiveAE/ActiveAESink.cpp    | 12 ++++++++++++
+ .../AudioEngine/Engines/ActiveAE/ActiveAESink.h      |  1 +
+ 3 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,7 +0,6 @@
+ void CEngineStats::Reset(unsigned int sampleRate, bool pcm)
+ {
+   std::unique_lock lock(m_lock);
+-  m_sinkDelay.SetDelay(0.0);
+   m_sinkSampleRate = sampleRate;
+   m_bufferedSamples = 0;
+   m_bufferedPauseMs = 0;
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
+@@ -0,6 +0,7 @@
+             reply.cacheTotal = m_sink->GetCacheTotal();
+             reply.latency = m_sink->GetLatency();
+             reply.hasVolume = m_sink->HasVolume();
++            ReportDelay();
+             m_state = S_TOP_CONFIGURED_IDLE;
+             m_extTimeout = 10s;
+             m_sinkLatency = (int64_t)(reply.latency * 1000);
+@@ -0,6 +0,9 @@
+           // Only discards device audio when asked to, as on a stream flush or pause.
+           if (m_sink && *reinterpret_cast<const bool*>(msg->data))
+             m_sink->Flush();
++          // the engine keeps counting what the device still plays
++          if (m_stats)
++            ReportDelay();
+           msg->Reply(CSinkControlProtocol::ACC);
+           return;
+ 
+@@ -0,6 +0,14 @@
+   return status.delay * 1000;
+ }
+ 
++void CActiveAESink::ReportDelay()
++{
++  AEDelayStatus status;
++  if (m_sink)
++    m_sink->GetDelay(status);
++  m_stats->UpdateSinkDelay(status, 0);
++}
++
+ void CActiveAESink::SwapInit(CSampleBuffer* samples)
+ {
+   if ((m_requestedFormat.m_dataFormat == AE_FMT_RAW) && CAEUtil::S16NeedsByteSwap(AE_FMT_S16NE, m_sinkFormat.m_dataFormat))
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.h
+@@ -0,6 +0,7 @@
+   bool NeedIECPacking();
+ 
+   unsigned int OutputSamples(CSampleBuffer* samples);
++  void ReportDelay();
+   void SwapInit(CSampleBuffer* samples);
+ 
+   void GenerateNoise();

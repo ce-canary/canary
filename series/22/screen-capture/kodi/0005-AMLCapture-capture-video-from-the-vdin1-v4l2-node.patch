@@ -702,7 +702,7 @@ new file mode 100644
 +{
 +  if (m_displayLost)
 +    return false;
-+  return IsPresented() && !m_busy;
++  return IsPresented();
 +}
 +
 +bool CAMLCapture::Read(int width, int height, const ReadFunc& use)
@@ -1014,7 +1014,7 @@ new file mode 100644
 +  std::vector<std::pair<int, int>> m_continuousSizes;
 +  bool m_displayLost{false};
 +  uint32_t m_displayEpoch{0};
-+  //! another vdin1 user holds the node: no reopen before the next Configure
++  //! the last video open found the node busy; every video read retries it
 +  bool m_busy{false};
 +  AMLCaptureSource m_source;
 +  //! the frame metadata the title peak in m_source was decoded from

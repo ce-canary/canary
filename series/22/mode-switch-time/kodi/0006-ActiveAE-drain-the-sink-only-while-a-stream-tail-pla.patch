@@ -47,9 +47,9 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
                                                                       &m_settings.device;
 +  // drain only while the device still plays the tail of a stream
 +  config.drain = !m_streamTailEnd.IsTimePast();
- 
-   // send message to sink
-   m_sink.m_controlPort.SendOutMessage(CSinkControlProtocol::SETNOISETYPE, &m_settings.streamNoise, sizeof(bool));
+   config.streaming = !m_streams.empty() || HoldsFormat();
+   config.fill = config.streaming;
+   for (const auto* stream : m_streams)
 @@ -0,11 +0,12 @@
    }
  }
@@ -103,14 +103,14 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp b/xbmc/cor
 --- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
 +++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.cpp
 @@ -0,7 +0,7 @@
-           m_extSilenceTimer.Set(0ms);
-           m_extStreaming = false;
+           m_extError = false;
+           m_extStreaming = data && data->streaming;
            ReturnBuffers();
 -          OpenSink();
 +          OpenSink(!data || data->drain);
+           opened = !m_extError;
  
-           if (!m_extError)
-           {
+           // the device is empty, the keep-alive fills it before any reader sees its delay
 @@ -0,7 +0,7 @@
  
          case CSinkControlProtocol::UNCONFIGURE:
@@ -146,9 +146,9 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAESink.h b/xbmc/cores
    CEngineStats *stats;
    const std::string *device;
 +  bool drain{true};
- };
- 
- struct SinkReply
+   bool streaming{false};
+   // the keep-alive silence is what reaches the device first
+   bool fill{false};
 @@ -0,7 +0,7 @@
    void StateMachine(int signal, Protocol* port, Message* msg);
    void PrintSinks(std::string& driver);

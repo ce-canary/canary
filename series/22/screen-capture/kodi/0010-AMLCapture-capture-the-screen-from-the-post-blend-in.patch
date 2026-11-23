@@ -264,8 +264,8 @@ diff --git a/xbmc/utils/AMLCapture.cpp b/xbmc/utils/AMLCapture.cpp
  {
    if (m_displayLost)
      return false;
--  return IsPresented() && !m_busy;
-+  return input == AMLCaptureInput::SCREEN || (IsPresented() && !m_busy);
+-  return IsPresented();
++  return input == AMLCaptureInput::SCREEN || IsPresented();
  }
  
 -bool CAMLCapture::Read(int width, int height, const ReadFunc& use)
@@ -499,7 +499,7 @@ diff --git a/xbmc/utils/AMLCapture.h b/xbmc/utils/AMLCapture.h
 +  std::vector<std::tuple<AMLCaptureInput, int, int>> m_continuousSizes;
    bool m_displayLost{false};
    uint32_t m_displayEpoch{0};
-   //! another vdin1 user holds the node: no reopen before the next Configure
+   //! the last video open found the node busy; every video read retries it
    bool m_busy{false};
 +  //! the last screen open found the node busy; every screen read retries it
 +  bool m_screenBusy{false};

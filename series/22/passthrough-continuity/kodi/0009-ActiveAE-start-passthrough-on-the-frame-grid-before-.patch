@@ -59,9 +59,9 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
              m_extTimeout = 100ms;
              return;
 @@ -0,6 +0,8 @@
-                                                                      &m_settings.device;
-   // drain only while the device still plays the tail of a stream
-   config.drain = !m_streamTailEnd.IsTimePast();
+     if (!stream->m_paused && stream->m_processingBuffers && stream->m_processingBuffers->HasWork())
+       config.fill = false;
+   }
 +  m_stats.SetOutputStamped(false);
 +  EndStartTargets();
  

@@ -9,14 +9,27 @@ Only the HEVC decoder takes up input again from there, and only with
 a kernel patch. Kodi's other decoders start over with a reset after
 an end of stream, as at a seek.
 ---
- xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp           | 2 --
- xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h             | 1 +
- .../VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp      | 4 ++++
- 3 files changed, 5 insertions(+), 2 deletions(-)
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp    | 17 +++++------------
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.h      |  2 +-
+ .../DVDCodecs/Video/DVDVideoCodecAmlogic.cpp    |  4 ++++
+ 3 files changed, 10 insertions(+), 13 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+@@ -0,7 +0,11 @@
+     m_resetEpoch++;
+   }
+   m_dll->codec_reset(&am_private->vcodec);
+-  ClearInputEnd();
++  if (m_inputEndSent)
++  {
++    m_dll->codec_set_eos(&am_private->vcodec, 0);
++    m_inputEndSent = false;
++  }
+   m_inputWritten = false;
+   m_dll->codec_set_video_delay_limited_ms(&am_private->vcodec, 1000);
+ 
 @@ -0,8 +0,6 @@
    float new_buffer_level = GetBufferLevel(chunk_size, data_len, free_len, size);
    bool streambuffer(am_private->gcodec.dec_mode == STREAM_TYPE_STREAM);
@@ -26,6 +39,22 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
    if (!m_buffer_level_ready)
    {
      m_buffer_level_ready = (streambuffer || new_buffer_level > 5.0f);
+@@ -0,15 +0,6 @@
+   m_tp_drain = m_tp_last_frame;
+ }
+ 
+-void CAMLCodec::ClearInputEnd()
+-{
+-  if (!m_inputEndSent)
+-    return;
+-
+-  m_dll->codec_set_eos(&am_private->vcodec, 0);
+-  m_inputEndSent = false;
+-}
+-
+ void CAMLCodec::SetDrain(bool drain)
+ {
+   // a held picture is not decoder silence, but a drain that times out counts up to its timeout
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
@@ -37,6 +66,14 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
    void          SetDoviZeroLevel5(bool value);
    void          SetVideoRect(const CRect &SrcRect, const CRect &DestRect);
    void          SetVideoRate(int videoRate);
+@@ -0,7 +0,6 @@
+   std::string   GetVfmMap(const std::string &name);
+   void          SetVfmMap(const std::string &name, const std::string &map);
+   int           DequeueBuffer();
+-  void          ClearInputEnd();
+   unsigned int  GetDecoderVideoRate();
+   std::string   GetHDRStaticMetadata(bool dv_enable);
+ 
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
