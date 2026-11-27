@@ -3,17 +3,17 @@ From: matthane <matthan.evans@icloud.com>
 Date: Tue, 10 Nov 2026 10:57:40 -0600
 Subject: [PATCH] AMLCodec: skip the release of a picture from before a reset
 
-A picture dequeued before a reset can be released after it. amlvideo
-takes a buffer back by popping its queue up to that index, and the
-indices run on across the reset. The stale release pops the new
-decoder's pictures with it.
+A picture dequeued before a reset can be released while the reset
+runs. Its index stays in the dequeue list until the reset clears the
+list. The release then queues it into the amlvideo queue the reset
+empties, and the renderer counts the picture as shown.
 ---
- .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp     | 16 +++++++++++++---
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp     | 16 ++++++++++++----
  .../cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h |  6 +++++-
  .../DVDCodecs/Video/DVDVideoCodecAmlogic.cpp     |  6 ++++--
  .../DVDCodecs/Video/DVDVideoCodecAmlogic.h       |  5 ++++-
  .../VideoRenderers/HwDecRender/RendererAML.cpp   |  9 +++++----
- 5 files changed, 31 insertions(+), 11 deletions(-)
+ 5 files changed, 30 insertions(+), 12 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
@@ -23,44 +23,41 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
  
    // reset the decoder
 +  {
-+    std::lock_guard<std::mutex> lock(m_resetMutex);
++    std::lock_guard<std::mutex> lock(m_amlVideoFileMutex);
 +    m_resetEpoch++;
 +  }
    m_dll->codec_reset(&am_private->vcodec);
-   ClearInputEnd();
-   m_inputWritten = false;
-@@ -0,13 +0,19 @@
+   {
+     // codec_reset empties the amlvideo queue, so frames dequeued before it are not queued back
+@@ -0,19 +0,23 @@
    return true;
  }
  
 -int CAMLCodec::ReleaseFrame(const uint32_t index, bool drop)
 +bool CAMLCodec::ReleaseFrame(const uint32_t index, uint32_t resetEpoch, bool drop)
  {
-   int ret;
-   v4l2_buffer vbuf = v4l2_buffer();
-   vbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-   vbuf.index = index;
+   int ret = 0;
  
-+  // amlvideo takes a buffer back by popping its queue up to the index, so a picture from before
-+  // a reset would take the new pictures with it
-+  std::lock_guard<std::mutex> resetLock(m_resetMutex);
-+  if (resetEpoch != m_resetEpoch)
+   std::lock_guard<std::mutex> lock(m_amlVideoFileMutex);
+ 
+   if (!m_amlVideoFile)
+-    return 0;
 +    return false;
 +
-   PosixFilePtr amlVideoFile;
-   {
-     std::lock_guard<std::mutex> lock(m_amlVideoFileMutex);
-@@ -0,7 +0,7 @@
-   }
++  // the reset emptied the amlvideo queue of a picture from before it, so amlvideo cannot take it
++  if (resetEpoch != m_resetEpoch)
++    return false;
  
-   if (!amlVideoFile)
+   auto frame = std::find_if(m_dequeuedFrames.begin(), m_dequeuedFrames.end(),
+                             [index](const DequeuedFrame& f) { return f.index == index; });
+   if (frame == m_dequeuedFrames.end())
 -    return 0;
 +    return false;
  
-   if (drop)
-     vbuf.flags |= V4L2_BUF_FLAG_DONE;
+   frame->released = true;
+   frame->drop = drop;
 @@ -0,7 +0,7 @@
-       AmlDisplay->SetCrtcProperties({{"dv_debug", "enable_fel 0"}, {"dv_debug", "enable_mel 0"}});
+       }
      }
    }
 -  return ret;
@@ -86,11 +83,11 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
    bool          IsRealtimeStream() const { return m_processInfo.IsRealtimeStream(); }
    double        GetPresentHold() const { return m_presentHold; }
 @@ -0,6 +0,9 @@
- 
    PosixFilePtr     m_amlVideoFile;
    std::mutex       m_amlVideoFileMutex;
-+  // a reset drops the queue its pictures came from; the video thread writes the epoch
-+  std::mutex       m_resetMutex;
+   std::deque<DequeuedFrame> m_dequeuedFrames;
++  // under m_amlVideoFileMutex: a reset drops the queue its pictures came from; the video thread
++  // writes the epoch
 +  uint32_t         m_resetEpoch{0};
    std::string      m_defaultVfmMap;
  

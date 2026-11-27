@@ -43,7 +43,7 @@ diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
  int aml_get_cpufamily_id()
  {
 @@ -0,9 +0,85 @@
-   return (StringUtils::EqualsNoCase(videostarted.Get<std::string>().value_or("0x0"), "0x1"));
+   return true;
  }
  
 -void aml_continue_presentation()
@@ -143,9 +143,9 @@ diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
  enum AML_SUPPORT_H264_4K2K
  {
 @@ -0,7 +0,8 @@
- };
- AMLVideoOutput aml_video_output(const CDVDStreamInfo& source);
- bool aml_video_started();
+ // the time of the last vblank of the display, on CLOCK_MONOTONIC as the steady clock; false while
+ // the output is off
+ bool aml_display_last_vblank(std::chrono::steady_clock::time_point& time);
 -void aml_continue_presentation();
 +// `next` is the clip of the next item, nullptr when unknown
 +void aml_continue_presentation(const BLURAY_CLIP_INFO* next);

@@ -330,8 +330,8 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
  bool CVideoPlayer::PollBlurayEvents()
  {
 @@ -0,6 +0,10 @@
- {
    m_syncStartPtsWait.reset();
+   m_seekStart = false;
    m_navTail = false;
 +#if defined(HAVE_LIBBLURAY)
 +  if (const auto bluray = GetBlurayInputStream())

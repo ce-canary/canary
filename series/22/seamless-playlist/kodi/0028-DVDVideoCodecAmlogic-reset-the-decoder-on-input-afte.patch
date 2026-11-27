@@ -18,9 +18,9 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 @@ -0,7 +0,11 @@
-     m_resetEpoch++;
+     std::lock_guard<std::mutex> lock(m_amlVideoFileMutex);
+     m_dequeuedFrames.clear();
    }
-   m_dll->codec_reset(&am_private->vcodec);
 -  ClearInputEnd();
 +  if (m_inputEndSent)
 +  {

@@ -120,4 +120,4 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
 +  bool             m_streamStartGate{false};
    bool             m_inputWritten{false};
    bool             m_inputEndSent{false};
-   std::atomic<double> m_presentHold{0.0};
+   am_private_t    *am_private;

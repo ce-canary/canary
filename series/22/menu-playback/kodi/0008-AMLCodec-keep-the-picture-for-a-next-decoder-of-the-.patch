@@ -387,17 +387,17 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
  
  // the output teardown of a decoder close, where the hold of the output ends
 @@ -0,6 +0,11 @@
+     CLog::Log(LOGDEBUG, LOGVIDEO, "CAMLCodec::ReleaseFrame idx:{:d}, drop:{:d}",
+       front.index, static_cast<int>(front.drop));
  
-   CLog::Log(LOGDEBUG, LOGVIDEO, "CAMLCodec::ReleaseFrame idx:{:d}, drop:{:d}", index, static_cast<int>(drop));
- 
-+  // the kernel frees the kept picture when it shows this frame; the hold ends before the frame is
-+  // queued, so a drop of the picture cannot turn the layer off under it
-+  if (!drop && m_keptPicture)
-+    EndHold(false);
++    // the kernel frees the kept picture when it shows this frame; the hold ends before the frame
++    // is queued, so a drop of the picture cannot turn the layer off under it
++    if (!front.drop && m_keptPicture)
++      EndHold(false);
 +
-   if ((ret = amlVideoFile->IOControl(VIDIOC_QBUF, &vbuf)) < 0)
-     CLog::Log(LOGERROR, "CAMLCodec::ReleaseFrame - VIDIOC_QBUF failed: {}", strerror(errno));
-   return ret;
+     if ((ret = m_amlVideoFile->IOControl(VIDIOC_QBUF, &vbuf)) < 0)
+       CLog::Log(LOGERROR, "CAMLCodec::ReleaseFrame - VIDIOC_QBUF failed: {}", strerror(errno));
+   }
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
@@ -452,7 +452,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
      OUTPUT_HDR,
    };
 @@ -0,6 +0,7 @@
-   bool             m_drain = false;
+   std::atomic<double> m_presentHold{0.0};
    bool             m_setUp{false};
    uint64_t         m_holdGen{0};
 +  std::atomic<bool> m_keptPicture{false};
@@ -522,11 +522,12 @@ diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
 diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
 --- a/xbmc/utils/AMLUtils.h
 +++ b/xbmc/utils/AMLUtils.h
-@@ -0,5 +0,7 @@
- bool aml_video_started();
+@@ -0,6 +0,8 @@
+ bool aml_display_last_vblank(std::chrono::steady_clock::time_point& time);
  void aml_continue_presentation();
  void aml_end_presentation(bool stop);
 +// `taken` also drops a picture a next decoder took before its first frame
 +void aml_drop_kept_picture(bool taken);
  int aml_amdv_wait(StreamHdrType hdrType);
  void aml_set_3d_video_mode(unsigned int mode, bool framepacking_support, int view_mode);
+ 

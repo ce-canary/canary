@@ -9,10 +9,10 @@ A display reset or reconfigure with no stream does the same. A player
 that opens the next stream at once then re-inits the sink twice, and
 the receiver re-locks twice, even when both streams share a format.
 ---
- .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 57 +++++++++++++++++--
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp | 59 +++++++++++++++++--
  .../AudioEngine/Engines/ActiveAE/ActiveAE.h   |  6 ++
  xbmc/cores/AudioEngine/Interfaces/AE.h        |  8 +++
- 3 files changed, 66 insertions(+), 5 deletions(-)
+ 3 files changed, 67 insertions(+), 6 deletions(-)
 
 diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
 --- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
@@ -131,6 +131,15 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
             (format.m_channelLayout.Count() > 2 || settings.stereoupmix))
    {
      format.m_dataFormat = AE_FMT_RAW;
+@@ -0,7 +0,7 @@
+   config.stats = &m_stats;
+   config.device = (m_sinkRequestFormat.m_dataFormat == AE_FMT_RAW) ? &m_settings.passthroughdevice :
+                                                                      &m_settings.device;
+-  config.streaming = !m_streams.empty();
++  config.streaming = !m_streams.empty() || HoldsFormat();
+   config.fill = config.streaming;
+   for (const auto* stream : m_streams)
+   {
 @@ -0,6 +0,10 @@
    const std::shared_ptr<CSettings> settings = CServiceBroker::GetSettingsComponent()->GetSettings();
    int soc_id = aml_get_cpufamily_id();

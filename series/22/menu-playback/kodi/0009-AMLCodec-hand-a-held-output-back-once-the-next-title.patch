@@ -213,26 +213,26 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
  // under holdMutex
 @@ -0,11 +0,20 @@
  
-   // the kernel frees the kept picture when it shows this frame; the hold ends before the frame is
-   // queued, so a drop of the picture cannot turn the layer off under it
--  if (!drop && m_keptPicture)
-+  const bool endsHold = !drop && m_keptPicture;
-+  if (endsHold)
-     EndHold(false);
+     // the kernel frees the kept picture when it shows this frame; the hold ends before the frame
+     // is queued, so a drop of the picture cannot turn the layer off under it
+-    if (!front.drop && m_keptPicture)
++    const bool endsHold = !front.drop && m_keptPicture;
++    if (endsHold)
+       EndHold(false);
  
-   if ((ret = amlVideoFile->IOControl(VIDIOC_QBUF, &vbuf)) < 0)
-     CLog::Log(LOGERROR, "CAMLCodec::ReleaseFrame - VIDIOC_QBUF failed: {}", strerror(errno));
-+  else if (endsHold)
-+  {
-+    // a dropped picture leaves a held output, so this frame is the handback mark
-+    if (m_handbackOff)
+     if ((ret = m_amlVideoFile->IOControl(VIDIOC_QBUF, &vbuf)) < 0)
+       CLog::Log(LOGERROR, "CAMLCodec::ReleaseFrame - VIDIOC_QBUF failed: {}", strerror(errno));
++    else if (endsHold)
++    {
++      // a dropped picture leaves a held output, so this frame is the handback mark
++      if (m_handbackOff)
++        HandBack();
++    }
++    else if (!front.drop && m_handback)
 +      HandBack();
-+  }
-+  else if (!drop && m_handback)
-+    HandBack();
+   }
    return ret;
  }
- 
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h

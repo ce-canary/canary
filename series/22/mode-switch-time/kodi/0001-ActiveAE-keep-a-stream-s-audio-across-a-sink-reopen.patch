@@ -48,7 +48,7 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/A
 +          m_discardBufferPools.push_back(buffers->GetResampleBuffers());
 +          m_discardBufferPools.push_back(buffers->GetAtempoBuffers());
 +          (*it)->m_processingBuffers.reset();
-+          // a start cut was measured against the dropped buffers
++          // a start cut was measured against the flushed buffers
 +          if (dropped > 0.0f && (*it)->m_pClock && !(*it)->m_freed)
 +            (*it)->m_pClock->TakeStartCut();
 +        }

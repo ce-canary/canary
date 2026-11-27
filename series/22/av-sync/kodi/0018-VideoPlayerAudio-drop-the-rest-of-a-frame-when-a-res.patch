@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 19 Nov 2026 14:45:16 -0600
+Subject: [PATCH] VideoPlayerAudio: drop the rest of a frame when a resync
+ flushes
+
+A frame that timed out while being added stays half written and its
+rest is added on the next pass. A resync that flushes the sink kept
+that rest, so audio from before the flush was played after it, without
+a timestamp of its own. The flush and reset messages already drop it.
+---
+ xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp b/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
+@@ -0,6 +0,7 @@
+       if (pts > m_audioClock - delay + 0.5 * DVD_TIME_BASE)
+       {
+         m_audioSink.Flush();
++        audioframe.nb_frames = 0;
+       }
+       m_audioClock = pts + delay;
+       if (m_speed != DVD_PLAYSPEED_PAUSE)

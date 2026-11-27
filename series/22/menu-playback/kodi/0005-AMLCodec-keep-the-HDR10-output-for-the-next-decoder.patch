@@ -181,7 +181,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
    void          SetVfmMap(const std::string &name, const std::string &map);
    int           DequeueBuffer();
 @@ -0,6 +0,7 @@
-   bool             m_drain = false;
+   std::atomic<double> m_presentHold{0.0};
    bool             m_setUp{false};
    uint64_t         m_holdGen{0};
 +  bool             m_ownOutput{false};

@@ -88,9 +88,9 @@ diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h b/xbmc/cores/Aud
    void DrainSink();
 -  void UnconfigureSink();
 +  void UnconfigureSink(bool drain = true);
+   // ends the pending start target of every stream, which a sink that stops playing cannot decide
+   void EndStartTargets();
    void Dispose();
-   void LoadSettings(AEAudioFormat *format = NULL);
-   void ValidateOutputDevices(bool saveChanges);
 @@ -0,6 +0,7 @@
    unsigned int m_extErrorRetries{0};
    bool m_extDrain;

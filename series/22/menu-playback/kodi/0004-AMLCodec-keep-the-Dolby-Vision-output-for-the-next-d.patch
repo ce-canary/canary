@@ -8,18 +8,18 @@ to bypass until the next decoder starts it again. Between two Dolby
 Vision items the sink sees Dolby Vision, SDR, then Dolby Vision, and
 can drop the picture for seconds.
 ---
- .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  | 247 ++++++++++++++++--
+ .../VideoPlayer/DVDCodecs/Video/AMLCodec.cpp  | 249 ++++++++++++++++--
  .../VideoPlayer/DVDCodecs/Video/AMLCodec.h    |  37 ++-
  .../DVDCodecs/Video/DVDVideoCodecAmlogic.cpp  |   4 +-
  .../DVDCodecs/Video/DVDVideoCodecAmlogic.h    |   2 +
  xbmc/utils/AMLUtils.cpp                       |  11 +
  xbmc/utils/AMLUtils.h                         |   2 +
- 6 files changed, 285 insertions(+), 18 deletions(-)
+ 6 files changed, 286 insertions(+), 19 deletions(-)
 
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
-@@ -0,6 +0,42 @@
+@@ -0,6 +0,43 @@
    return (size + need_padding_size);
  }
  
@@ -52,7 +52,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +  return aml_support_dolby_vision() &&
 +         !settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_DISABLE) &&
 +         ((output.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION &&
-+           (displaySupportDv || hints.dovi.dv_profile == 5)) ||
++           (displaySupportDv || hints.dovi.dv_profile == 5 ||
++            (hints.dovi.dv_profile == 20 && hints.dovi.dv_bl_signal_compatibility_id == 0))) ||
 +          ((output.hdrType != StreamHdrType::HDR_TYPE_NONE && dv2sdr) ||
 +           (output.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && dv2hdr)));
 +}
@@ -127,12 +128,13 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
      return false;
    }
  
-@@ -0,10 +0,7 @@
+@@ -0,11 +0,7 @@
    bool dv2hdr(settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV2HDR));
    bool display_support_dv(static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay()->aml_display_support_dv());
    bool user_dv_disable(settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_DISABLE));
 -  bool dv_enable(device_support_dv && !user_dv_disable &&
--      ((outputHdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && (display_support_dv || hints.dovi.dv_profile == 5)) ||
+-      ((outputHdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && (display_support_dv || hints.dovi.dv_profile == 5 ||
+-        (hints.dovi.dv_profile == 20 && hints.dovi.dv_bl_signal_compatibility_id == 0))) ||
 -      ((outputHdrType != StreamHdrType::HDR_TYPE_NONE && dv2sdr) ||
 -       (outputHdrType == StreamHdrType::HDR_TYPE_DOLBYVISION && dv2hdr))));
 +  bool dv_enable(RunsDolbyVision(hints, m_output));
@@ -174,7 +176,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +  }
  
    SetPollDevice(-1);
- 
+   // the vsync presenter reads no clock sync phase until a picture is queued or released again
 @@ -0,8 +0,11 @@
      m_dll->codec_set_cntl_mode(&am_private->vcodec, TRICKMODE_NONE);
    }
@@ -450,8 +452,8 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
    void          SetVfmMap(const std::string &name, const std::string &map);
    int           DequeueBuffer();
 @@ -0,8 +0,11 @@
-   std::atomic<bool> m_opened;
    bool             m_drain = false;
+   std::atomic<double> m_presentHold{0.0};
    bool             m_setUp{false};
 +  uint64_t         m_holdGen{0};
 +  OutputModule     m_outputModule{OutputModule::NONE};
@@ -499,7 +501,7 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h b/xbm
 +#include "utils/AMLUtils.h"
  #include "utils/BitstreamConverter.h"
  #include "utils/MVCFrameNumRewriter.h"
- 
+ #include "utils/MVCOffsetMetadata.h"
 @@ -0,6 +0,7 @@
    bool            m_opened;
    int             m_codecControlFlags;
@@ -520,7 +522,7 @@ diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
  #include "settings/Settings.h"
  #include "settings/SettingsComponent.h"
 @@ -0,6 +0,16 @@
-   return (StringUtils::EqualsNoCase(videostarted.Get<std::string>().value_or("0x0"), "0x1"));
+   return true;
  }
  
 +void aml_continue_presentation()
@@ -539,11 +541,12 @@ diff --git a/xbmc/utils/AMLUtils.cpp b/xbmc/utils/AMLUtils.cpp
 diff --git a/xbmc/utils/AMLUtils.h b/xbmc/utils/AMLUtils.h
 --- a/xbmc/utils/AMLUtils.h
 +++ b/xbmc/utils/AMLUtils.h
-@@ -0,5 +0,7 @@
- };
- AMLVideoOutput aml_video_output(const CDVDStreamInfo& source);
- bool aml_video_started();
+@@ -0,6 +0,8 @@
+ // the time of the last vblank of the display, on CLOCK_MONOTONIC as the steady clock; false while
+ // the output is off
+ bool aml_display_last_vblank(std::chrono::steady_clock::time_point& time);
 +void aml_continue_presentation();
 +void aml_end_presentation(bool stop);
  int aml_amdv_wait(StreamHdrType hdrType);
  void aml_set_3d_video_mode(unsigned int mode, bool framepacking_support, int view_mode);
+ 

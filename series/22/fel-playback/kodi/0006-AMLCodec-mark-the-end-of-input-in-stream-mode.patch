@@ -63,9 +63,9 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
    m_dst_rect.SetRect(0, 0, 0, 0);
    m_zoom = -1.0f;
 @@ -0,6 +0,8 @@
- 
-   // reset the decoder
-   m_dll->codec_reset(&am_private->vcodec);
+     std::lock_guard<std::mutex> lock(m_amlVideoFileMutex);
+     m_dequeuedFrames.clear();
+   }
 +  ClearInputEnd();
 +  m_inputWritten = false;
    m_dll->codec_set_video_delay_limited_ms(&am_private->vcodec, 1000);
@@ -197,9 +197,9 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/Vide
    bool             m_drainPrebuffer{false};
 +  bool             m_inputWritten{false};
 +  bool             m_inputEndSent{false};
-   std::atomic<double> m_presentHold{0.0};
    am_private_t    *am_private;
    CDVDStreamInfo   m_hints;
+   AMLVideoOutput   m_output;
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
@@ -225,5 +225,5 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h b/xbm
    virtual void SetCodecControl(int flags) override;
 +  virtual void SetInputEnd() override;
    virtual const char* GetName(void) override { return (const char*)m_pFormatName; }
-   virtual bool SupportsExtention() { return true; }
+   virtual bool SupportsExtention();
    virtual int GetDataLevel() const override;

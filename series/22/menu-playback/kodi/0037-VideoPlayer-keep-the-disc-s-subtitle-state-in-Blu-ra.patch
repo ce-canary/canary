@@ -90,7 +90,7 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
        m_SelectionStreams.Clear(StreamType::NONE, STREAM_SOURCE_NONE);
  
 @@ -0,7 +0,9 @@
-   m_renderManager.SetDelay(static_cast<int>(settings.m_AudioDelay * 1000.0f));
+   m_renderManager.SetDelay(static_cast<int>(std::lround(settings.m_AudioDelay * 1000.0f)));
    m_renderManager.SetSubtitleVerticalPosition(settings.m_subtitleVerticalPosition,
                                                settings.m_subtitleVerticalPositionSave);
 -  m_VideoPlayerVideo->EnableSubtitle(settings.m_SubtitleOn);

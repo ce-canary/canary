@@ -34,15 +34,15 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
 +    return;
 +
    SetPollDevice(-1);
- 
-   // never leave vcodec ff/rw or paused.
+   // the vsync presenter reads no clock sync phase until a picture is queued or released again
+   if (m_hints.pClock)
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 @@ -0,6 +0,7 @@
-   DllLibAmCodec   *m_dll;
    std::atomic<bool> m_opened;
    bool             m_drain = false;
+   std::atomic<double> m_presentHold{0.0};
 +  bool             m_setUp{false};
    am_private_t    *am_private;
    CDVDStreamInfo   m_hints;

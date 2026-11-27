@@ -402,8 +402,8 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
  }
  
 @@ -0,6 +0,7 @@
- {
    m_syncStartPtsWait.reset();
+   m_seekStart = false;
    m_navTail = false;
 +  m_lastVideoTitleTime = DVD_NOPTS_VALUE;
  #if defined(HAVE_LIBBLURAY)

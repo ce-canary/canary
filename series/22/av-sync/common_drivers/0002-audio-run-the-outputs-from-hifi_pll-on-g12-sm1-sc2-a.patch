@@ -1,0 +1,671 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 24 Nov 2026 11:15:59 -0600
+Subject: [PATCH] audio: run the outputs from hifi_pll on g12, sm1, sc2 and t7
+
+The card outputs run from MPLLs for one or both rate families, and the
+MPLLs run 19 to 23 ppm slow, so audio drifts against video. hifi_pll
+makes both families exactly, but one PLL serves every output, so two
+streams at different families cannot both run from it. The t7 hifi_pll
+took its rate from a one-entry 48k table.
+---
+ .../dts/amlogic/coreelec_g12a_common.dtsi     | 36 +++++++++-
+ .../dts/amlogic/coreelec_g12b_common.dtsi     | 31 +++++++-
+ .../boot/dts/amlogic/coreelec_sc2_common.dtsi | 40 ++++++++++-
+ .../boot/dts/amlogic/coreelec_sm1_common.dtsi | 33 ++++++++-
+ .../boot/dts/amlogic/coreelec_t7_common.dtsi  | 31 +++++++-
+ drivers/clk/meson/t7.c                        | 10 ++-
+ sound/soc/amlogic/auge/audio_utils.c          | 38 ++++++++++
+ sound/soc/amlogic/auge/audio_utils.h          |  5 ++
+ sound/soc/amlogic/auge/spdif.c                | 70 ++++++++++++-------
+ sound/soc/amlogic/auge/tdm.c                  | 38 +++++++---
+ 10 files changed, 289 insertions(+), 43 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi
+@@ -0,14 +0,48 @@
+ 	aml_i2s2hdmi: i2s2hdmi {
+ 		compatible = "amlogic, g12a-snd-tdmc";
+ 		clocks = <&clkaudio CLKID_AUDIO_MCLK_C
++				 &clkc CLKID_HIFI_PLL
++				 &clkc CLKID_HIFI_PLL
+ 				 &clkc CLKID_MPLL2>;
+-		clock-names = "mclk", "clk_srcpll";
++		clock-names = "mclk", "clk_srcpll", "clk_src_cd", "clk_src_mpll";
+ 	};
+ 
+ 	aml_tdmb: tdmb {
++		clocks = <&clkaudio CLKID_AUDIO_MCLK_B
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_MPLL0
++				&clkaudio CLKID_AUDIO_SPDIFOUT_CTRL
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_MPLL1>;
++		clock-names = "mclk", "clk_srcpll", "samesource_srcpll",
++				"samesource_clk", "clk_src_cd", "clk_src_mpll";
+ 		/delete-property/ start_clk_enable;
+ 		/delete-property/ clk_tuning_enable;
+ 	};
++
++	aml_spdif: spdif {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_FCLK_DIV4
++				&clkaudio CLKID_AUDIO_SPDIFIN
++				&clkaudio CLKID_AUDIO_SPDIFOUT
++				&clkaudio CLKID_AUDIO_SPDIFIN_CTRL
++				&clkaudio CLKID_AUDIO_SPDIFOUT_CTRL
++				&clkc CLKID_MPLL0>;
++		clock-names = "sysclk", "clk_src_cd", "fixed_clk", "gate_spdifin",
++				"gate_spdifout", "clk_spdifin", "clk_spdifout",
++				"clk_src_mpll";
++	};
++
++	aml_spdif_b: spdif_b {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkaudio CLKID_AUDIO_SPDIFOUTB
++				&clkaudio CLKID_AUDIO_SPDIFOUTB_CTRL
++				&clkc CLKID_MPLL0>;
++		clock-names = "sysclk", "clk_src_cd",
++				"gate_spdifout", "clk_spdifout", "clk_src_mpll";
++	};
+ };
+ 
+ &aocec {
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi
+@@ -0,20 +0,49 @@
+ 	aml_i2s2hdmi: i2s2hdmi {
+ 		compatible = "amlogic, g12a-snd-tdmc";
+ 		clocks = <&clkaudio CLKID_AUDIO_MCLK_C
++				 &clkc CLKID_HIFI_PLL
++				 &clkc CLKID_HIFI_PLL
+ 				 &clkc CLKID_MPLL2>;
+-		clock-names = "mclk", "clk_srcpll";
++		clock-names = "mclk", "clk_srcpll", "clk_src_cd", "clk_src_mpll";
+ 	};
+ 
+ 	aml_tdmb: tdmb {
++		clocks = <&clkaudio CLKID_AUDIO_MCLK_B
++				&clkaudio CLKID_AUDIO_MCLK_PAD0
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_MPLL0
++				&clkaudio CLKID_AUDIO_SPDIFOUT_CTRL
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_MPLL1>;
++		clock-names = "mclk", "mclk_pad", "clk_srcpll", "samesource_srcpll",
++				"samesource_clk", "clk_src_cd", "clk_src_mpll";
+ 		suspend-clk-off = <0>;
+ 	};
+ 
+ 	aml_spdif: spdif {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_FCLK_DIV4
++				&clkaudio CLKID_AUDIO_SPDIFIN
++				&clkaudio CLKID_AUDIO_SPDIFOUT
++				&clkaudio CLKID_AUDIO_SPDIFIN_CTRL
++				&clkaudio CLKID_AUDIO_SPDIFOUT_CTRL
++				&clkc CLKID_MPLL0>;
++		clock-names = "sysclk", "clk_src_cd", "fixed_clk", "gate_spdifin",
++				"gate_spdifout", "clk_spdifin", "clk_spdifout",
++				"clk_src_mpll";
+ 		pinctrl-0 = <&spdifout>;
+ 		suspend-clk-off = <0>;
+ 	};
+ 
+ 	aml_spdif_b: spdif_b {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkaudio CLKID_AUDIO_SPDIFOUTB
++				&clkaudio CLKID_AUDIO_SPDIFOUTB_CTRL
++				&clkc CLKID_MPLL3>;
++		clock-names = "sysclk", "clk_src_cd",
++				"gate_spdifout", "clk_spdifout", "clk_src_mpll";
+ 		suspend-clk-off = <0>;
+ 	};
+ };
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi
+@@ -0,8 +0,46 @@
+ 	aml_i2s2hdmi: i2s2hdmi {
+ 		compatible = "amlogic, tm2-revb-snd-tdmc";
+ 		clocks = <&clkaudio CLKID_AUDIO_MCLK_C
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
+ 				&clkc CLKID_MPLL2>;
+-		clock-names = "mclk", "clk_srcpll";
++		clock-names = "mclk", "clk_srcpll", "clk_src_cd", "clk_src_mpll";
++	};
++
++	tdmb: tdm@1 {
++		clocks = <&clkaudio CLKID_AUDIO_MCLK_B
++				&clkaudio CLKID_AUDIO_MCLK_PAD0
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_MPLL0
++				&clkaudio CLKID_AUDIO_SPDIFOUT_A
++				&clkc CLKID_MPLL1>;
++		clock-names = "mclk", "mclk_pad", "clk_srcpll", "clk_src_cd",
++				"samesource_srcpll", "samesource_clk", "clk_src_mpll";
++	};
++
++	spdifa: spdif@0 {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_FCLK_DIV4
++				&clkaudio CLKID_AUDIO_GATE_SPDIFIN
++				&clkaudio CLKID_AUDIO_GATE_SPDIFOUT_A
++				&clkaudio CLKID_AUDIO_SPDIFIN
++				&clkaudio CLKID_AUDIO_SPDIFOUT_A
++				&clkc CLKID_MPLL0>;
++		clock-names = "sysclk", "clk_src_cd", "fixed_clk", "gate_spdifin",
++				"gate_spdifout", "clk_spdifin", "clk_spdifout",
++				"clk_src_mpll";
++	};
++
++	spdifb: spdif@1 {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkaudio CLKID_AUDIO_GATE_SPDIFOUT_B
++				&clkaudio CLKID_AUDIO_SPDIFOUT_B
++				&clkc CLKID_MPLL3>;
++		clock-names = "sysclk", "clk_src_cd",
++				"gate_spdifout", "clk_spdifout", "clk_src_mpll";
+ 	};
+ };
+ 
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi
+@@ -0,18 +0,49 @@
+ 	aml_i2s2hdmi: i2s2hdmi {
+ 		compatible = "amlogic, sm1-snd-tdmc";
+ 		clocks = <&clkaudio CLKID_AUDIO_MCLK_C
++				 &clkc CLKID_HIFI_PLL
++				 &clkc CLKID_HIFI_PLL
+ 				 &clkc CLKID_MPLL2>;
+-		clock-names = "mclk", "clk_srcpll";
++		clock-names = "mclk", "clk_srcpll", "clk_src_cd", "clk_src_mpll";
+ 	};
+ 
+ 	tdmb: tdm@1 {
++		clocks = <&clkaudio CLKID_AUDIO_MCLK_B
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_MPLL0
++				&clkaudio CLKID_AUDIO_SPDIFOUT_A
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_MPLL1>;
++		clock-names = "mclk", "clk_srcpll", "samesource_srcpll",
++				"samesource_clk", "clk_src_cd", "clk_src_mpll";
+ 		/delete-property/ start_clk_enable;
+ 		/delete-property/ clk_tuning_enable;
+ 	};
+ 
+ 	spdifa: spdif@0 {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_FCLK_DIV4
++				&clkaudio CLKID_AUDIO_GATE_SPDIFIN
++				&clkaudio CLKID_AUDIO_GATE_SPDIFOUT_A
++				&clkaudio CLKID_AUDIO_SPDIFIN
++				&clkaudio CLKID_AUDIO_SPDIFOUT_A
++				&clkc CLKID_MPLL0>;
++		clock-names = "sysclk", "clk_src_cd", "fixed_clk", "gate_spdifin",
++				"gate_spdifout", "clk_spdifin", "clk_spdifout",
++				"clk_src_mpll";
+ 		/delete-property/ clk_tuning_enable;
+ 	};
++
++	spdifb: spdif@1 {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkaudio CLKID_AUDIO_GATE_SPDIFOUT_B
++				&clkaudio CLKID_AUDIO_SPDIFOUT_B
++				&clkc CLKID_MPLL3>;
++		clock-names = "sysclk", "clk_src_cd",
++				"gate_spdifout", "clk_spdifout", "clk_src_mpll";
++	};
+ };
+ 
+ &aml_wifi {
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi
+--- a/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_t7_common.dtsi
+@@ -0,14 +0,22 @@
+ 	aml_i2s2hdmi: i2s2hdmi {
+ 		compatible = "amlogic, t7-snd-tdmc";
+ 		clocks = <&clkaudio CLKID_AUDIO_MCLK_C
++				&clkc CLKID_HIFI_PLL
+ 				&clkc CLKID_HIFI_PLL
+ 				&clkc CLKID_MPLL2>;
+-		clock-names = "mclk", "clk_srcpll", "clk_src_cd";
++		clock-names = "mclk", "clk_srcpll", "clk_src_cd", "clk_src_mpll";
+ 		src-clk-freq = <491520000>;
+ 		i2s2hdmi = <1>;
+ 	};
+ 
+ 	tdm@1 {
++		clocks = <&clkaudio CLKID_AUDIO_MCLK_B
++				&clkaudio CLKID_AUDIO_MCLK_PAD1
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_MPLL1>;
++		clock-names = "mclk", "mclk_pad", "clk_srcpll", "clk_src_cd",
++				"clk_src_mpll";
+ 		/delete-property/ tdmin-src-name;
+ 		/delete-property/ ctrl_gain;
+ 		/delete-node/ Channel_Mask;
+@@ -0,8 +0,29 @@
+ 	};
+ 
+ 	spdif@0 {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_FCLK_DIV4
++				&clkaudio CLKID_AUDIO_GATE_SPDIFIN
++				&clkaudio CLKID_AUDIO_GATE_SPDIFOUT_A
++				&clkaudio CLKID_AUDIO_SPDIFIN
++				&clkaudio CLKID_AUDIO_SPDIFOUT_A
++				&clkc CLKID_MPLL0>;
++		clock-names = "sysclk", "clk_src_cd", "fixed_clk", "gate_spdifin",
++				"gate_spdifout", "clk_spdifin", "clk_spdifout",
++				"clk_src_mpll";
+ 		/delete-property/ samesource_sel;
+ 	};
++
++	spdif@1 {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkaudio CLKID_AUDIO_GATE_SPDIFOUT_B
++				&clkaudio CLKID_AUDIO_SPDIFOUT_B
++				&clkc CLKID_MPLL3>;
++		clock-names = "sysclk", "clk_src_cd",
++				"gate_spdifout", "clk_spdifout", "clk_src_mpll";
++	};
+ };
+ 
+ &crg21_otg {
+diff --git a/drivers/clk/meson/t7.c b/drivers/clk/meson/t7.c
+--- a/drivers/clk/meson/t7.c
++++ b/drivers/clk/meson/t7.c
+@@ -0,9 +0,9 @@
+ 	{ /* sentinel */  }
+ };
+ #else
+-static const struct pll_params_table t7_hifi_pll_table[] = {
+-	PLL_PARAMS(163, 1), /* DCO = 3932.16M */
+-	{ /* sentinel */  }
++static const struct pll_mult_range t7_hifi_pll_m = {
++	.min = 125,
++	.max = 250,
+ };
+ #endif
+ 
+@@ -0,7 +0,11 @@
+ 			.shift   = 29,
+ 			.width   = 1,
+ 		},
++#ifdef CONFIG_ARM
+ 		.table = t7_hifi_pll_table,
++#else
++		.range = &t7_hifi_pll_m,
++#endif
+ 		.init_regs = t7_hifi_init_regs,
+ 		.init_count = ARRAY_SIZE(t7_hifi_init_regs),
+ 		.flags = CLK_MESON_PLL_ROUND_CLOSEST
+diff --git a/sound/soc/amlogic/auge/audio_utils.c b/sound/soc/amlogic/auge/audio_utils.c
+--- a/sound/soc/amlogic/auge/audio_utils.c
++++ b/sound/soc/amlogic/auge/audio_utils.c
+@@ -0,6 +0,7 @@
+ #include "vad.h"
+ #include "ddr_mngr.h"
+ 
++#include <linux/clk.h>
+ #include <linux/amlogic/iomap.h>
+ #include <linux/amlogic/media/sound/auge_utils.h>
+ #include <linux/amlogic/cpu_version.h>
+@@ -0,3 +0,40 @@
+ {
+ 	return force_mpll_clk;
+ }
++
++void aml_audio_clk_release(struct clk **held, struct clk *spare)
++{
++	if (*held && *held != spare)
++		clk_rate_exclusive_put(*held);
++	*held = NULL;
++}
++
++/*
++ * Set @rate on @pll, a source both rate families share. With @claim the
++ * output holds @pll at @rate until aml_audio_clk_release(), or runs from
++ * @spare while another output holds @pll at the other family. Later sets
++ * go to the source held. Without @spare this is a plain set. Returns the
++ * source to parent the output clock to.
++ */
++struct clk *aml_audio_clk_claim(struct clk **held, struct clk *pll,
++				struct clk *spare, unsigned long rate, bool claim)
++{
++	struct clk *cur = *held;
++
++	if (cur) {
++		if (!clk_set_rate(cur, rate) || !claim)
++			return cur;
++		aml_audio_clk_release(held, spare);
++	}
++	if (!claim || IS_ERR_OR_NULL(spare)) {
++		clk_set_rate(pll, rate);
++		return pll;
++	}
++	if (clk_set_rate_exclusive(pll, rate)) {
++		clk_set_rate(spare, rate);
++		*held = spare;
++	} else {
++		*held = pll;
++	}
++	return *held;
++}
+diff --git a/sound/soc/amlogic/auge/audio_utils.h b/sound/soc/amlogic/auge/audio_utils.h
+--- a/sound/soc/amlogic/auge/audio_utils.h
++++ b/sound/soc/amlogic/auge/audio_utils.h
+@@ -0,6 +0,8 @@
+ #include <sound/soc.h>
+ #include <sound/control.h>
+ 
++struct clk;
++
+ int snd_card_add_kcontrols(struct snd_soc_card *card);
+ void audio_locker_set(int enable);
+ int audio_locker_get(void);
+@@ -0,4 +0,7 @@
+ void cec_arc_enable(int src, bool enable);
+ void aml_audio_reset(int reg, int shift, bool use_vadtop);
+ bool is_force_mpll_clk(void);
++struct clk *aml_audio_clk_claim(struct clk **held, struct clk *pll,
++				struct clk *spare, unsigned long rate, bool claim);
++void aml_audio_clk_release(struct clk **held, struct clk *spare);
+ #endif
+diff --git a/sound/soc/amlogic/auge/spdif.c b/sound/soc/amlogic/auge/spdif.c
+--- a/sound/soc/amlogic/auge/spdif.c
++++ b/sound/soc/amlogic/auge/spdif.c
+@@ -0,7 +0,7 @@
+ static int aml_dai_set_spdif_sysclk(struct snd_soc_dai *cpu_dai,
+ 				int clk_id, unsigned int freq, int dir);
+ 
+-static void aml_set_spdifclk(struct aml_spdif *p_spdif, int freq, bool tune);
++static void aml_set_spdifclk(struct aml_spdif *p_spdif, int freq, bool tune, bool claim);
+ 
+ enum SPDIF_SRC {
+ 	SPDIFIN_PAD = 0,
+@@ -0,6 +0,10 @@
+ 	struct notifier_block clk_nb;
+ 	/* for 44100hz samplerate */
+ 	struct clk *clk_src_cd;
++	/* spare while another output holds the pll at the other rate family */
++	struct clk *clk_src_mpll;
++	/* source held for the playback stream */
++	struct clk *clk_held;
+ 	struct clk *fixed_clk;
+ 	struct clk *clk_spdifin;
+ 	struct clk *clk_spdifout;
+@@ -0,7 +0,7 @@
+ 				dev_warn(&pdev->dev, "Can't set spdif clk_spdifout parent\n");
+ 			clk_prepare_enable(p_spdif->clk_spdifin);
+ 		}
+-		aml_set_spdifclk(p_spdif, p_spdif->sysclk_freq, false);
++		aml_set_spdifclk(p_spdif, p_spdif->sysclk_freq, false, false);
+ 
+ 		if (!IS_ERR_OR_NULL(p_spdif->regulator_vcc5v))
+ 			ret = regulator_enable(p_spdif->regulator_vcc5v);
+@@ -0,7 +0,7 @@
+ 	value = value - 1000000;
+ 	sysclk += value;
+ 
+-	aml_set_spdifclk(p_spdif, sysclk, true);
++	aml_set_spdifclk(p_spdif, sysclk, true, false);
+ 
+ 	return 0;
+ }
+@@ -0,6 +0,22 @@
+ 
+ 	return 0;
+ }
++
++static void aml_spdif_set_sysclk(struct aml_spdif *p_spdif,
++				 unsigned int freq, bool claim)
++{
++	if (raw_is_4x_clk(p_spdif->codec_type)) {
++		pr_debug("set 4x audio clk for 958\n");
++		freq *= 4;
++	} else {
++		pr_debug("%s() set normal 512 fs /4 fs\n", __func__);
++	}
++
++	p_spdif->sysclk_freq = freq;
++	p_spdif->standard_sysclk = freq;
++	aml_set_spdifclk(p_spdif, freq, false, claim);
++}
++
+ static int aml_dai_spdif_hw_params(struct snd_pcm_substream *substream,
+ 				struct snd_pcm_hw_params *params,
+ 				struct snd_soc_dai *cpu_dai)
+@@ -0,8 +0,7 @@
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+ 		rate *= 128;
+ 
+-		snd_soc_dai_set_sysclk(cpu_dai,
+-				0, rate, SND_SOC_CLOCK_OUT);
++		aml_spdif_set_sysclk(p_spdif, rate, true);
+ 	} else {
+ 		clk_set_rate(p_spdif->clk_spdifin, 500000000);
+ 	}
+@@ -0,6 +0,9 @@
+ 	    p_spdif->samesource_sel != SHAREBUFFER_NONE)
+ 		spdif_sharebuffer_free(p_spdif, substream);
+ 
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
++		aml_audio_clk_release(&p_spdif->clk_held, p_spdif->clk_src_mpll);
++
+ 	return 0;
+ }
+ 
+@@ -0,9 +0,10 @@
+ }
+ 
+ /* 2 audio clk src each for 44.1k and 48k */
+-static void aml_set_spdifclk_2(struct aml_spdif *p_spdif, int freq, bool tune)
++static void aml_set_spdifclk_2(struct aml_spdif *p_spdif, int freq, bool tune, bool claim)
+ {
+ 	int ratio = 0;
++	struct clk *src;
+ 
+ 	if (freq == 0) {
+ 		dev_err(p_spdif->dev, "%s(), clk 0 err\n", __func__);
+@@ -0,9 +0,10 @@
+ 		if ((aml_return_chip_id() != CLK_NOTIFY_CHIP_ID)  &&
+ 			(aml_return_chip_id() != CLK_NOTIFY_CHIP_ID_T3X)) {
+ 			ratio = MPLL_HBR_FIXED_FREQ / p_spdif->standard_sysclk;
+-			clk_set_rate(p_spdif->sysclk, freq * ratio);
++			src = aml_audio_clk_claim(&p_spdif->clk_held, p_spdif->sysclk,
++						  p_spdif->clk_src_mpll, freq * ratio, claim);
+ 			spdif_set_audio_clk(p_spdif->id,
+-				p_spdif->sysclk,
++				src,
+ 				freq, 0, tune);
+ 		} else {
+ 			if (p_spdif->earc_use_48k) {
+@@ -0,9 +0,10 @@
+ 		if ((aml_return_chip_id() != CLK_NOTIFY_CHIP_ID) &&
+ 			(aml_return_chip_id() != CLK_NOTIFY_CHIP_ID_T3X)) {
+ 			ratio = MPLL_CD_FIXED_FREQ / p_spdif->standard_sysclk;
+-			clk_set_rate(p_spdif->clk_src_cd, freq * ratio);
++			src = aml_audio_clk_claim(&p_spdif->clk_held, p_spdif->clk_src_cd,
++						  p_spdif->clk_src_mpll, freq * ratio, claim);
+ 			spdif_set_audio_clk(p_spdif->id,
+-				p_spdif->clk_src_cd,
++				src,
+ 				freq, 0, tune);
+ 		} else {
+ 			if (p_spdif->earc_use_48k) {
+@@ -0,15 +0,15 @@
+ }
+ 
+ static void aml_set_spdifclk_normal(struct aml_spdif *p_spdif,
+-		int freq, bool tune)
++		int freq, bool tune, bool claim)
+ {
+ 	if (IS_ERR(p_spdif->clk_src_cd))
+ 		aml_set_spdifclk_1(p_spdif, freq, tune);
+ 	else
+-		aml_set_spdifclk_2(p_spdif, freq, tune);
++		aml_set_spdifclk_2(p_spdif, freq, tune, claim);
+ }
+ 
+-static void aml_set_spdifclk(struct aml_spdif *p_spdif, int freq, bool tune)
++static void aml_set_spdifclk(struct aml_spdif *p_spdif, int freq, bool tune, bool claim)
+ {
+ 	char *clk_name = (char *)__clk_get_name(p_spdif->sysclk);
+ 
+@@ -0,7 +0,7 @@
+ 	if (get_cpu_type() == MESON_CPU_MAJOR_ID_S4 && !strcmp(clk_name, "hifi_pll"))
+ 		aml_set_spdifclk_s4(p_spdif, freq, tune);
+ 	else
+-		aml_set_spdifclk_normal(p_spdif, freq, tune);
++		aml_set_spdifclk_normal(p_spdif, freq, tune, claim);
+ }
+ 
+ static int aml_dai_set_spdif_sysclk(struct snd_soc_dai *cpu_dai,
+@@ -0,16 +0,7 @@
+ {
+ 	struct aml_spdif *p_spdif = snd_soc_dai_get_drvdata(cpu_dai);
+ 
+-	if (raw_is_4x_clk(p_spdif->codec_type)) {
+-		pr_debug("set 4x audio clk for 958\n");
+-		freq *= 4;
+-	} else {
+-		pr_debug("%s() set normal 512 fs /4 fs\n", __func__);
+-	}
+-
+-	p_spdif->sysclk_freq = freq;
+-	p_spdif->standard_sysclk = freq;
+-	aml_set_spdifclk(p_spdif, freq, false);
++	aml_spdif_set_sysclk(p_spdif, freq, false);
+ 
+ 	return 0;
+ }
+@@ -0,6 +0,12 @@
+ 	if (IS_ERR(p_spdif->clk_src_cd))
+ 		dev_warn(&pdev->dev, "no clk_src_cd clock for 44k case\n");
+ 
++	p_spdif->clk_src_mpll = devm_clk_get_optional(&pdev->dev, "clk_src_mpll");
++	if (IS_ERR(p_spdif->clk_src_mpll)) {
++		dev_warn(&pdev->dev, "can't get clk_src_mpll, no spare clock\n");
++		p_spdif->clk_src_mpll = NULL;
++	}
++
+ 	ret = of_property_read_u32(pdev->dev.of_node,
+ 				"clk_tuning_enable",
+ 				&p_spdif->clk_tuning_enable);
+diff --git a/sound/soc/amlogic/auge/tdm.c b/sound/soc/amlogic/auge/tdm.c
+--- a/sound/soc/amlogic/auge/tdm.c
++++ b/sound/soc/amlogic/auge/tdm.c
+@@ -0,6 +0,11 @@
+ 	struct notifier_block clk_nb;
+ 	/* for 44100hz samplerate */
+ 	struct clk *clk_src_cd;
++	/* spare while another output holds the pll at the other rate family */
++	struct clk *clk_src_mpll;
++	/* source held for the streams set up in clk_streams */
++	struct clk *clk_held;
++	unsigned int clk_streams;
+ 	struct clk *clk_gate;
+ 	struct clk *mclk;
+ 	/* mclk mux out to pad */
+@@ -0,6 +0,8 @@
+ 	int ret = -1;
+ 	char *clk_name = (char *)__clk_get_name(p_tdm->clk);
+ 	int ratio = 0;
++	bool claim = p_tdm->clk_streams && !tune;
++	struct clk *src;
+ 
+ 	if (freq == 0) {
+ 		dev_err(p_tdm->dev, "%s(), clk 0 err\n", __func__);
+@@ -0,8 +0,9 @@
+ 		if ((aml_return_chip_id() != CLK_NOTIFY_CHIP_ID)  &&
+ 			(aml_return_chip_id() != CLK_NOTIFY_CHIP_ID_T3X)) {
+ 			ratio = MPLL_HBR_FIXED_FREQ / p_tdm->setting.standard_sysclk;
+-			clk_set_rate(p_tdm->clk, freq * ratio);
+-			ret = clk_set_parent(p_tdm->mclk, p_tdm->clk);
++			src = aml_audio_clk_claim(&p_tdm->clk_held, p_tdm->clk,
++						  p_tdm->clk_src_mpll, freq * ratio, claim);
++			ret = clk_set_parent(p_tdm->mclk, src);
+ 			if (ret)
+ 				dev_warn(p_tdm->dev, "can't set tdm parent clock\n");
+ 
+@@ -0,8 +0,9 @@
+ 		if ((aml_return_chip_id() != CLK_NOTIFY_CHIP_ID)  &&
+ 			(aml_return_chip_id() != CLK_NOTIFY_CHIP_ID_T3X)) {
+ 			ratio = MPLL_CD_FIXED_FREQ / p_tdm->setting.standard_sysclk;
+-			clk_set_rate(p_tdm->clk_src_cd, freq * ratio);
+-			ret = clk_set_parent(p_tdm->mclk, p_tdm->clk_src_cd);
++			src = aml_audio_clk_claim(&p_tdm->clk_held, p_tdm->clk_src_cd,
++						  p_tdm->clk_src_mpll, freq * ratio, claim);
++			ret = clk_set_parent(p_tdm->mclk, src);
+ 			if (ret)
+ 				dev_warn(p_tdm->dev, "can't set tdm parent cd clock\n");
+ 		} else {
+@@ -0,14 +0,8 @@
+ 			p_tdm->chipinfo->separate_tohdmitx_en);
+ 		if ((aml_return_chip_id() != CLK_NOTIFY_CHIP_ID)  &&
+ 			(aml_return_chip_id() != CLK_NOTIFY_CHIP_ID_T3X)) {
+-			struct clk *clk = p_tdm->clk;
+-
+-			if ((p_tdm->setting.standard_sysclk % 11025 == 0) &&
+-				!IS_ERR(p_tdm->clk_src_cd)) {
+-				clk = p_tdm->clk_src_cd;
+-			}
+ 			ops->set_clks(p_tdm->samesource_sel,
+-				clk,
++				clk_get_parent(p_tdm->mclk),
+ 				(p_tdm->last_mclk_freq >> 1), 1);
+ 		} else {
+ 			if (p_tdm->setting.standard_sysclk % 8000 == 0) {
+@@ -0,6 +0,9 @@
+ 	unsigned int rate = params_rate(params);
+ 	unsigned int channels = params_channels(params);
+ 
++	if (!p_tdm->symmetric_rate_disable || substream->stream != SNDRV_PCM_STREAM_CAPTURE)
++		p_tdm->clk_streams |= BIT(substream->stream);
++
+ 	return aml_tdm_hw_setting_init(p_tdm, rate, channels, substream->stream);
+ }
+ 
+@@ -0,6 +0,10 @@
+ 
+ 	aml_tdm_hw_setting_free(p_tdm, substream->stream);
+ 
++	p_tdm->clk_streams &= ~BIT(substream->stream);
++	if (!p_tdm->clk_streams)
++		aml_audio_clk_release(&p_tdm->clk_held, p_tdm->clk_src_mpll);
++
+ 	return 0;
+ }
+ 
+@@ -0,6 +0,12 @@
+ 	if (IS_ERR(p_tdm->clk_src_cd))
+ 		dev_err(&pdev->dev, "Can't get clk_src_cd\n");
+ 
++	p_tdm->clk_src_mpll = devm_clk_get_optional(&pdev->dev, "clk_src_mpll");
++	if (IS_ERR(p_tdm->clk_src_mpll)) {
++		dev_warn(&pdev->dev, "can't get clk_src_mpll, no spare clock\n");
++		p_tdm->clk_src_mpll = NULL;
++	}
++
+ 	if ((!IS_ERR(p_tdm->clk)) && ((aml_return_chip_id() == CLK_NOTIFY_CHIP_ID) ||
+ 		(aml_return_chip_id() == CLK_NOTIFY_CHIP_ID_T3X))) {
+ 		if (p_tdm->id == 0 || p_tdm->id == 1) {

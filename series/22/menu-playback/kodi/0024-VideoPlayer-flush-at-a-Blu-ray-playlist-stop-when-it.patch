@@ -30,8 +30,8 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/Vid
    if (m_updateStreamDetails)
    {
 @@ -0,6 +0,8 @@
-   m_CurrentAudioID3.hint.Clear();
    m_SpeedState.Reset(DVD_NOPTS_VALUE);
+   m_seekStart = false;
    m_navTail = false;
 +  m_navStop = false;
 +  m_navStopped = false;

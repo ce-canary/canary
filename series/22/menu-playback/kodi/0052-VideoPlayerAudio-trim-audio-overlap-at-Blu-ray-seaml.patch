@@ -72,8 +72,8 @@ diff --git a/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp b/xbmc/cores/VideoPlaye
  
    m_prevsynctype = -1;
 @@ -0,6 +0,8 @@
-         m_audioSink.Flush();
-       }
+         startCut = std::max(0.0, pts - (m_audioClock - delay));
+       m_audioSink.SetStartCut(startCut);
        m_audioClock = pts + delay;
 +      m_overlapLag = 0.0;
 +      m_overlapClock = false;

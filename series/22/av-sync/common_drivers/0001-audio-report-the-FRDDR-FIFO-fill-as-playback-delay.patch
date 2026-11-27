@@ -6,33 +6,23 @@ Subject: [PATCH] audio: report the FRDDR FIFO fill as playback delay
 The playback pointer reads the FRDDR fetch address, which runs up to
 one FIFO depth (1 KiB) ahead of what the serializer has sent. ALSA's
 delay leaves that queue out, so the HDMI output trails the reported
-delay by 0.25 to 4 ms per format and moves in 512-byte refill steps.
+delay by 3 to 5.5 ms for PCM 2.0, AC-3 and DTS.
 ---
- sound/soc/amlogic/auge/ddr_mngr.c | 29 +++++++++++++++++++++++++++++
+ sound/soc/amlogic/auge/ddr_mngr.c | 20 ++++++++++++++++++++
  sound/soc/amlogic/auge/ddr_mngr.h |  3 ++-
  sound/soc/amlogic/auge/earc.c     |  6 ++++--
  sound/soc/amlogic/auge/extn.c     | 11 +++++++----
  sound/soc/amlogic/auge/spdif.c    | 11 +++++++----
  sound/soc/amlogic/auge/tdm.c      | 11 +++++++----
- 6 files changed, 56 insertions(+), 15 deletions(-)
+ 6 files changed, 47 insertions(+), 15 deletions(-)
 
 diff --git a/sound/soc/amlogic/auge/ddr_mngr.c b/sound/soc/amlogic/auge/ddr_mngr.c
 --- a/sound/soc/amlogic/auge/ddr_mngr.c
 +++ b/sound/soc/amlogic/auge/ddr_mngr.c
-@@ -0,6 +0,35 @@
+@@ -0,6 +0,26 @@
  	return aml_audiobus_read(actrl, reg);
  }
  
-+static unsigned int aml_frddr_get_fifo_bytes(struct frddr *fr)
-+{
-+	struct aml_audio_controller *actrl = fr->actrl;
-+	unsigned int reg_base = fr->reg_base;
-+	unsigned int reg;
-+
-+	reg = calc_frddr_address(EE_AUDIO_FRDDR_A_STATUS1, reg_base);
-+	return ((aml_audiobus_read(actrl, reg) & FRDDR_FIFO_CNT) >> 8) * FIFO_BURST;
-+}
-+
 +/*
 + * A refill moves the position and the fifo fill together. The link is
 + * nonatomic, so a refill can land between the reads: read until the
@@ -40,12 +30,13 @@ diff --git a/sound/soc/amlogic/auge/ddr_mngr.c b/sound/soc/amlogic/auge/ddr_mngr
 + */
 +unsigned int aml_frddr_get_position_fill(struct frddr *fr, unsigned int *fill)
 +{
++	unsigned int reg = calc_frddr_address(EE_AUDIO_FRDDR_A_STATUS1, fr->reg_base);
 +	unsigned int pos, last;
 +
 +	pos = aml_frddr_get_position(fr);
 +	do {
 +		last = pos;
-+		*fill = aml_frddr_get_fifo_bytes(fr);
++		*fill = ((aml_audiobus_read(fr->actrl, reg) & FRDDR_FIFO_CNT) >> 8) * FIFO_BURST;
 +		pos = aml_frddr_get_position(fr);
 +	} while (pos != last);
 +

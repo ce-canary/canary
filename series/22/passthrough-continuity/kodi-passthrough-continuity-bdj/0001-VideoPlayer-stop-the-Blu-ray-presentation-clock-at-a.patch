@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 16 Nov 2026 10:31:31 -0600
+Subject: [PATCH] VideoPlayer: stop the Blu-ray presentation clock at a start
+ target
+
+A start target of stamped audio, armed as the clock starts from pause or
+by the engine on a running clock, holds the clock readers at one value
+until the audio decides and the running clock reaches the target. The
+presentation clock handed to libbluray still ran at playback speed from
+that value, so a disc program saw its time move while the picture stood.
+---
+ xbmc/cores/VideoPlayer/DVDClock.cpp    | 7 +++++++
+ xbmc/cores/VideoPlayer/DVDClock.h      | 2 ++
+ xbmc/cores/VideoPlayer/VideoPlayer.cpp | 2 +-
+ 3 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.cpp b/xbmc/cores/VideoPlayer/DVDClock.cpp
+--- a/xbmc/cores/VideoPlayer/DVDClock.cpp
++++ b/xbmc/cores/VideoPlayer/DVDClock.cpp
+@@ -0,6 +0,13 @@
+   return !m_startPending && epoch >= m_startArmEpoch && (epoch == m_clockEpoch || !target);
+ }
+ 
++bool CDVDClock::IsAtStartTarget()
++{
++  std::unique_lock lock(m_critSection);
++
++  return GetStartTargetLead(m_videoRefClock->GetTime()) > 0 || m_startPending;
++}
++
+ bool CDVDClock::ArmStartTarget()
+ {
+   std::unique_lock lock(m_critSection);
+diff --git a/xbmc/cores/VideoPlayer/DVDClock.h b/xbmc/cores/VideoPlayer/DVDClock.h
+--- a/xbmc/cores/VideoPlayer/DVDClock.h
++++ b/xbmc/cores/VideoPlayer/DVDClock.h
+@@ -0,6 +0,8 @@
+   //! Whether a picture release read at `epoch` may go out: none while a start target is pending,
+   //! and a read from before a start target was armed or moved the clock is stale
+   bool CanRelease(int epoch, bool target) const;
++  //! Whether the clock readers stand at a start target
++  bool IsAtStartTarget();
+   //! Arms a start target at the readers' value on a running clock at normal speed unless one is
+   //! pending; whether one is pending
+   bool ArmStartTarget();
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayer.cpp b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+@@ -0,7 +0,7 @@
+ 
+   const auto itemEnd = GetBlurayItemEnd();
+   double time = m_clock.GetClock();
+-  double speed = m_clock.IsPaused() ? 0.0 : m_clock.GetClockSpeed();
++  double speed = m_clock.IsPaused() || m_clock.IsAtStartTarget() ? 0.0 : m_clock.GetClockSpeed();
+   if (m_CurrentVideo.id >= 0)
+   {
+     const auto onScreen = m_renderManager.GetOnScreenClock();

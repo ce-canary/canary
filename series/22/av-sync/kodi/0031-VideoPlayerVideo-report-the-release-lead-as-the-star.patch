@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 31 Oct 2026 23:53:38 -0500
+Subject: [PATCH] VideoPlayerVideo: report the release lead as the start delay
+
+The video start delay is a 100 ms placeholder, and an interlaced start
+on Amlogic moved its start timestamp by a fixed 12 fields. Behind the
+vsync presenter a picture reaches the screen two vsyncs after release,
+plus a field when deinterlaced. Only the release decision knows that
+lead. The clock did not start with the first picture on screen.
+---
+ xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp   | 22 +--------
+ .../VideoRenderers/RenderManager.cpp          | 46 +++++++++++++------
+ .../VideoRenderers/RenderManager.h            |  8 ++++
+ 3 files changed, 42 insertions(+), 34 deletions(-)
+
+diff --git a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+--- a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
++++ b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+@@ -0,27 +0,9 @@
+       SStartMsg msg;
+       msg.player = VideoPlayer_VIDEO;
+       msg.cachetime = DVD_MSEC_TO_TIME(50); //! @todo implement
+-      msg.cachetotal = DVD_MSEC_TO_TIME(100); //! @todo implement
+-
+-      // Amlogic hardware deinterlace pipeline latency compensation.
+-      // When interlaced content is decoded by AML hardware, the VFM pipeline
+-      // includes a deinterlace module (di0) that buffers multiple fields before
+-      // producing output (buffer_keep_count=3, start_frame_drop=2, plus post-
+-      // processing). Kodi captures PTS via V4L2 DQBUF *before* the DI stage,
+-      // so the frame appears on screen ~240ms later than Kodi's sync expects.
+-      // Shift the video start timestamp forward to delay audio accordingly.
+-      double diCompensation = 0;
+-      if (m_processInfo.GetVideoInterlaced() && m_processInfo.IsVideoHwDecoder() &&
+-          CSysfsPath{"/sys/class/deinterlace/di0/frame_format"}.Exists())
+-      {
+-        constexpr int DI_PIPELINE_FIELDS = 12;
+-        diCompensation = DI_PIPELINE_FIELDS * DVD_TIME_BASE / m_fFrameRate;
+-        CLog::Log(LOGDEBUG, "CVideoPlayerVideo - DI pipeline latency compensation: "
+-                  "{:.0f}ms ({} fields at {:.1f}Hz)",
+-                  diCompensation / (DVD_TIME_BASE / 1000), DI_PIPELINE_FIELDS, m_fFrameRate);
+-      }
++      msg.cachetotal = DVD_MSEC_TO_TIME(m_renderManager.GetReleaseLead());
+ 
+-      msg.timestamp = hasTimestamp ? (pts + m_renderManager.GetDelay() * 1000 + diCompensation) : DVD_NOPTS_VALUE;
++      msg.timestamp = hasTimestamp ? (pts + m_renderManager.GetDelay() * 1000) : DVD_NOPTS_VALUE;
+       m_messageParent.Put(std::make_shared<CDVDMsgType<SStartMsg>>(CDVDMsg::PLAYER_STARTED, msg));
+     }
+ 
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+@@ -0,6 +0,12 @@
+ 
+ using namespace std::chrono_literals;
+ 
++namespace
++{
++// the video start delay the player assumes for a renderer that cannot report its release lead
++constexpr double UNKNOWN_RELEASE_LEAD_MS = 100.0;
++} // namespace
++
+ class CRenderManager::CPresentThread : public CThread
+ {
+ public:
+@@ -0,20 +0,7 @@
+       1.0 / static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()) *
+       DVD_TIME_BASE;
+ 
+-  const int presentLatency = m_pRenderer->GetPresentLatency();
+-  const double displayLatency =
+-      presentLatency >= 0
+-          ? presentLatency * 1000.0 /
+-                    static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()) +
+-                m_pRenderer->GetPresentHold()
+-          : static_cast<double>(
+-                CServiceBroker::GetWinSystem()->GetGfxContext().GetDisplayLatency());
+-
+-  m_displayLatency = DVD_MSEC_TO_TIME(
+-      m_latencyTweak +
+-      displayLatency -
+-      m_videoDelay -
+-      static_cast<double>(CServiceBroker::GetWinSystem()->GetFrameLatencyAdjustment()));
++  m_displayLatency = DVD_MSEC_TO_TIME(CalcReleaseLead() - m_videoDelay);
+ 
+   // While the clock is paused, frameOnScreen does not advance, so adding the display
+   // latency would pick a frame ahead of the one actually shown. That only holds for
+@@ -0,6 +0,31 @@
+   }
+ }
+ 
++double CRenderManager::CalcReleaseLead()
++{
++  const int presentLatency = m_pRenderer->GetPresentLatency();
++  const double displayLatency =
++      presentLatency >= 0
++          ? presentLatency * 1000.0 /
++                    static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()) +
++                m_pRenderer->GetPresentHold()
++          : static_cast<double>(
++                CServiceBroker::GetWinSystem()->GetGfxContext().GetDisplayLatency());
++
++  return m_latencyTweak + displayLatency -
++         static_cast<double>(CServiceBroker::GetWinSystem()->GetFrameLatencyAdjustment());
++}
++
++double CRenderManager::GetReleaseLead()
++{
++  std::unique_lock lock(m_statelock);
++
++  if (m_renderState != STATE_CONFIGURED || !m_pRenderer || m_pRenderer->GetPresentLatency() < 0)
++    return UNKNOWN_RELEASE_LEAD_MS;
++
++  return CalcReleaseLead();
++}
++
+ void CRenderManager::DiscardBuffer()
+ {
+   std::unique_lock lock2(m_presentlock);
+diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+--- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
++++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h
+@@ -0,6 +0,12 @@
+    */
+   double GetDisplayLatency() const { return m_displayLatency; }
+ 
++  /**
++   * The time in ms from the release of a frame to its scan-out, without the video delay;
++   * 100 until a renderer is configured or when it does not know its present latency
++   */
++  double GetReleaseLead();
++
+   void SetVideoSettings(const CVideoSettings& settings);
+ 
+ protected:
+@@ -0,6 +0,8 @@
+   void ServiceVideoCaptures();
+ 
+   void UpdateLatencyTweak();
++  //! Release lead in ms without the video delay; needs m_pRenderer
++  double CalcReleaseLead();
+   void CheckEnableClockSync();
+ 
+   //! The vsync thread picks and presents; the render loop draws the frame it last presented

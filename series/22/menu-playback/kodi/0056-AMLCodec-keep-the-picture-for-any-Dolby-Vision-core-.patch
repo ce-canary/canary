@@ -276,25 +276,25 @@ diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp b/xbmc/cores/Vi
    holdOwner = 0;
    pictureTaken = false;
 @@ -0,6 +0,19 @@
-   }
-   else if (!drop && m_handback)
-     HandBack();
+     }
+     else if (!front.drop && m_handback)
+       HandBack();
 +
-+  // a close clears the flag under holdMutex, so no lowering follows the open of a next decoder
-+  if (ret >= 0 && !drop && m_lowerLayers)
-+  {
-+    std::lock_guard<std::mutex> lock(holdMutex);
-+    if (m_lowerLayers.exchange(false))
++    // a close clears the flag under holdMutex, so no lowering follows the open of a next decoder
++    if (ret >= 0 && !front.drop && m_lowerLayers)
 +    {
-+      auto* AmlDisplay =
-+          static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
-+      AmlDisplay->aml_set_drmProperty("dv_debug", DRM_MODE_OBJECT_CRTC, "enable_fel 0");
-+      AmlDisplay->aml_set_drmProperty("dv_debug", DRM_MODE_OBJECT_CRTC, "enable_mel 0");
++      std::lock_guard<std::mutex> holdLock(holdMutex);
++      if (m_lowerLayers.exchange(false))
++      {
++        auto* AmlDisplay =
++            static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay();
++        AmlDisplay->aml_set_drmProperty("dv_debug", DRM_MODE_OBJECT_CRTC, "enable_fel 0");
++        AmlDisplay->aml_set_drmProperty("dv_debug", DRM_MODE_OBJECT_CRTC, "enable_mel 0");
++      }
 +    }
-+  }
+   }
    return ret;
  }
- 
 diff --git a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 --- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
 +++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h

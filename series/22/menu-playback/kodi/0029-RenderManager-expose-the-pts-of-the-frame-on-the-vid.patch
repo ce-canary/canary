@@ -6,67 +6,48 @@ Subject: [PATCH] RenderManager: expose the pts of the frame on the video plane
 Kodi's clock runs one display latency behind the frames the renderer
 releases. Callers that need the time on screen had only the clock.
 ---
- .../VideoRenderers/RenderManager.cpp          | 26 +++++++++++++++++++
- .../VideoRenderers/RenderManager.h            |  9 +++++++
- 2 files changed, 35 insertions(+)
+ .../VideoPlayer/VideoRenderers/RenderManager.cpp   | 14 ++++++++++++++
+ .../VideoPlayer/VideoRenderers/RenderManager.h     |  8 ++++++++
+ 2 files changed, 22 insertions(+)
 
 diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
 --- a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
 +++ b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
-@@ -0,6 +0,8 @@
+@@ -0,6 +0,7 @@
      m_presentsourcePast = -1;
      m_guiPresentSource = -1;
      m_planeSource = -1;
 +    m_displayedPts = DVD_NOPTS_VALUE;
-+    m_offTimelineSource = -1;
+     m_offTimelineSource = -1;
      for (int i = 0; i < m_QueueSize; i++)
        m_free.push_back(i);
- 
-@@ -0,6 +0,7 @@
-   CheckEnableClockSync();
- 
-   std::unique_lock lock2(m_presentlock);
-+  const int planeSource = m_planeSource;
-   // by vsync RDMA a frame queued now goes live a vsync after a GUI flip made now
-   m_planeSource = m_presentsource;
-   PrepareNextStep();
-@@ -0,6 +0,18 @@
+@@ -0,6 +0,10 @@
      m_presentstep = m_queued.empty() ? PRESENT_IDLE : PRESENT_READY;
    }
  
-+  // a discarded frame stays on the plane, off the new timeline, until a new one replaces it
 +  if (m_planeSource != planeSource)
-+  {
-+    if (m_planeSource >= 0 && m_planeSource != m_offTimelineSource)
-+    {
-+      m_displayedPts = m_Queue[m_planeSource].pts;
-+      m_offTimelineSource = -1;
-+    }
-+    else
-+      m_displayedPts = DVD_NOPTS_VALUE;
-+  }
-+
-   // the render loop still draws the overlays of its frame; WaitForBuffer
-   // releases those of a free slot before it is reused
-   for (auto it = m_discard.begin(); it != m_discard.end();)
-@@ -0,6 +0,8 @@
++    m_displayedPts = m_planeSource >= 0 && m_planeSource != m_offTimelineSource
++                         ? m_Queue[m_planeSource].pts
++                         : DVD_NOPTS_VALUE;
+   if (m_planeSource != planeSource && m_planeSource >= 0 && m_planeSource != m_offTimelineSource)
+     m_offTimelineSource = -1;
+ 
+@@ -0,6 +0,7 @@
          m_presentsourcePast = -1;
          m_guiPresentSource = -1;
          m_planeSource = -1;
 +        m_displayedPts = DVD_NOPTS_VALUE;
-+        m_offTimelineSource = -1;
+         m_offTimelineSource = -1;
          m_presentstep = PRESENT_IDLE;
          for (int i = 0; i < m_QueueSize; i++)
-           m_free.push_back(i);
-@@ -0,6 +0,8 @@
-     m_discard.push_back(m_queued.front());
+@@ -0,6 +0,7 @@
      m_queued.pop_front();
    }
+   PublishQueued();
 +  m_displayedPts = DVD_NOPTS_VALUE;
-+  m_offTimelineSource = m_presentsource;
+   m_offTimelineSource = m_presentsource;
  
    if(m_presentstep == PRESENT_READY)
-     m_presentstep = PRESENT_IDLE;
 @@ -0,6 +0,13 @@
    return true;
  }
@@ -97,11 +78,12 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.h b/xbmc/cores/
    /**
     * Video player call this on flush in order to discard any queued frames
     */
-@@ -0,4 +0,7 @@
+@@ -0,6 +0,8 @@
    //! Vsync thread, under m_presentlock: the frame on the video plane when a GUI flip made now
    //! latches
    int m_planeSource{-1};
 +  //! Vsync thread, under m_presentlock: the pts of m_planeSource once it is a new frame
 +  double m_displayedPts{DVD_NOPTS_VALUE};
-+  int m_offTimelineSource{-1};
- };
+   //! Under m_presentlock: a discarded frame left on the plane until a new one replaces it
+   int m_offTimelineSource{-1};
+   //! Under m_presentlock: the clock, when it was read and its epoch of the last release

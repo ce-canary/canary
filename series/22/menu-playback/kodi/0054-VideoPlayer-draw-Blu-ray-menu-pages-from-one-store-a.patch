@@ -230,7 +230,7 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp b/xbmc/co
  
    // during HDR composite the m_isHDROverlay overlays render via
 @@ -0,6 +0,7 @@
-         Render(o.get());
+         Render(o.get(), it->overlay_dvd->IsOverlayType(DVDOVERLAY_TYPE_IMAGE) ? it->depth : 0);
      }
    }
 +  RenderMenu(false);
@@ -246,7 +246,7 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp b/xbmc/co
  
    const RenderStereoView stereoView =
 @@ -0,12 +0,98 @@
-       Render(o.get());
+       Render(o.get(), it->overlay_dvd->IsOverlayType(DVDOVERLAY_TYPE_IMAGE) ? it->depth : 0);
      }
    }
 +  RenderMenu(true);
@@ -341,7 +341,7 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.cpp b/xbmc/co
 +  }
 +}
 +
- void CRenderer::Render(COverlay* o)
+ void CRenderer::Render(COverlay* o, int subtitleDepth)
  {
    SRenderState state;
 @@ -0,6 +0,9 @@
@@ -383,7 +383,7 @@ diff --git a/xbmc/cores/VideoPlayer/VideoRenderers/OverlayRenderer.h b/xbmc/core
 @@ -0,6 +0,8 @@
      };
  
-     void Render(COverlay* o);
+     void Render(COverlay* o, int subtitleDepth = 0);
 +    void RenderMenu(bool hdrOverlays);
 +    void SetMenuAlone(bool alone);
      std::shared_ptr<COverlay> Convert(SElement& e);

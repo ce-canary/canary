@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 15 Nov 2026 17:16:03 -0600
+Subject: [PATCH] ActiveAE: keep a handed start error until the player reads it
+
+A late start handed to the player's clock is reported as the stream's
+sync error. One second later the engine dropped it, read or not, and a
+player that added no audio in that second lost the hand-off.
+---
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.cpp    | 16 +++++++++++++++-
+ .../AudioEngine/Engines/ActiveAE/ActiveAE.h      |  5 ++++-
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.cpp
+@@ -0,11 +0,23 @@
+       info.state = str.m_syncState;
+       info.lateStartHandedOver = str.m_lateStartHandedOver;
+       info.rr = str.m_resampleRatio;
++      str.m_errorTimeTaken = str.m_errorTime;
+       return;
+     }
+   }
+ }
+ 
++bool CEngineStats::IsSyncErrorTaken(CActiveAEStream* stream)
++{
++  std::unique_lock lock(m_lock);
++  for (const auto& str : m_streamStats)
++  {
++    if (str.m_streamId == stream->m_id)
++      return str.m_errorTimeTaken == str.m_errorTime;
++  }
++  return true;
++}
++
+ float CEngineStats::GetCacheTime(CActiveAEStream *stream)
+ {
+   std::unique_lock lock(m_lock);
+@@ -0,7 +0,9 @@
+   std::chrono::milliseconds timeout = (stream->m_syncState != CAESyncInfo::AESyncState::SYNC_INSYNC)
+                                           ? 100ms
+                                           : stream->GetErrorInterval();
+-  bool newerror = stream->m_syncError.Get(error, timeout);
++  // a start error handed to the player stays reported until the player reads it
++  bool newerror = (!stream->m_lateStartHandedOver || m_stats.IsSyncErrorTaken(stream)) &&
++                  stream->m_syncError.Get(error, timeout);
+ 
+   if (newerror && stream->m_lateStartHandedOver)
+   {
+diff --git a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
+--- a/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
++++ b/xbmc/cores/AudioEngine/Engines/ActiveAE/ActiveAE.h
+@@ -0,6 +0,7 @@
+   bool TakeSyncPaused(CActiveAEStream* stream);
+   void GetDelay(AEDelayStatus& status, CActiveAEStream *stream);
+   void GetSyncInfo(CAESyncInfo& info, CActiveAEStream *stream);
++  bool IsSyncErrorTaken(CActiveAEStream* stream);
+   float GetCacheTime(CActiveAEStream *stream);
+   float GetCacheTotal();
+   float GetMaxDelay() const;
+@@ -0,7 +0,9 @@
+     double m_bufferedTime;
+     double m_resampleRatio;
+     double m_syncError;
+-    unsigned int m_errorTime;
++    unsigned int m_errorTime{0};
++    // the error time the player last read
++    unsigned int m_errorTimeTaken{0};
+     CAESyncInfo::AESyncState m_syncState;
+     bool m_lateStartHandedOver{false};
+     // paused by the player since the engine last restarted the stream's sync
